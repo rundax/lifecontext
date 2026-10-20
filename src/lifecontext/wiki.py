@@ -425,8 +425,18 @@ class WikiRevisionStore:
             raise WikiError("wiki identity mismatch")
         return patch
 
-    def retire(self, page_id: str, revision: int, keep_sha256: str) -> None:
-        """Remove every stored artifact of the revision except the one with this checksum."""
+    def missing(self, page_id: str, revision: int, sha256: str) -> bool:
+        """The revision's artifact file is not there; any other failure to look raises."""
+        _id(page_id)
+        _integer(revision)
+        try:
+            (self.paths.lifeweave_home / "wiki_revisions" / page_id / f"r{revision}-{sha256}.json").lstat()
+        except FileNotFoundError:
+            return True
+        return False
+
+    def retire(self, page_id: str, revision: int, keep_sha256: str | None) -> None:
+        """Remove every stored artifact of the revision except the one with this checksum (none: all)."""
         _id(page_id)
         _integer(revision)
         with self._directories(("wiki_revisions", page_id), create=False) as fds:
@@ -825,15 +835,22 @@ class WikiService:
         review with ``ERASED``, and its own page's title with the withdrawn one. A revision gets a
         new artifact under its new checksum and loses the old file; nothing else changes. Safe to
         repeat, so an interrupted delete finishes it."""
+        log = logging.getLogger(__name__)
         for page_id in self.catalog.list_wiki_pages_citing(source_id, any_revision=True):
             for row in self.catalog.list_wiki_revisions(page_id):
                 if not any(dependency["source_id"] == source_id for dependency in row["dependencies"]):
                     continue
+                if self.store.missing(page_id, row["revision"], row["artifact_sha256"]):
+                    log.warning("Wiki revision %s r%s has no file; nothing to erase", page_id, row["revision"])
+                    continue
                 try:
                     patch = self.store.read(page_id, row["revision"], row["artifact_sha256"])
-                except (ValueError, OSError):
-                    # Nothing can be read, so nothing can be erased; it must not hold the delete back.
-                    logging.getLogger(__name__).warning("Wiki revision %s r%s unreadable; not erased", page_id, row["revision"])
+                except (WikiError, UnicodeError):
+                    # Read, but not a revision (its checksum or content is wrong): it cannot be
+                    # cleaned, and must not keep the text, so it goes. Any other failure is left to
+                    # propagate: the delete stays unfinished for a retry.
+                    log.warning("Wiki revision %s r%s is corrupt; its file is removed", page_id, row["revision"])
+                    self.store.retire(page_id, row["revision"], None)
                     continue
                 erased, checksum = erase_patch(patch, source_id), row["artifact_sha256"]
                 if erased != patch:

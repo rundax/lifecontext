@@ -13,6 +13,7 @@ from wiki_fake_compiler import FakeCompiler
 
 from lifecontext.application import ApplicationError, JournalApplication
 from lifecontext.brief import render_brief
+from lifecontext.custody import CustodyError
 from lifecontext.paths import LifeContextPaths
 from lifecontext.vault import ManagedVault, VaultError
 from lifecontext.wiki import (
@@ -20,6 +21,7 @@ from lifecontext.wiki import (
     USER_END,
     USER_START,
     WikiPatch,
+    WikiRevisionStore,
     WikiService,
     erase_patch,
     source_page_id,
@@ -355,13 +357,52 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         self.assertEqual(len(files), 2)
         files[0].unlink()
         files[1].write_text("not a revision")
-        with self.assertLogs("lifecontext.wiki", "WARNING"):
+        with self.assertLogs("lifecontext.wiki", "WARNING") as logs:
             self.curate("delete", deleted)
+        self.assertTrue(any("has no file" in line for line in logs.output), logs.output)
+        self.assertTrue(any("is corrupt" in line for line in logs.output), logs.output)
+        # The corrupt file is removed rather than left holding text; the missing one has nothing to remove.
+        self.assertEqual(sorted(path.name for path in directory.glob("r*.json")), sorted(
+            f"r{revision}-{row['artifact_sha256']}.json" for (page, revision), row in self.revision_rows().items()
+            if page == "topic_coffee" and revision > 2))
         self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"completed"})
         self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(deleted))["title"], "Withdrawn page")
         # The files that cannot be read stay as they are; every other stored revision is erased.
         held = self.home_files_holding("Coffee is a stimulant.", "persuasive")
         self.assertEqual([path for path in held if "wiki_revisions" in path and "topic_coffee" not in path], [])
+
+    def test_a_read_failure_that_is_not_a_missing_or_corrupt_file_leaves_the_delete_for_the_retry(self):
+        deleted = self.import_pair()
+        with patch.object(WikiRevisionStore, "read", side_effect=CustodyError("unsafe custody file")), \
+                self.assertRaises(Exception):  # noqa: B017
+            self.curate("delete", deleted)
+        self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"running"})
+        self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(deleted))["title"], "Secret notes")
+        asyncio.run(self.app._delete_confirmed_source(deleted, self.app.catalog.list_source_manifests(deleted)))
+        self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"completed"})
+        # The vault pages the failed run could not write are repaired by a reconcile.
+        self.assertEqual(self.app.reconcile_projections(limit=4096)["failed"], 0)
+        self.assertEqual(self.home_files_holding("Coffee is a stimulant.", "persuasive"), [])
+
+    def test_a_withdrawn_pages_hand_edited_block_is_a_conflict_but_a_stale_title_is_not(self):
+        deleted = self.import_pair()
+        self.curate("delete", deleted)
+        page_id = source_page_id(deleted)
+        path = self.journal / "wiki" / "Withdrawn page.md"
+        text = path.read_text()
+        self.assertIn("title: Withdrawn page\n", text)
+        # A file still naming the document, as when the projection after the delete was deferred.
+        path.write_text(text.replace("title: Withdrawn page\n", "title: Secret notes\n"))
+        self.assertEqual(self.app.document_projections.project_wiki(page_id)["state"], "completed")
+        self.assertEqual(path.read_text(), text)
+        # An edit of the generated block is still a manual edit.
+        edited = text.replace("Withdrawn: this page's sources were forgotten.", "Withdrawn: edited by hand.")
+        self.assertNotEqual(edited, text)
+        path.write_text(edited)
+        self.assertEqual(self.app.document_projections.project_wiki(page_id), {"state": "conflict", "error": "managed_edit"})
+        self.assertEqual(path.read_text(), edited)
+        self.assertEqual([review["code"] for review in self.app.catalog.list_wiki_reviews(page_id)
+                          if review["code"] == "manual_edit"], ["manual_edit"])
 
     def test_a_failed_erasure_leaves_the_delete_unfinished_for_the_retry(self):
         deleted = self.import_pair()

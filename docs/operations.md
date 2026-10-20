@@ -918,8 +918,10 @@ and in its artifacts (its page ID stays). Nothing else is touched, and what the
 vault shows does not change; the document's title and file name stay in the
 catalog's document record and in operation receipts. The step runs before the
 delete counts as complete, so a failure leaves `custody_delete` running for the
-retry, and it can be repeated safely. A stored revision file that is missing or
-cannot be read is logged and skipped, so it never holds a delete back. The step
+retry, and it can be repeated safely. A stored revision file that is missing is
+logged and skipped, and one that fails its checksum or is not a revision is
+logged and removed, so neither holds a delete back; any other failure to read
+one leaves the delete unfinished for the retry. The step
 ends by giving the document's own page the withdrawn title; `reconcile` (the
 daily `maintain` runs it) does the step again for every deleted document whose
 page has not that title yet or whose extracted text is still there, which also

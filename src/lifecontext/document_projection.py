@@ -652,7 +652,8 @@ class DocumentProjectionService:
             text = existing.decode("utf-8")
             # A withdrawn page is rewritten under the neutral title whatever its file names now;
             # a delete may have taken the catalog's title before the file was written again.
-            titles = (page["title"], title, WITHDRAWN_TITLE, *([self._file_title(text)] if withdrawn else []))
+            file_title = self._file_title(text) if withdrawn else None
+            titles = (page["title"], title, WITHDRAWN_TITLE, *([file_title] if file_title else []))
             base = self._managed_base(text, page_id, dict.fromkeys(titles), old["revision"])
             proof = self.catalog.get_artifact_publication(self._publication_id("wiki", page_id), old["revision"])
             if base is None and existing_path == f"wiki/{page_id}.md" and (
