@@ -1,0 +1,11 @@
+# Send only what the image needs; never the dev home, vault, plans or secrets.
+*
+!pyproject.toml
+!LICENSE
+!NOTICE
+!requirements/
+!src/
+!docker/
+**/__pycache__
+**/*.pyc
+**/.DS_Store

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Hantok/lifecontext/blob/main/SECURITY.md
+    about: Please report security problems privately as described in SECURITY.md, not in a public issue.
+  - name: Commercial license
+    url: https://github.com/Hantok/lifecontext/blob/main/COMMERCIAL-LICENSE.md
+    about: An organization deploying LifeContext for its staff or others, or offering it as a hosted, managed or embedded service, needs a commercial license.

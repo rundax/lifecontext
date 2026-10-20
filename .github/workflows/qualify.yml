@@ -1,0 +1,825 @@
+name: Qualify install paths
+
+# Manual only. Installs LifeContext with install.sh and with the Docker image on
+# clean runners and runs a small synthetic scenario against the CI model
+# endpoint (a shared gateway): one run at a time, never cancelled. Evidence
+# (versions, timings, sizes, check results) is uploaded per job after a scan
+# for the endpoint and the key. With release_tag, it instead installs from that
+# draft release's assets and checks its signatures (a release rehearsal).
+on:
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Also qualify install.sh on macos-14 (arm64); macOS minutes cost ten times more
+        type: boolean
+        default: false
+      release_tag:
+        description: Instead, rehearse a release whose draft and image exist (for example v1.2.0rc1)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  Q: python3 .github/scripts/qualify.py
+
+jobs:
+  build:
+    if: github.repository == 'Hantok/lifecontext' && inputs.release_tag == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Build the wheel and the synthetic fixtures
+        run: |
+          python -m pip install build==1.6.1 pillow==12.3.0
+          python -m build --wheel --outdir dist .
+          python .github/scripts/qualify.py fixtures --out fixtures
+          ls -l dist fixtures
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualify-inputs
+          path: |
+            dist/
+            fixtures/
+          if-no-files-found: error
+          retention-days: 7
+
+  native:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/native.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qualify-inputs
+          path: inputs
+      - name: Start the evidence file
+        run: |
+          $Q init --job native
+          $Q metric sizes_bytes wheel "$(wc -c < inputs/dist/lifecontext-*.whl | tr -d ' ')"
+          echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
+      - name: Keep the CI model key in a private file
+        env:
+          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+        run: |
+          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private"
+          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
+          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+      - name: Start a systemd user manager for the runner account
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          if XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user show-environment > /dev/null 2>&1; then
+            $Q record systemd_user_session pass --detail "lingering user manager for uid $uid"
+          else
+            $Q record systemd_user_session skip --detail "no user manager; the scenario runs lifecontext serve instead"
+          fi
+          # Stand in for an installed Claude Code, so install.sh links the skill.
+          mkdir -p "$HOME/.claude"
+      - name: Run install.sh with the built wheel, unattended
+        env:
+          LIFECONTEXT_PROVIDER: openai_compatible
+          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
+          start=$SECONDS
+          status=0
+          sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt \
+            --non-interactive || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds install_sh_first_run "$seconds"
+          data="$HOME/.local/share/lifecontext"
+          for name in venv python cache; do
+            $Q metric sizes_bytes "install_$name" "$(( $(du -sk "$data/$name" | cut -f1) * 1024 ))"
+          done
+          # uv hard-links the venv to its cache: the total counts shared files once.
+          $Q metric sizes_bytes install_total "$(( $(du -sk "$data" | cut -f1) * 1024 ))"
+          $Q metric sizes_bytes huggingface_cache "$(( $(du -sk "$HOME/.cache/huggingface" 2>/dev/null | cut -f1 || echo 0) * 1024 ))"
+          $Q metric versions uv "$("$data/bin/uv" --version)"
+          $Q metric versions python_venv "$("$data/venv/bin/python" --version)"
+          $Q metric versions torch "$("$data/venv/bin/python" -c 'import torch; print(torch.__version__)')"
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record install_sh "$result" --detail "exit $status, link $(readlink "$LC")" --seconds "$seconds"
+      - name: Check that the API runs as a user service
+        run: |
+          if systemctl --user is-active --quiet lifecontext.service; then
+            echo "SERVICE_MODE=systemd" >> "$GITHUB_ENV"
+            $Q record service_running pass --detail "lifecontext.service $(systemctl --user is-active lifecontext.service), timer $(systemctl --user is-enabled lifecontext-maintain.timer)"
+          else
+            echo "SERVICE_MODE=foreground" >> "$GITHUB_ENV"
+            $Q record service_running skip --detail "no systemd user service on this runner; lifecontext serve runs in the background instead"
+            nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/serve.pid"
+          fi
+          $Q wait-http service_ready http://127.0.0.1:8765/healthz --timeout 900
+      - name: Doctor
+        continue-on-error: true
+        run: $Q doctor --cli "$LC" --label installed --versions --require-ocr
+      - name: Capture a journal entry and import English, Ukrainian and image documents
+        continue-on-error: true
+        run: $Q capture --cli "$LC" --fixtures inputs/fixtures --state "$RUNNER_TEMP/state.json"
+      - name: Recall, evidence, compiled wiki, lint and brief
+        continue-on-error: true
+        run: $Q verify --cli "$LC" --state "$RUNNER_TEMP/state.json" --label installed --wiki --ukrainian --ocr
+      - name: Skills
+        continue-on-error: true
+        run: |
+          "$LC" skills install --json > /dev/null
+          status=0
+          report=$("$LC" skills check --json) || status=$?
+          linked=$(printf '%s' "$report" | jq -r '[.agents[] | select(.state == "linked") | .agent] | join(",")')
+          [ "$status" -eq 0 ] && [ "$linked" = claude ] && result=pass || result=fail
+          $Q record skills_install_check "$result" --detail "skills check exit $status, linked: $linked"
+      - name: MCP server lists its tools over stdio
+        continue-on-error: true
+        run: $Q mcp --cli "$LC"
+      - name: Back up; backup --stop-service stops and restarts the service
+        continue-on-error: true
+        run: |
+          $Q fingerprint --cli "$LC" --out "$RUNNER_TEMP/private/installed.json" \
+            --file "$HOME/.lifeweave/config.yaml" --file "$HOME/.lifeweave/.env"
+          $Q fingerprint --cli "$LC" --out "$RUNNER_TEMP/private/installed-catalog.json"
+          if [ "$SERVICE_MODE" = foreground ]; then
+            kill "$(cat "$RUNNER_TEMP/serve.pid")" && sleep 5
+          fi
+          start=$SECONDS
+          status=0
+          "$LC" backup --stop-service --json > "$RUNNER_TEMP/private/backup.json" || status=$?
+          seconds=$((SECONDS - start))
+          if [ "$status" -eq 0 ]; then
+            archive=$(jq -r .archive "$RUNNER_TEMP/private/backup.json")
+            echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+            $Q metric sizes_bytes backup_archive "$(wc -c < "$archive" | tr -d ' ')"
+            $Q record backup pass --seconds "$seconds" --detail "$(jq -r '"\(.files) files, \(.bytes) bytes; stopped \(.stopped // [] | tostring), restarted \(.restarted // [] | tostring), warnings \(.warnings // [] | tostring)"' "$RUNNER_TEMP/private/backup.json")"
+          else
+            $Q record backup fail --seconds "$seconds" --detail "exit $status, error $(jq -r .error "$RUNNER_TEMP/private/backup.json")"
+            exit 1
+          fi
+          if [ "$SERVICE_MODE" = systemd ]; then
+            status=0
+            $Q wait-http service_ready_after_backup http://127.0.0.1:8765/healthz --timeout 600 || status=$?
+            # The restored copy below uses the same Hindsight profile port, so stop this one again.
+            systemctl --user stop lifecontext.service
+            exit "$status"
+          fi
+      - name: Restore into a fresh HOME and recall from it
+        continue-on-error: true
+        run: |
+          failed=0
+          fresh="$RUNNER_TEMP/restored-home"
+          mkdir -m 700 "$fresh"
+          venv="$HOME/.local/share/lifecontext/venv"
+          venv_lc="$venv/bin/lifecontext"
+          models="$HOME/.cache/huggingface"
+          status=0
+          HOME="$fresh" "$venv_lc" restore "$ARCHIVE" --json > "$RUNNER_TEMP/private/restore.json" || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record restore_fresh_home "$result" --detail "exit $status, $(jq -r '.error // "\(.files) files"' "$RUNNER_TEMP/private/restore.json")" || failed=1
+          # The key is never in a backup.
+          state=$(HOME="$fresh" "$venv_lc" init --non-interactive --api-key-stdin --json \
+            < "$RUNNER_TEMP/private/llm-api-key" | jq -r '.credentials_state // .error')
+          echo "Key in the restored HOME: $state"
+          HOME="$fresh" HF_HOME="$models" nohup "$venv_lc" serve --port 8766 \
+            > "$RUNNER_TEMP/restored-serve.log" 2>&1 &
+          restored=$!
+          $Q wait-http restored_service_ready http://127.0.0.1:8766/healthz --timeout 900 || failed=1
+          cli="env HOME=$fresh $venv_lc --port 8766"
+          $Q verify --cli "$cli" --state "$RUNNER_TEMP/state.json" --label restored || failed=1
+          $Q fingerprint --cli "$cli" --out "$RUNNER_TEMP/private/restored-catalog.json"
+          $Q compare restore_keeps_catalog "$RUNNER_TEMP/private/installed-catalog.json" \
+            "$RUNNER_TEMP/private/restored-catalog.json" || failed=1
+          kill "$restored" || true
+          sleep 5
+          HOME="$fresh" "$venv_lc" hindsight stop --json || true
+          exit "$failed"
+      - name: Run install.sh again; it keeps settings, key and data
+        continue-on-error: true
+        env:
+          LIFECONTEXT_PROVIDER: openai_compatible
+          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+        run: |
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
+          if [ "$SERVICE_MODE" = foreground ]; then
+            nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/serve.pid"
+          fi
+          start=$SECONDS
+          status=0
+          sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt \
+            --non-interactive | tee "$RUNNER_TEMP/rerun.log" || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds install_sh_rerun "$seconds"
+          grep -q "This wheel and lock are already installed" "$RUNNER_TEMP/rerun.log" && reused=yes || reused=no
+          grep -q "Existing settings in ~/.lifeweave kept" "$RUNNER_TEMP/rerun.log" && kept=yes || kept=no
+          [ "$status" -eq 0 ] && [ "$reused" = yes ] && [ "$kept" = yes ] && result=pass || result=fail
+          failed=0
+          $Q record install_sh_rerun "$result" --seconds "$seconds" \
+            --detail "exit $status, package reused: $reused, settings kept: $kept" || failed=1
+          $Q wait-http service_ready_after_rerun http://127.0.0.1:8765/healthz --timeout 900 || failed=1
+          $Q fingerprint --cli "$LC" --out "$RUNNER_TEMP/private/rerun.json" \
+            --file "$HOME/.lifeweave/config.yaml" --file "$HOME/.lifeweave/.env"
+          $Q compare rerun_keeps_data "$RUNNER_TEMP/private/installed.json" "$RUNNER_TEMP/private/rerun.json" || failed=1
+          exit "$failed"
+      - name: An upgrade stops the service, backs up, installs and starts it again
+        continue-on-error: true
+        if: env.SERVICE_MODE == 'systemd'
+        run: |
+          # Forget what was installed, so install.sh takes the same wheel for a new one.
+          rm "$HOME/.local/share/lifecontext/installed.sha256"
+          backups=$(find "$HOME/LifeContext/backups" -name '*.tar.gz' | wc -l)
+          start=$SECONDS
+          status=0
+          sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt \
+            --non-interactive | tee "$RUNNER_TEMP/upgrade.log" || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds install_sh_upgrade "$seconds"
+          grep -q "Stopping lifecontext.service for the upgrade" "$RUNNER_TEMP/upgrade.log" && stopped=yes || stopped=no
+          grep -q "^Backup written: " "$RUNNER_TEMP/upgrade.log" && backed_up=yes || backed_up=no
+          after=$(find "$HOME/LifeContext/backups" -name '*.tar.gz' | wc -l)
+          systemctl --user is-active --quiet lifecontext.service && running=yes || running=no
+          [ "$status" -eq 0 ] && [ "$stopped" = yes ] && [ "$backed_up" = yes ] && [ "$after" -gt "$backups" ] &&
+            [ "$running" = yes ] && result=pass || result=fail
+          failed=0
+          $Q record install_sh_upgrade "$result" --seconds "$seconds" \
+            --detail "exit $status, stopped first: $stopped, backup: $backed_up ($backups -> $after archives), running after: $running" || failed=1
+          $Q fingerprint --cli "$LC" --out "$RUNNER_TEMP/private/upgraded.json" \
+            --file "$HOME/.lifeweave/config.yaml" --file "$HOME/.lifeweave/.env"
+          $Q compare upgrade_keeps_data "$RUNNER_TEMP/private/installed.json" "$RUNNER_TEMP/private/upgraded.json" || failed=1
+          exit "$failed"
+      - name: install.sh --uninstall keeps the vault, backups and .env
+        continue-on-error: true
+        run: |
+          if [ "$SERVICE_MODE" = foreground ]; then kill "$(cat "$RUNNER_TEMP/serve.pid")" || true; fi
+          status=0
+          sh ./install.sh --uninstall || status=$?
+          problems=""
+          for gone in "$HOME/.local/share/lifecontext/venv" "$HOME/.local/share/lifecontext/bin/uv" "$LC" \
+              "$HOME/.config/systemd/user/lifecontext.service" "$HOME/.config/systemd/user/lifecontext-maintain.timer" \
+              "$HOME/.claude/skills/personal-journal-operations"; do
+            if [ -e "$gone" ] || [ -L "$gone" ]; then problems="$problems still-there:${gone#"$HOME"/}"; fi
+          done
+          for kept in "$HOME/.lifeweave/.env" "$HOME/.lifeweave/config.yaml" "$HOME/.lifeweave/catalog.sqlite3" \
+              "$HOME/LifeContext/vault/Journal" "$ARCHIVE"; do
+            if [ ! -e "$kept" ]; then problems="$problems missing:${kept#"$HOME"/}"; fi
+          done
+          if [ "$SERVICE_MODE" = systemd ] && systemctl --user is-active --quiet lifecontext.service; then
+            problems="$problems service-still-active"
+          fi
+          [ "$status" -eq 0 ] && [ -z "$problems" ] && result=pass || result=fail
+          $Q record uninstall_keeps_data "$result" --detail "exit $status${problems:+, problems:$problems}"
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Show the service logs after a failure
+        if: failure()
+        run: |
+          journalctl --user -u lifecontext.service -n 150 --no-pager || true
+          tail -n 80 "$RUNNER_TEMP"/*.log || true
+          tail -n 150 "$HOME/.hindsight/profiles/lifeweave.log" || true
+      - name: Check the evidence for the endpoint and the key
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-native
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  docker:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/docker.json
+      LIFECONTEXT_IMAGE: lifecontext:qualify
+      LIFECONTEXT_CONTAINER: lifecontext
+      W: ${{ github.workspace }}/bin/lifecontext-docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qualify-inputs
+          path: inputs
+      - name: Start the evidence file
+        run: |
+          $Q init --job docker
+          $Q metric versions docker "$(docker version --format '{{.Server.Version}}')"
+          $Q metric versions compose "$(docker compose version --short)"
+      - name: Keep the CI model key in a private file
+        env:
+          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+        run: |
+          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private"
+          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
+          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+          # The compose secret: mode 0600, owned by the image's uid 1000.
+          cp "$RUNNER_TEMP/private/llm-api-key" "$RUNNER_TEMP/private/docker-api-key"
+          sudo chown 1000:1000 "$RUNNER_TEMP/private/docker-api-key"
+          echo "LIFECONTEXT_API_KEY_FILE=$RUNNER_TEMP/private/docker-api-key" >> "$GITHUB_ENV"
+      - name: Make room for the image
+        run: |
+          df -h /
+          if [ "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" -lt 40 ]; then
+            sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+            df -h /
+          fi
+      - name: Build the image
+        run: |
+          start=$SECONDS
+          status=0
+          docker build --progress=plain -t "$LIFECONTEXT_IMAGE" . || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds docker_build "$seconds"
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record docker_build "$result" --seconds "$seconds" --detail "exit $status"
+          [ "$status" -eq 0 ]
+          $Q metric sizes_bytes image "$(docker image inspect -f '{{.Size}}' "$LIFECONTEXT_IMAGE")"
+          docker image ls "$LIFECONTEXT_IMAGE"
+      - name: docker compose up, first start sets up from the environment
+        env:
+          LIFECONTEXT_PROVIDER: openai_compatible
+          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          docker compose up -d --no-build
+          status=0
+          $Q wait-docker container_healthy lifecontext --timeout 900 || status=$?
+          if [ "$status" -ne 0 ]; then docker compose logs --tail 80; exit 1; fi
+      - name: No published port, a non-root user, the API on loopback only
+        continue-on-error: true
+        run: |
+          failed=0
+          bindings=$(docker inspect -f '{{json .HostConfig.PortBindings}}' lifecontext)
+          published=$(docker port lifecontext | wc -l)
+          [ "$published" -eq 0 ] && { [ "$bindings" = "{}" ] || [ "$bindings" = null ]; } && result=pass || result=fail
+          $Q record no_published_ports "$result" --detail "docker port lists $published, port bindings $bindings" || failed=1
+          uid=$(docker exec lifecontext id -u)
+          root_processes=$(docker top lifecontext -eo pid,uid,comm | tail -n +2 | awk '$2 == 0 || $2 == "root"' | wc -l)
+          [ "$uid" != 0 ] && [ "$root_processes" -eq 0 ] && result=pass || result=fail
+          $Q record non_root_user "$result" --detail "exec uid $uid, image user $(docker inspect -f '{{.Config.User}}' lifecontext), root processes $root_processes" || failed=1
+          listeners=$(docker exec lifecontext ss -Htln | awk '{print $4}' | sort -u | tr '\n' ' ')
+          $Q metric info listeners_in_container "$listeners"
+          api=$(docker exec lifecontext ss -Htln | awk '{print $4}' | grep -E ':8765$' | tr '\n' ' ')
+          [ "$api" = "127.0.0.1:8765 " ] && result=pass || result=fail
+          $Q record api_loopback_only "$result" --detail "API listens on $api; all listeners: $listeners" || failed=1
+          $Q metric info memory_after_start "$(docker stats --no-stream --format '{{.MemUsage}}' lifecontext)"
+          exit "$failed"
+      - name: Scenario through bin/lifecontext-docker
+        continue-on-error: true
+        run: |
+          failed=0
+          $Q doctor --cli "$W" --label container --versions --require-ocr || failed=1
+          $Q capture --cli "$W" --fixtures inputs/fixtures --state "$RUNNER_TEMP/state.json" || failed=1
+          $Q verify --cli "$W" --state "$RUNNER_TEMP/state.json" --label container --wiki --ukrainian --ocr || failed=1
+          $Q mcp --cli "$W" || failed=1
+          copy="$RUNNER_TEMP/private/downloaded-original.md"
+          status=0
+          document=$(jq -r .documents.en.source_id "$RUNNER_TEMP/state.json")
+          "$W" documents download "$document" "$copy" --version 1 --json > /dev/null || status=$?
+          expected=$(sha256sum < inputs/fixtures/corvalis-point-lighthouse.md | cut -d' ' -f1)
+          actual=$(sha256sum < "$copy" | cut -d' ' -f1 || true)
+          [ "$status" -eq 0 ] && [ "$expected" = "$actual" ] && result=pass || result=fail
+          $Q record wrapper_download_to_host "$result" --detail "exit $status, SHA-256 $([ "$expected" = "$actual" ] && echo matches || echo differs)" || failed=1
+          $Q metric info memory_after_scenario "$(docker stats --no-stream --format '{{.MemUsage}}' lifecontext)"
+          exit "$failed"
+      - name: Recreate the container; the data stays
+        continue-on-error: true
+        run: |
+          failed=0
+          $Q fingerprint --cli "$W" --out "$RUNNER_TEMP/private/before-recreate.json"
+          docker compose up -d --no-build --force-recreate
+          $Q wait-docker container_healthy_recreated lifecontext --timeout 900 || failed=1
+          $Q fingerprint --cli "$W" --out "$RUNNER_TEMP/private/after-recreate.json"
+          $Q compare recreate_keeps_data "$RUNNER_TEMP/private/before-recreate.json" \
+            "$RUNNER_TEMP/private/after-recreate.json" || failed=1
+          $Q verify --cli "$W" --state "$RUNNER_TEMP/state.json" --label recreated || failed=1
+          exit "$failed"
+      - name: Stop cleanly and back up in a one-off container
+        continue-on-error: true
+        run: |
+          start=$SECONDS
+          docker compose stop
+          $Q metric timings_seconds docker_stop "$((SECONDS - start))"
+          status=0
+          docker compose run --rm --no-deps -T --entrypoint sh lifecontext -c \
+            'test ! -e "$HOME/.pg0/instances/hindsight-embed-lifeweave/data/postmaster.pid"' || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record clean_stop "$result" --detail "index database $([ "$status" -eq 0 ] && echo stopped || echo 'still had postmaster.pid')" || true
+          start=$SECONDS
+          status=0
+          docker compose run --rm --no-deps -T lifecontext backup --json > "$RUNNER_TEMP/private/backup.json" || status=$?
+          seconds=$((SECONDS - start))
+          if [ "$status" -ne 0 ]; then
+            $Q record backup_in_container fail --seconds "$seconds" --detail "exit $status, error $(jq -r .error "$RUNNER_TEMP/private/backup.json")"
+            exit 1
+          fi
+          archive=$(jq -r .archive "$RUNNER_TEMP/private/backup.json")
+          name=$(basename "$archive")
+          mkdir -p "$RUNNER_TEMP/private/backup"
+          docker compose run --rm --no-deps -T --entrypoint cat lifecontext "$archive" > "$RUNNER_TEMP/private/backup/$name"
+          docker compose run --rm --no-deps -T --entrypoint cat lifecontext "$archive.sha256" > "$RUNNER_TEMP/private/backup/$name.sha256"
+          (cd "$RUNNER_TEMP/private/backup" && sha256sum -c "$name.sha256")
+          echo "BACKUP_FILE=$RUNNER_TEMP/private/backup/$name" >> "$GITHUB_ENV"
+          $Q metric sizes_bytes backup_archive "$(wc -c < "$RUNNER_TEMP/private/backup/$name" | tr -d ' ')"
+          $Q record backup_in_container pass --seconds "$seconds" --detail "$(jq -r '"\(.files) files, \(.bytes) bytes; copied out, checksum verified"' "$RUNNER_TEMP/private/backup.json")"
+      - name: Restore into fresh volumes and recall from them
+        continue-on-error: true
+        env:
+          LIFECONTEXT_CONTAINER: lifecontext-restored
+        run: |
+          project="docker compose -p lifecontext-restored"
+          # The archive goes in through stdin; the fresh volumes /data/home and /data/vault are empty.
+          status=0
+          $project run --rm --no-deps -T --entrypoint sh lifecontext -c \
+            'set -e; umask 077; mkdir -p /tmp/restore; cat > /tmp/restore/backup.tar.gz; lifecontext restore /tmp/restore/backup.tar.gz --vault /data/vault --json' \
+            < "$BACKUP_FILE" > "$RUNNER_TEMP/private/restore.json" || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record restore_in_container "$result" --detail "exit $status, $(jq -r '.error // "\(.files) files, vault \(.vault_root)"' "$RUNNER_TEMP/private/restore.json")"
+          [ "$status" -eq 0 ]
+          failed=0
+          $project up -d --no-build
+          $Q wait-docker container_healthy_restored lifecontext-restored --timeout 900 || failed=1
+          $Q verify --cli "$W" --state "$RUNNER_TEMP/state.json" --label restored || failed=1
+          $Q fingerprint --cli "$W" --out "$RUNNER_TEMP/private/restored.json"
+          $Q compare restore_keeps_data "$RUNNER_TEMP/private/before-recreate.json" "$RUNNER_TEMP/private/restored.json" || failed=1
+          $Q metric info memory_restored "$(docker stats --no-stream --format '{{.MemUsage}}' lifecontext-restored)" || true
+          exit "$failed"
+      - name: Show the container logs after a failure
+        if: failure()
+        run: |
+          # The engine log, the embedded Postgres logs and any library its binaries miss.
+          # shellcheck disable=SC2016 # expanded by the shell in the container
+          diagnose='
+            echo "== Hindsight daemon log"; tail -n 80 "$HOME/.hindsight/profiles/lifeweave.log" 2>/dev/null
+            echo "== pg0 files"; ls -la "$HOME/.pg0" "$HOME/.pg0/installation" "$HOME/.pg0/instances"/* 2>/dev/null | head -40
+            for log in $(find "$HOME/.pg0" -name "*.log" -size +0 2>/dev/null | head -5); do
+              echo "== $log"; tail -n 40 "$log"
+            done
+            for binary in $(find "$HOME/.pg0/installation" -type f \( -name postgres -o -name initdb \) 2>/dev/null | head -2); do
+              echo "== libraries missing for $binary"; ldd "$binary" | grep "not found" || echo none
+            done'
+          for project in lifecontext lifecontext-restored; do
+            LIFECONTEXT_CONTAINER=$project docker compose -p "$project" logs --tail 60 || true
+            LIFECONTEXT_CONTAINER=$project docker compose -p "$project" run --rm --no-deps -T --entrypoint sh \
+              lifecontext -c "$diagnose" || true
+          done
+      - name: Remove the containers and volumes
+        if: always()
+        run: |
+          LIFECONTEXT_CONTAINER=lifecontext-restored docker compose -p lifecontext-restored down -v || true
+          docker compose down -v || true
+          sudo rm -f "$RUNNER_TEMP/private/docker-api-key"
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Check the evidence for the endpoint and the key
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-docker
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  macos:
+    needs: build
+    if: inputs.macos
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/macos.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qualify-inputs
+          path: inputs
+      - name: Start the evidence file
+        run: |
+          $Q init --job macos
+          echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
+      - name: Keep the CI model key in a private file
+        env:
+          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+        run: |
+          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private"
+          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
+          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+      - name: Run install.sh with the built wheel, unattended
+        env:
+          LIFECONTEXT_PROVIDER: openai_compatible
+          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
+          start=$SECONDS
+          status=0
+          sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/macos-arm64.txt \
+            --non-interactive || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds install_sh_first_run "$seconds"
+          $Q metric sizes_bytes install_venv "$(( $(du -sk "$HOME/.local/share/lifecontext/venv" | cut -f1) * 1024 ))"
+          $Q metric versions uv "$("$HOME/.local/share/lifecontext/bin/uv" --version)"
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record install_sh "$result" --detail "exit $status" --seconds "$seconds"
+      - name: Check that the API runs as a launchd agent
+        run: |
+          if launchctl print "gui/$(id -u)/io.github.hantok.lifecontext" > /dev/null 2>&1; then
+            $Q record service_running pass --detail "launchd agent io.github.hantok.lifecontext loaded"
+          else
+            $Q record service_running skip --detail "no launchd GUI session on this runner; lifecontext serve runs in the background instead"
+            nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
+          fi
+          $Q wait-http service_ready http://127.0.0.1:8765/healthz --timeout 900
+      - name: Doctor, one import and one recall
+        continue-on-error: true
+        run: |
+          failed=0
+          $Q doctor --cli "$LC" --label installed --versions || failed=1
+          $Q capture --cli "$LC" --fixtures inputs/fixtures --state "$RUNNER_TEMP/state.json" --english-only || failed=1
+          $Q verify --cli "$LC" --state "$RUNNER_TEMP/state.json" --label installed || failed=1
+          exit "$failed"
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Check the evidence for the endpoint and the key
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-macos
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  release:
+    # A release rehearsal: install from a draft release's assets (checking SHA256SUMS
+    # and its signature) and pull and verify the image of that tag.
+    if: github.repository == 'Hantok/lifecontext' && inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write # a draft release is visible only with write access
+      packages: read # pull the image while the package is private
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/release.json
+      TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the evidence file
+        run: |
+          $Q init --job release
+          echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
+      - name: Keep the CI model key in a private file
+        env:
+          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+        run: |
+          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
+            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private"
+          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
+          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download the draft release's assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release"
+          ls -l "$RUNNER_TEMP/release"
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets \
+            --jq '"draft \(.isDraft), prerelease \(.isPrerelease), \(.assets | length) assets: \([.assets[].name] | join(" "))"')
+          $Q metric versions cosign "$(cosign version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*//p')"
+          $Q record release_assets pass --detail "$state"
+      - name: Start a systemd user manager for the runner account
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      - name: Run the release's install.sh against its assets
+        env:
+          LIFECONTEXT_PROVIDER: openai_compatible
+          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
+          start=$SECONDS
+          status=0
+          sh "$RUNNER_TEMP/release/install.sh" --assets "$RUNNER_TEMP/release" --non-interactive \
+            | tee "$RUNNER_TEMP/install.log" || status=$?
+          seconds=$((SECONDS - start))
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record install_sh_release "$result" --seconds "$seconds" \
+            --detail "exit $status, $(grep -m1 -o 'The wheel and requirements-[a-z0-9_-]*.txt match SHA256SUMS' "$RUNNER_TEMP/install.log" || echo 'no checksum line')"
+          if grep -q "Signature of SHA256SUMS verified with cosign" "$RUNNER_TEMP/install.log"; then
+            $Q record release_signature_checked pass --detail "install.sh verified SHA256SUMS.sigstore.json with cosign (identity release.yml@refs/tags/$TAG)"
+          else
+            $Q record release_signature_checked fail --detail "install.sh did not report a verified signature"
+          fi
+      - name: Doctor
+        continue-on-error: true
+        run: $Q doctor --cli "$LC" --label release --versions --require-ocr
+      - name: Pull the image and verify its signature
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=0
+          image="ghcr.io/hantok/lifecontext:${TAG#v}"
+          printf '%s\n' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          status=0
+          docker pull "$image" || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record image_pull "$result" --detail "exit $status, $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo 'no digest')" || failed=1
+          status=0
+          cosign verify "$image" \
+            --certificate-identity "https://github.com/Hantok/lifecontext/.github/workflows/release.yml@refs/tags/$TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record image_signature "$result" --detail "cosign verify exit $status, identity release.yml@refs/tags/$TAG" || failed=1
+          visibility=$(gh api /users/Hantok/packages/container/lifecontext --jq .visibility 2>/dev/null || echo "not readable with this token")
+          $Q metric info package_visibility "$visibility"
+          exit "$failed"
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Check the evidence for the endpoint and the key
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-release
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  evidence:
+    needs: [build, native, docker, macos, release]
+    if: always() && github.repository == 'Hantok/lifecontext'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: qualify-evidence-*
+          path: evidence
+          merge-multiple: true
+      - name: Scan all evidence for the endpoint and the key, then summarize
+        env:
+          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          patterns="$RUNNER_TEMP/secret-patterns"
+          sh .github/scripts/secret-patterns.sh "$patterns"
+          ls -l evidence
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::evidence contains the CI endpoint or key"
+            exit 1
+          fi
+          {
+            echo "## Qualification evidence"
+            echo
+            echo "| Job | Result | Checks passed | Failed | Skipped |"
+            echo "|---|---|---|---|---|"
+            for file in evidence/*.json; do
+              jq -r '"| \(.job) | \(.result // "unfinished") | \([.checks[] | select(.status == "pass")] | length) | \([.checks | to_entries[] | select(.value.status == "fail") | .key] | join(", ")) | \([.checks | to_entries[] | select(.value.status == "skip") | .key] | join(", ")) |"' "$file"
+            done
+            echo
+            echo "Jobs: native ${{ needs.native.result }}, docker ${{ needs.docker.result }}, macos ${{ needs.macos.result }}, release ${{ needs.release.result }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -n "$RELEASE_TAG" ]; then required="release"; else required="native docker"; fi
+          for job in $required; do
+            [ -f "evidence/$job.json" ] || { echo "::error::no evidence from $job"; exit 1; }
+          done
+          ! jq -e 'select(.result != "pass")' evidence/*.json > /dev/null

@@ -1,0 +1,190 @@
+#!/bin/sh
+# Run the lifecontext command inside the LifeContext container with docker exec.
+#
+#   bin/lifecontext-docker status --json
+#   ln -s "$PWD/bin/lifecontext-docker" ~/.local/bin/lifecontext   # agents then use it as is
+#
+# stdin and stdout pass through, so `retain ... --input -`, `init` and `mcp`
+# work. Host files named by `retain --input FILE`, `curate --input FILE`,
+# `categories propose --input FILE`, `documents import FILE` and `import FILE`
+# are streamed into a private directory in the container (same file name) and
+# removed afterwards; `documents download ID DEST` and `export DEST` write DEST
+# on the host. Other paths (backup, restore, mcp --import-dir) are container
+# paths. LIFECONTEXT_CONTAINER names the container (default: lifecontext) and
+# LIFECONTEXT_DOCKER the docker command (default: docker).
+
+set -eu
+
+container=${LIFECONTEXT_CONTAINER:-lifecontext}
+docker=${LIFECONTEXT_DOCKER:-docker}
+nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || nonce=""
+stage_dir="/tmp/lifecontext-docker.${nonce:-$$}"
+
+cmd=""
+sub=""
+count=0
+pending=""
+json=0
+in_host=""
+in_name=""
+out_host=""
+out_name=""
+
+# A readable regular host file goes through stdin; anything else is passed on
+# unchanged, so the command in the container reports input_unavailable.
+map_input() {
+	mapped=$1
+	if [ -n "$in_host" ] || [ "$1" = - ] || [ -L "$1" ] || [ ! -f "$1" ] || [ ! -r "$1" ]; then
+		return
+	fi
+	in_host=$1
+	in_name=$(basename -- "$1")
+	mapped="$stage_dir/in/$in_name"
+}
+
+map_output() {
+	out_host=$1
+	out_name=$(basename -- "$1")
+	mapped="$stage_dir/out/$out_name"
+}
+
+input_option() {
+	case "$cmd/$sub" in
+	retain/* | curate/* | categories/propose) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+fail() {
+	if [ "$json" -eq 1 ]; then
+		printf '{"error":"%s"}\n' "$1"
+	else
+		printf 'LifeContext request failed: %s.\n' "$(printf '%s' "$1" | tr _ ' ')" >&2
+	fi
+	exit 1
+}
+
+# Rebuild the arguments one by one, replacing host paths with staged ones.
+total=$#
+index=0
+while [ "$index" -lt "$total" ]; do
+	arg=$1
+	shift
+	index=$((index + 1))
+	mapped=$arg
+	if [ -n "$pending" ]; then
+		if [ "$pending" = --input ] && input_option; then
+			map_input "$arg"
+		fi
+		pending=""
+	else
+		case "$arg" in
+		--input=*)
+			if input_option; then
+				map_input "${arg#--input=}"
+				mapped="--input=$mapped"
+			fi
+			;;
+		--json) json=1 ;;
+		--version)
+			# A flag before the command, a value after it (evidence, documents show).
+			[ -z "$cmd" ] || pending=$arg
+			;;
+		--port | --idempotency-key | --input | --query | --max-results | --max-tokens | --budget | \
+			--expected-version | --prepared-operation-id | --edge-id | --source-id | --source-version | \
+			--status | --expected-revision | --limit | --filename | --mime | --provenance | --state | \
+			--category-id | --name | --description | --alias | --target-category-id | \
+			--expected-source-revision | --expected-target-revision | --page | --note | --revision | \
+			--fail-on | --date | --since | --retry-wiki | --rebuild-stale | --provider | --model | \
+			--base-url | --vault | --timezone | --agent | --import-dir)
+			pending=$arg
+			;;
+		-?*) ;;
+		*)
+			count=$((count + 1))
+			case "$count" in
+			1) cmd=$arg ;;
+			2)
+				sub=$arg
+				case "$cmd" in
+				import) map_input "$arg" ;;
+				export) map_output "$arg" ;;
+				esac
+				;;
+			3) [ "$cmd/$sub" != documents/import ] || map_input "$arg" ;;
+			4) [ "$cmd/$sub" != documents/download ] || map_output "$arg" ;;
+			esac
+			;;
+		esac
+	fi
+	set -- "$@" "$mapped"
+done
+
+if [ -z "$in_host" ] && [ -z "$out_host" ]; then
+	if [ -t 0 ] && [ -t 1 ]; then
+		exec "$docker" exec -i -t "$container" lifecontext "$@"
+	fi
+	exec "$docker" exec -i "$container" lifecontext "$@"
+fi
+
+if [ -n "$out_host" ] && { [ -e "$out_host" ] || [ -L "$out_host" ]; }; then
+	fail destination_exists
+fi
+
+# In the container: make the private directory, receive the input, run the
+# command, and remove the directory unless an output still has to be copied.
+# shellcheck disable=SC2016 # expanded by the shell in the container
+script='set -u
+umask 077
+dir=$1 name=$2 keep=$3
+shift 3
+mkdir -m 700 "$dir" "$dir/in" "$dir/out" || exit 1
+trap '\''rm -rf "$dir"; exit 130'\'' HUP INT TERM
+if [ -n "$name" ]; then
+	cat >"$dir/in/$name" || { rm -rf "$dir"; exit 1; }
+fi
+status=0
+lifecontext "$@" </dev/null || status=$?
+if [ "$status" -ne 0 ] || [ "$keep" = no ]; then
+	rm -rf "$dir"
+fi
+exit "$status"'
+
+# Interrupted: remove the staged files in the container (best effort) and any partial output.
+# shellcheck disable=SC2317 # called from the trap
+interrupted() {
+	trap - HUP INT TERM
+	"$docker" exec "$container" rm -rf -- "$stage_dir" >/dev/null 2>&1 || true
+	[ -z "${partial:-}" ] || rm -f "$partial"
+	exit 130
+}
+trap interrupted HUP INT TERM
+
+keep=no
+[ -z "$out_host" ] || keep=yes
+status=0
+if [ -n "$in_host" ]; then
+	"$docker" exec -i "$container" sh -c "$script" sh "$stage_dir" "$in_name" "$keep" "$@" <"$in_host" || status=$?
+else
+	"$docker" exec -i "$container" sh -c "$script" sh "$stage_dir" "" "$keep" "$@" </dev/null || status=$?
+fi
+if [ "$status" -ne 0 ] || [ -z "$out_host" ]; then
+	exit "$status"
+fi
+
+# Copy the output next to DEST, then link it into place (never over an existing
+# file) and clean up in the container.
+umask 077
+partial="$out_host.lifecontext-docker.${nonce:-$$}"
+# shellcheck disable=SC2016
+copy='status=0; cat -- "$1" || status=$?; rm -rf -- "$2"; exit "$status"'
+if (set -C && "$docker" exec "$container" sh -c "$copy" sh "$stage_dir/out/$out_name" "$stage_dir" >"$partial"); then
+	if ln "$partial" "$out_host" 2>/dev/null; then
+		rm -f "$partial"
+		exit 0
+	fi
+	rm -f "$partial"
+	fail destination_exists
+fi
+rm -f "$partial"
+fail output_unavailable

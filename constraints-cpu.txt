@@ -1,0 +1,22 @@
+# CPU-only PyTorch for Linux installs of LifeContext.
+#
+# hindsight-all pulls torch through sentence-transformers; from PyPI that is the
+# CUDA build (about 5 GB more). Use this file as a constraint together with the
+# PyTorch CPU index, which serves the matching "+cpu" wheel. LifeContext is not
+# on PyPI: install the wheel from a GitHub release (or `.` from a checkout),
+# never the bare name.
+#
+#   pip install -c constraints-cpu.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu \
+#     https://github.com/Hantok/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
+#   uv pip install -c constraints-cpu.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
+#     https://github.com/Hantok/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
+#
+# uv needs --index-strategy unsafe-best-match: by default it takes each package
+# only from the first index that has it, and the PyTorch index also carries old
+# copies of common packages (urllib3, numpy), so resolution fails.
+# install.sh downloads this file with each release and passes it the same way;
+# the Docker image builds with it. macOS wheels on PyPI are already CPU-only, so
+# the pin applies to Linux only.
+torch==2.14.0+cpu ; sys_platform == "linux"

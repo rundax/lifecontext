@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lifecontext"
+version = "1.2.0.dev0"
+description = "Your private, durable context layer for AI"
+license = "BUSL-1.1"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi==0.141.1",
+  "hindsight-all==0.9.2",
+  "hindsight-client==0.9.2",
+  "pydantic==2.13.5",
+  "PyYAML==6.0.3",
+  "uvicorn==0.53.0",
+  # `lifecontext mcp`; already required by hindsight-api-slim (through fastmcp),
+  # pinned here because lifecontext.mcp_server imports it directly.
+  "mcp==2.2.0",
+  "pypdf==6.19.0",
+  "pypdfium2==5.14.0",
+  "python-docx==1.2.0",
+  "openpyxl==3.1.5",
+  "python-pptx==1.0.2",
+  "Pillow==12.3.0",
+  "defusedxml==0.7.1",
+  # Optional vision adapters; already required by hindsight-api-slim, pinned here
+  # because lifecontext.vision imports them directly.
+  "anthropic==1.4.0",
+  "openai==2.54.0",
+  "google-genai==2.22.0",
+]
+
+[project.scripts]
+lifecontext = "lifecontext.cli:main"
+life-context = "lifecontext.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lifecontext", "lifecontext.*"]
+
+[tool.setuptools.package-data]
+# The agent skill ships with the package; `lifecontext skills install` links agents to it.
+lifecontext = [
+  "agent_skill/personal-journal-operations/*.md",
+  "agent_skill/personal-journal-operations/references/*.md",
+]
+
+[tool.ruff.lint]
+# The default rule set of ruff 0.16.10 (the version CI pins), written out so
+# that other ruff versions check the same rules. Prefixes select stable rules
+# only; the ignore list removes the stable rules that are not in that default.
+select = [
+  "ASYNC", "B", "BLE", "C", "D419", "DTZ", "E9", "E722", "EXE", "F", "FA",
+  "FLY", "FURB", "G", "I001", "INT", "ISC004", "LOG", "N9", "PERF1",
+  "PERF402", "PGH005", "PIE", "PLC", "PLE", "PLR", "PLW", "PT010", "PT014",
+  "PT020", "PT025", "PT026", "PT031", "PTH124", "PTH210", "PYI", "RET501",
+  "RUF", "S102", "S110", "S112", "SIM", "T1", "TC01", "TC004", "TC005",
+  "TC007", "TRY2", "TRY002", "TRY004", "TRY401", "UP", "W6", "YTT",
+]
+ignore = [
+  "ASYNC24", "ASYNC109", "ASYNC110", "ASYNC212", "ASYNC250", "B9", "B007",
+  "B011", "B024", "B027", "B028", "B034", "C9", "C42", "C416", "EXE003",
+  "F72", "F403", "F405", "F406", "FURB11", "FURB164", "FURB171", "FURB187",
+  "G00", "LOG004", "LOG007", "PLC1", "PLC2", "PLC0207", "PLC0415", "PLE02",
+  "PLE0302", "PLR5", "PLR09", "PLR200", "PLR1714", "PLW3", "PLW16", "PLW29",
+  "PLW010", "PLW0603", "PYI011", "PYI014", "PYI021", "PYI024", "PYI051",
+  "PYI053", "PYI054", "PYI056", "RUF001", "RUF002", "RUF003", "RUF005",
+  "RUF006", "RUF021", "RUF036", "RUF037", "RUF043", "RUF060", "RUF061",
+  "RUF064", "RUF102", "RUF103", "RUF104", "SIM3", "SIM105", "SIM108",
+  "SIM109", "SIM110", "SIM112", "SIM116", "SIM212", "SIM910", "UP013",
+  "UP015", "UP042",
+]

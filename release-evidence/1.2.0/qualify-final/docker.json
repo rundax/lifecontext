@@ -1,0 +1,287 @@
+{
+  "checks": {
+    "api_loopback_only": {
+      "detail": "API listens on 127.0.0.1:8765 ; all listeners: 127.0.0.11:35669 127.0.0.1:25994 127.0.0.1:8765 ",
+      "status": "pass"
+    },
+    "backup_in_container": {
+      "detail": "1499 files, 68248118 bytes; copied out, checksum verified",
+      "seconds": 7.0,
+      "status": "pass"
+    },
+    "brief_container": {
+      "detail": "lists 3 of the 3 imported documents",
+      "status": "pass"
+    },
+    "clean_stop": {
+      "detail": "index database stopped",
+      "status": "pass"
+    },
+    "container_healthy": {
+      "detail": "container healthy",
+      "seconds": 35.2,
+      "status": "pass"
+    },
+    "container_healthy_recreated": {
+      "detail": "container healthy",
+      "seconds": 35.2,
+      "status": "pass"
+    },
+    "container_healthy_restored": {
+      "detail": "container healthy",
+      "seconds": 65.3,
+      "status": "pass"
+    },
+    "docker_build": {
+      "detail": "exit 0",
+      "seconds": 197.0,
+      "status": "pass"
+    },
+    "doctor_container": {
+      "detail": "exit 0, problems [], warnings []",
+      "status": "pass"
+    },
+    "document_import_en": {
+      "detail": "custody accepted, extraction completed, indexing completed, wiki completed, projection completed",
+      "seconds": 44.7,
+      "status": "pass"
+    },
+    "document_import_image": {
+      "detail": "custody accepted, extraction completed, indexing completed, wiki completed, projection completed",
+      "seconds": 33.8,
+      "status": "pass"
+    },
+    "document_import_uk": {
+      "detail": "custody accepted, extraction completed, indexing completed, wiki completed, projection completed",
+      "seconds": 28.6,
+      "status": "pass"
+    },
+    "evidence_readback_en_container": {
+      "detail": "cited version 1, SHA-256 matches",
+      "status": "pass"
+    },
+    "evidence_readback_en_recreated": {
+      "detail": "cited version 1, SHA-256 matches",
+      "status": "pass"
+    },
+    "evidence_readback_en_restored": {
+      "detail": "cited version 1, SHA-256 matches",
+      "status": "pass"
+    },
+    "evidence_readback_image_container": {
+      "detail": "cited version 1, SHA-256 matches",
+      "status": "pass"
+    },
+    "evidence_readback_uk_container": {
+      "detail": "cited version 1, SHA-256 matches",
+      "status": "pass"
+    },
+    "journal_readback": {
+      "detail": "exact content and SHA-256",
+      "status": "pass"
+    },
+    "journal_readback_container": {
+      "detail": "exact content",
+      "status": "pass"
+    },
+    "journal_readback_recreated": {
+      "detail": "exact content",
+      "status": "pass"
+    },
+    "journal_readback_restored": {
+      "detail": "exact content",
+      "status": "pass"
+    },
+    "journal_retain": {
+      "detail": "operation completed",
+      "seconds": 5.9,
+      "status": "pass"
+    },
+    "mcp_tools": {
+      "detail": "server lifecontext 1.2.0.dev0, 12 tools, read-only True, status call ok",
+      "seconds": 1.4,
+      "status": "pass"
+    },
+    "no_published_ports": {
+      "detail": "docker port lists 0, port bindings {}",
+      "status": "pass"
+    },
+    "non_root_user": {
+      "detail": "exec uid 1000, image user lifecontext, root processes 0",
+      "status": "pass"
+    },
+    "ocr_image": {
+      "detail": "coverage ocr 1, complete True, unresolved []",
+      "status": "pass"
+    },
+    "recall_cites_document_en_container": {
+      "detail": "cited at rank 1 of 10, answer text present, omitted 0",
+      "seconds": 1.5,
+      "status": "pass"
+    },
+    "recall_cites_document_en_recreated": {
+      "detail": "cited at rank 1 of 10, answer text present, omitted 0",
+      "seconds": 1.5,
+      "status": "pass"
+    },
+    "recall_cites_document_en_restored": {
+      "detail": "cited at rank 1 of 10, answer text present, omitted 0",
+      "seconds": 1.6,
+      "status": "pass"
+    },
+    "recall_cites_document_image_container": {
+      "detail": "cited at rank 1 of 10, answer text present, omitted 0",
+      "seconds": 1.4,
+      "status": "pass"
+    },
+    "recall_cites_document_uk_container": {
+      "detail": "cited at rank 1 of 10, answer text present, omitted 0",
+      "seconds": 1.4,
+      "status": "pass"
+    },
+    "recreate_keeps_data": {
+      "detail": "3 documents, 6 wiki pages, unchanged files []",
+      "status": "pass"
+    },
+    "restore_in_container": {
+      "detail": "exit 0, 1499 files, vault /data/vault",
+      "status": "pass"
+    },
+    "restore_keeps_data": {
+      "detail": "3 documents, 6 wiki pages, unchanged files []",
+      "status": "pass"
+    },
+    "wiki_lint_container": {
+      "detail": "exit 0, errors 0, warnings 0, info 2",
+      "seconds": 0.7,
+      "status": "pass"
+    },
+    "wiki_literal_quotes_container": {
+      "detail": "6 pages, document cited on ['source_doc_9f0fd74dbc814613bbcffd80c2f43f88'], 1 claims are literal quotes, the K-17 fact among them",
+      "status": "pass"
+    },
+    "wrapper_download_to_host": {
+      "detail": "exit 0, SHA-256 matches",
+      "status": "pass"
+    }
+  },
+  "commit": "21c36dfd880ee66159f32e6ad8fe6061c60e5893",
+  "expected_checks": [
+    "docker_build",
+    "container_healthy",
+    "no_published_ports",
+    "non_root_user",
+    "api_loopback_only",
+    "doctor_container",
+    "journal_retain",
+    "journal_readback",
+    "document_import_en",
+    "document_import_uk",
+    "document_import_image",
+    "ocr_image",
+    "journal_readback_container",
+    "recall_cites_document_en_container",
+    "evidence_readback_en_container",
+    "recall_cites_document_uk_container",
+    "evidence_readback_uk_container",
+    "recall_cites_document_image_container",
+    "evidence_readback_image_container",
+    "wiki_literal_quotes_container",
+    "wiki_lint_container",
+    "brief_container",
+    "mcp_tools",
+    "wrapper_download_to_host",
+    "container_healthy_recreated",
+    "recreate_keeps_data",
+    "journal_readback_recreated",
+    "recall_cites_document_en_recreated",
+    "evidence_readback_en_recreated",
+    "clean_stop",
+    "backup_in_container",
+    "restore_in_container",
+    "container_healthy_restored",
+    "journal_readback_restored",
+    "recall_cites_document_en_restored",
+    "evidence_readback_en_restored",
+    "restore_keeps_data"
+  ],
+  "finished_at": "2026-10-19T22:57:40Z",
+  "format": "lifecontext-qualification-evidence/1",
+  "info": {
+    "doctor_container": {
+      "last_start_offline": true,
+      "models_cached": true,
+      "ok": true,
+      "problems": [],
+      "service_ready": true,
+      "warnings": []
+    },
+    "listeners_in_container": "127.0.0.11:35669 127.0.0.1:25994 127.0.0.1:8765 ",
+    "mcp_tools": [
+      "brief",
+      "document_show",
+      "documents_list",
+      "evidence",
+      "operation_show",
+      "recall",
+      "reflect",
+      "status",
+      "wiki_lint",
+      "wiki_list",
+      "wiki_reviews",
+      "wiki_show"
+    ],
+    "memory_after_scenario": "1.73GiB / 4GiB",
+    "memory_after_start": "1.225GiB / 4GiB",
+    "memory_restored": "1.215GiB / 4GiB",
+    "tesseract_languages": [
+      "eng",
+      "osd",
+      "rus",
+      "ukr"
+    ]
+  },
+  "job": "docker",
+  "ref": "refs/heads/release-candidate",
+  "result": "pass",
+  "run_attempt": "1",
+  "run_url": "https://github.com/Hantok/lifecontext/actions/runs/39337306385",
+  "runner": {
+    "arch": "X64",
+    "cpus": 2,
+    "image": "ubuntu24",
+    "image_version": "20261018.339.1",
+    "machine": "x86_64",
+    "os": "Linux",
+    "release": "7.0.0-1017-azure"
+  },
+  "sizes_bytes": {
+    "backup_archive": 7796724,
+    "image": 3152207072
+  },
+  "started_at": "2026-10-19T22:47:12Z",
+  "timings_seconds": {
+    "container_healthy": 35.2,
+    "container_healthy_recreated": 35.2,
+    "container_healthy_restored": 65.3,
+    "docker_build": 197,
+    "docker_stop": 5,
+    "recall_en_container": 1.5,
+    "recall_en_recreated": 1.5,
+    "recall_en_restored": 1.6,
+    "recall_image_container": 1.4,
+    "recall_uk_container": 1.4
+  },
+  "versions": {
+    "compose": "2.38.2",
+    "docker": "28.0.4",
+    "hindsight": {
+      "hindsight-all": "0.9.2",
+      "hindsight-client": "0.9.2",
+      "hindsight-embed": "0.9.2"
+    },
+    "lifecontext": "1.2.0.dev0",
+    "python": "3.12.15",
+    "tesseract": "tesseract 5.3.0"
+  }
+}

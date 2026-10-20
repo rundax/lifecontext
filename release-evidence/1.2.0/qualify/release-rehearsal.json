@@ -1,0 +1,85 @@
+{
+  "checks": {
+    "doctor_release": {
+      "detail": "exit 0, problems [], warnings []",
+      "status": "pass"
+    },
+    "image_pull": {
+      "detail": "exit 0, ghcr.io/hantok/lifecontext@sha256:811b4c8293202a644f9e990e73f052bd2d5e322bff5e903a53122d6a5c2ea3c5",
+      "status": "pass"
+    },
+    "image_signature": {
+      "detail": "cosign verify exit 0, identity release.yml@refs/tags/v1.2.0rc1",
+      "status": "pass"
+    },
+    "install_sh_release": {
+      "detail": "exit 0, The wheel and requirements-linux-x86_64.txt match SHA256SUMS",
+      "seconds": 99.0,
+      "status": "pass"
+    },
+    "release_assets": {
+      "detail": "draft true, prerelease true, 9 assets: constraints-cpu.txt install.sh lifecontext-1.2.0rc1-py3-none-any.whl lifecontext-1.2.0rc1.tar.gz requirements-linux-aarch64.txt requirements-linux-x86_64.txt requirements-macos-arm64.txt SHA256SUMS SHA256SUMS.sigstore.json",
+      "status": "pass"
+    },
+    "release_signature_checked": {
+      "detail": "install.sh verified SHA256SUMS.sigstore.json with cosign (identity release.yml@refs/tags/v1.2.0rc1)",
+      "status": "pass"
+    }
+  },
+  "commit": "8dce6f9e652f249ac5270b72baf2a06514d83ef5",
+  "expected_checks": [
+    "release_assets",
+    "install_sh_release",
+    "release_signature_checked",
+    "doctor_release",
+    "image_pull",
+    "image_signature"
+  ],
+  "finished_at": "2026-10-19T22:15:26Z",
+  "format": "lifecontext-qualification-evidence/1",
+  "info": {
+    "doctor_release": {
+      "last_start_offline": true,
+      "models_cached": true,
+      "ok": true,
+      "problems": [],
+      "service_ready": true,
+      "warnings": []
+    },
+    "package_visibility": "private",
+    "tesseract_languages": [
+      "eng",
+      "osd",
+      "rus",
+      "ukr"
+    ]
+  },
+  "job": "release",
+  "ref": "refs/heads/lane-c2/release",
+  "result": "pass",
+  "run_attempt": "1",
+  "run_url": "https://github.com/Hantok/lifecontext/actions/runs/39333258529",
+  "runner": {
+    "arch": "X64",
+    "cpus": 2,
+    "image": "ubuntu24",
+    "image_version": "20261018.339.1",
+    "machine": "x86_64",
+    "os": "Linux",
+    "release": "7.0.0-1017-azure"
+  },
+  "sizes_bytes": {},
+  "started_at": "2026-10-19T22:12:27Z",
+  "timings_seconds": {},
+  "versions": {
+    "cosign": "v3.0.6",
+    "hindsight": {
+      "hindsight-all": "0.9.2",
+      "hindsight-client": "0.9.2",
+      "hindsight-embed": "0.9.2"
+    },
+    "lifecontext": "1.2.0rc1",
+    "python": "3.12.15",
+    "tesseract": "tesseract 5.3.4"
+  }
+}

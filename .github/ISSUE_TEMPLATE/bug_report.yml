@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in LifeContext does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go to SECURITY.md, not to an issue.
+        Use synthetic data only. Remove journal text, document content, vault paths you do not want to share, API keys and tokens from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: LifeContext version
+      description: Output of `lifecontext --version`.
+      placeholder: lifecontext 1.2.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and Python version
+      placeholder: Ubuntu 24.04 x86_64, Python 3.12.3
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: LLM provider ID and vision setting
+      description: The `llm.provider` value from config.yaml, and whether a `vision` block is set. No keys, no URLs with secrets.
+      placeholder: anthropic; vision off
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The exact command you ran and its output (JSON with `--json` if possible), with personal data removed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Ideally with a small synthetic file or text.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed personal data, credentials and tokens from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

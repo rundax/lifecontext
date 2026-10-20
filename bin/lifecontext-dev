@@ -1,0 +1,52 @@
+#!/bin/sh
+# Resolve the checkout without changing the caller's working directory.
+set -eu
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+exec "$project_root/.dev/venv/bin/python" -I -c "$(cat <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+from lifecontext.config import load_settings
+from lifecontext.vault import ManagedVault
+
+root = Path(sys.argv[1])
+args = sys.argv[2:]
+dev = root / ".dev"
+home = dev / "home"
+vault = dev / "vault"
+
+try:
+    # Do not let the CLI's root/subcommand port options escape the dev service.
+    if any(arg.split("=", 1)[0] in {"--p", "--po", "--por", "--port"} for arg in args):
+        raise ValueError("port is fixed at 18765")
+    for path in (dev, home, home / ".lifeweave", dev / "tmp", vault, vault / "Journal"):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError("required dev directories must exist, be owned by you, and have mode 0700")
+    config = home / ".lifeweave" / "config.yaml"
+    if not config.is_file():
+        raise ValueError("dev config is required")
+    os.environ["HOME"] = str(home)
+    os.environ["TMPDIR"] = str(dev / "tmp")
+    os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
+    os.environ["XDG_CACHE_HOME"] = str(home / ".cache")
+    for name in ("PYTHONHOME", "PYTHONPATH"):
+        os.environ.pop(name, None)
+    settings = load_settings()
+    configured = settings.get("vault", {})
+    if (configured.get("root") != str(vault)
+            or configured.get("journal_path") != str(vault / "Journal")):
+        raise ValueError("config must select this checkout's dev vault and Journal")
+    with ManagedVault(vault, vault / "Journal"):
+        pass
+except (OSError, ValueError) as exc:
+    print(f"lifecontext-dev: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+cli = root / ".dev" / "venv" / "bin" / "lifecontext"
+os.execv(str(cli), [str(cli), "--port", "18765", *args])
+PY
+)" "$project_root" "$@"

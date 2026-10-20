@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>LifeContext · Ваші документи, зведені у вікі з цитатами</title>
+<meta name="description" content="Шар контексту для AI-агентів, що працює на вашій машині. LifeContext зберігає оригінали файлів, розпізнає текст локальним OCR і збирає вікі в Obsidian, де кожне твердження є дослівною цитатою, звіреною з джерелом.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f7f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c1110" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="https://hantok.github.io/lifecontext/uk/">
+<link rel="alternate" hreflang="en" href="https://hantok.github.io/lifecontext/">
+<link rel="alternate" hreflang="uk" href="https://hantok.github.io/lifecontext/uk/">
+<link rel="alternate" hreflang="x-default" href="https://hantok.github.io/lifecontext/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LifeContext">
+<meta property="og:title" content="LifeContext: ваші документи й нотатки, зведені у вікі. Кожне твердження має джерело.">
+<meta property="og:description" content="Шар контексту для AI-агентів на вашій машині. Оригінали лишаються у вас; вікі, яку він збирає, цитує їх, посилається на них і записує, де вони суперечать одне одному.">
+<meta property="og:url" content="https://hantok.github.io/lifecontext/uk/">
+<meta property="og:image" content="https://hantok.github.io/lifecontext/og-uk.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="LifeContext: твердження зі сторінки вікі як дослівна цитата з посиланням на договір-оренди-2024.pdf, версія 1, сторінка 3.">
+<meta property="og:locale" content="uk_UA">
+<meta property="og:locale:alternate" content="en_GB">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<script src="../assets/site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Перейти до вмісту</a>
+
+<header class="site-header">
+  <div class="wrap header-row">
+    <a class="brand" href="./" aria-label="LifeContext, головна">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="7"/><rect class="mark-fg" x="7" y="8.5" width="12" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="14.5" width="18" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="20.5" width="9" height="3" rx="1.5"/><circle class="mark-dot" cx="23.5" cy="10" r="2.5"/></svg>
+      LifeContext
+    </a>
+    <nav class="site-nav" aria-label="Розділи">
+      <ul class="nav-links">
+        <li><a href="#example">Приклад</a></li>
+        <li><a href="#how">Як працює</a></li>
+        <li><a href="#install">Встановлення</a></li>
+        <li><a href="#agents">Агенти</a></li>
+        <li><a href="#compare">Порівняння</a></li>
+        <li><a href="#privacy">Дані</a></li>
+        <li><a href="#licensing">Ліцензія</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+    </nav>
+    <div class="header-tools">
+      <details class="menu">
+        <summary>Меню</summary>
+        <ul class="menu-list">
+          <li><a href="#example">Приклад</a></li>
+          <li><a href="#how">Як це працює</a></li>
+          <li><a href="#install">Встановлення</a></li>
+          <li><a href="#agents">Агенти</a></li>
+          <li><a href="#compare">Порівняння</a></li>
+          <li><a href="#privacy">Що залишає вашу машину</a></li>
+          <li><a href="#licensing">Ліцензування</a></li>
+          <li><a href="#faq">Запитання</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext">GitHub</a></li>
+        </ul>
+      </details>
+      <a class="lang-link" href="../" hreflang="en" lang="en"><span aria-hidden="true">EN</span><span class="sr-only">English version</span></a>
+      <button class="icon-btn theme-toggle" type="button" data-theme-toggle aria-pressed="false" hidden>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <span class="sr-only">Темна тема</span>
+      </button>
+      <a class="icon-btn gh-link" href="https://github.com/Hantok/lifecontext">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero-grid">
+    <div class="hero-head">
+      <p class="eyebrow">На вашій машині · source-available · v1.2</p>
+      <h1 id="hero-h">Ваші документи й нотатки, зведені у вікі. <span class="accent-line">Кожне твердження має джерело.</span></h1>
+    </div>
+    <div class="hero-copy">
+      <p class="lead">LifeContext — шар контексту для ваших AI-агентів, який працює на вашому комп’ютері. Він зберігає оригінали файлів, читає їх (зокрема скани) і збирає Markdown-вікі у вашому сховищі Obsidian. Кожне твердження є дослівною цитатою, яку звіряють із текстом джерела ще до запису сторінки; короткий підсумок над твердженнями позначено як написаний моделлю.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#install">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v12M6 12l6 6 6-6M5 20h14"/></svg>
+          Встановити
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/Hantok/lifecontext">Переглянути на GitHub</a>
+      </div>
+      <ul class="hero-facts">
+        <li>Linux і macOS; Windows через Docker або WSL</li>
+        <li>Безкоштовно для приватних осіб</li>
+        <li>OCR англійською, українською та російською</li>
+      </ul>
+    </div>
+
+    <figure class="anatomy" aria-labelledby="anatomy-cap">
+      <div class="anatomy-card">
+        <div class="card-bar"><span class="path">wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад</span></div>
+        <div class="anatomy-body">
+          <p class="anatomy-title">Оренда квартири</p>
+          <div class="anatomy-claim">
+            <span class="n" aria-hidden="true">2</span>
+            <div>
+              <blockquote><p>«Орендна плата становить 22 000 гривень на місяць і сплачується авансом першого (1-го) числа кожного місяця».</p></blockquote>
+              <p class="cite-row">
+                <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg><span>договір-оренди-2024.pdf <b>v1</b> · с. 3</span></span>
+                <span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>цитату знайдено в джерелі</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ol class="anatomy-notes">
+        <li><b>Дослівна цитата.</b> Скопійована з витягнутого тексту, без переказу.</li>
+        <li><b>Джерело, версія, фрагмент.</b> Посилання веде на одну збережену версію оригіналу.</li>
+        <li><b>Перевірка наперед.</b> Цитату звіряють із текстом джерела, перш ніж записати сторінку.</li>
+      </ol>
+      <figcaption id="anatomy-cap">Будова одного твердження. Вигаданий приклад.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="section section-band" id="example" aria-labelledby="example-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[1]</b>Приклад</p>
+      <h2 id="example-h">Як виглядає зібрана сторінка</h2>
+      <p class="lead">Три джерела про одну квартиру: PDF договору оренди, лист від орендодавиці й ваші власні нотатки про переїзд. Кожне джерело має власну сторінку, і їхні твердження сходяться на спільній сторінці теми. Приклад статичний; усі імена, файли й числа в ньому вигадані.</p>
+    </header>
+
+    <div class="demo">
+      <article class="note" aria-labelledby="note-title">
+        <div class="card-bar"><span class="path">vault/wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад · вигаданий</span></div>
+        <div class="note-body">
+          <h3 id="note-title">Оренда квартири</h3>
+          <p class="note-meta">Сторінка теми · 3 джерела · ревізія r4 · зібрано 2026-10-14</p>
+
+          <aside class="summary" aria-label="Підсумок від моделі">
+            <p class="summary-label"><strong>Підсумок від моделі</strong><span>Написано моделлю на основі пронумерованих тверджень нижче. Перевірте, перш ніж на нього покладатися.</span></p>
+            <p>Договір діє дванадцять місяців з 1 березня 2024 року, оренда коштує 22 000 гривень на місяць <span class="ref">[<a href="#c1">1</a>, <a href="#c2">2</a>]</span>. Гарантійний платіж дорівнює двомісячній оплаті <span class="ref">[<a href="#c3">3</a>]</span>. Договір і лист орендодавиці називають різні дати оплати; нижче це записано як відкриту суперечність <span class="ref">[<a href="#c2">2</a>, <a href="#c5">5</a>]</span>. Для тварин потрібна письмова згода, і в листі орендодавиця погоджується на кицьку <span class="ref">[<a href="#c4">4</a>, <a href="#c6">6</a>]</span>. Радіатор у спальні обіцяють замінити до зими <span class="ref">[<a href="#c7">7</a>]</span>.</p>
+          </aside>
+
+          <h4>Твердження</h4>
+          <ol class="claims">
+            <li class="claim" id="c1">
+              <blockquote><p>«Строк дії цього договору становить дванадцять (12) місяців, починаючи з 1 березня 2024 року».</p></blockquote>
+              <p class="cite-row"><span class="chip">договір-оренди-2024.pdf <b>v1</b> · с. 1</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c2">
+              <blockquote><p>«Орендна плата становить 22 000 гривень на місяць і сплачується авансом першого (1-го) числа кожного місяця».</p></blockquote>
+              <p class="cite-row"><span class="chip">договір-оренди-2024.pdf <b>v1</b> · с. 3</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c3">
+              <blockquote><p>«Орендар сплачує гарантійний платіж у розмірі двомісячної орендної плати».</p></blockquote>
+              <p class="cite-row"><span class="chip">договір-оренди-2024.pdf <b>v1</b> · с. 4</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c4">
+              <blockquote><p>«Утримання домашніх тварин допускається лише за попередньою письмовою згодою Орендодавця».</p></blockquote>
+              <p class="cite-row"><span class="chip">договір-оренди-2024.pdf <b>v1</b> · с. 5</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c5">
+              <blockquote><p>«Підтверджую: оплата 5-го числа кожного місяця, як ми й домовлялися».</p></blockquote>
+              <p class="cite-row"><span class="chip">лист-орендодавиці.txt <b>v1</b> · ¶2</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c6">
+              <blockquote><p>«Кицьку беріть, тільки щоб не виходила на балкон».</p></blockquote>
+              <p class="cite-row"><span class="chip">лист-орендодавиці.txt <b>v1</b> · ¶3</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+            <li class="claim" id="c7">
+              <blockquote><p>«Марта каже, що радіатор у спальні замінять до зими».</p></blockquote>
+              <p class="cite-row"><span class="chip">нотатки-переїзд.md <b>v1</b> · ¶2</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Цитату знайдено в джерелі</span></span></p>
+            </li>
+          </ol>
+
+          <section class="conflict" aria-labelledby="conflict-h">
+            <div class="conflict-head">
+              <h4 id="conflict-h">Суперечність: дата оплати</h4>
+              <span class="badge badge-open">Відкрита · не вирішується автоматично</span>
+            </div>
+            <div class="conflict-sides">
+              <div class="side">
+                <p class="side-label">Твердження 2 · джерело від 2024-02-20</p>
+                <blockquote><p>«…сплачується авансом <mark>першого (1-го) числа</mark> кожного місяця».</p></blockquote>
+                <p class="cite-row"><span class="chip">договір-оренди-2024.pdf <b>v1</b> · с. 3</span></p>
+              </div>
+              <div class="vs" aria-hidden="true">vs</div>
+              <div class="side">
+                <p class="side-label">Твердження 5 · джерело від 2024-03-02</p>
+                <blockquote><p>«Підтверджую: оплата <mark>5-го числа</mark> кожного місяця, як ми й домовлялися».</p></blockquote>
+                <p class="cite-row"><span class="chip">лист-орендодавиці.txt <b>v1</b> · ¶2</span></p>
+              </div>
+            </div>
+            <p class="conflict-foot">Обидва твердження лишаються на сторінці разом із датами, доки ви не вирішите, яке з них чинне. Дата береться з тієї, яку ви вказали під час імпорту; якщо її немає, це дата імпорту.</p>
+          </section>
+
+          <section class="mine" aria-labelledby="mine-h">
+            <div class="mine-head">
+              <h4 id="mine-h">Мої нотатки</h4>
+              <span class="badge badge-mine">Ваш розділ · зберігається під час кожного оновлення</span>
+            </div>
+            <p>Попросити Марту оформити 5-те число додатком до договору.</p>
+          </section>
+
+          <section class="related" aria-labelledby="related-h">
+            <h4 id="related-h">Пов’язане</h4>
+            <ul>
+              <li><span class="wikilink">[[Марта Коваленко]]</span><span class="kind">сутність · 2 джерела</span></li>
+              <li><span class="wikilink">[[Депозитний рахунок]]</span><span class="kind">тема</span><span class="badge badge-stale">Застаріла</span><span class="stale-note">Одне з джерел цієї сторінки виправили; перебудуйте її командою <code>lifecontext wiki rebuild</code>.</span></li>
+              <li><span class="wikilink">[[договір-оренди-2024.pdf]]</span><span class="kind">сторінка документа</span></li>
+              <li><span class="wikilink">[[лист-орендодавиці.txt]]</span><span class="kind">сторінка документа</span></li>
+              <li><span class="wikilink">[[нотатки-переїзд.md]]</span><span class="kind">сторінка документа</span></li>
+            </ul>
+          </section>
+        </div>
+      </article>
+
+      <div class="demo-side">
+        <article class="brief" aria-labelledby="brief-h">
+          <div class="card-bar"><span class="path">wiki/Briefs/2026-10-14 - Brief.md</span></div>
+          <div class="brief-body">
+            <h3 id="brief-h">Щоденне зведення, 14 жовтня 2026</h3>
+            <dl>
+              <div><dt>Імпортовано</dt><dd>лист-орендодавиці.txt</dd></div>
+              <div><dt>Змінені сторінки</dt><dd>Оренда квартири <span class="delta">r3 → r4, +2 твердження</span><br>Марта Коваленко <span class="delta">r1 → r2, +1 твердження</span></dd></div>
+              <div><dt>Нова суперечність</dt><dd>Оренда квартири: оплата 1-го числа (договір, 2024-02-20) чи 5-го (лист, 2024-03-02)</dd></div>
+              <div><dt>Застаріли</dt><dd>Депозитний рахунок, після виправлення лист-банку.pdf до v2</dd></div>
+              <div><dt>Lint</dt><dd>0 помилок · 2 попередження: 1 сторінка без вхідних посилань, 1 документ зі сторінками, які OCR не зміг прочитати</dd></div>
+            </dl>
+          </div>
+        </article>
+
+        <div class="legend">
+          <p class="legend-title" id="legend-h">Як читати</p>
+          <dl aria-labelledby="legend-h">
+          <div><dt><span class="swatch swatch-quote"></span><span class="sr-only">Пронумерована цитата</span></dt><dd>Пронумерований текст із засічками — дослівна цитата з джерела.</dd></div>
+          <div><dt><span class="chip" aria-hidden="true">v1</span><span class="sr-only">Мітка джерела</span></dt><dd>Мітка називає джерело, його збережену версію і фрагмент.</dd></div>
+          <div><dt><span class="swatch swatch-model"></span><span class="sr-only">Заштрихований блок</span></dt><dd>Заштрихований блок пише модель, і він посилається на номери тверджень.</dd></div>
+          <div><dt><span class="swatch swatch-conflict"></span><span class="sr-only">Бурштиновий блок</span></dt><dd>Бурштиновим кольором позначено суперечність між джерелами, яку лишено на ваше рішення.</dd></div>
+          <div><dt><span class="swatch swatch-stale"></span><span class="sr-only">Сіра позначка</span></dt><dd>Застарілі сторінки спираються на джерело, яке виправили або вилучили.</dd></div>
+          <div><dt><span class="swatch swatch-mine"></span><span class="sr-only">Ваш розділ</span></dt><dd>Ваш власний розділ зберігається байт у байт під час кожного оновлення.</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+    <p class="demo-foot">Натисніть номер твердження в підсумку, щоб перейти до цитати.</p>
+  </div>
+</section>
+
+<section class="section" id="how" aria-labelledby="how-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[2]</b>Як це працює</p>
+      <h2 id="how-h">Від оригіналу до сторінки з цитатами</h2>
+      <p class="lead">Усе працює на вашій машині. Крім одноразового завантаження моделей, назовні йдуть лише запити до постачальника моделі, якого ви обрали, і до візуальної моделі, якщо ви її ввімкнете.</p>
+    </header>
+
+    <figure class="diagram">
+      <svg class="diagram-wide" viewBox="0 0 1120 330" role="img" aria-labelledby="dw-t dw-d">
+        <title id="dw-t">Як LifeContext обробляє документ</title>
+        <desc id="dw-d">На вашій машині: оригінали, далі витяг тексту й OCR, далі індекс Hindsight, далі зібрана вікі, з якої читають сховище Obsidian і ваші агенти. Поза вашою машиною: постачальник моделі, якого ви обрали, для індексації та збирання сторінок, і необов’язкова візуальна модель для витягу тексту.</desc>
+        <defs>
+          <marker id="dw-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+        <rect class="d-zone" x="10" y="10" width="1100" height="220" rx="14"/>
+        <text class="d-zone-label" x="30" y="40">ВАША МАШИНА</text>
+
+        <rect class="d-box" x="30" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="46" y="86">01</text>
+        <text class="d-title" x="46" y="110">Оригінали</text>
+        <text class="d-sub" x="46" y="134">Без змін:</text>
+        <text class="d-sub" x="46" y="151">контрольні суми,</text>
+        <text class="d-sub" x="46" y="168">версії</text>
+
+        <rect class="d-box" x="248" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="264" y="86">02</text>
+        <text class="d-title" x="264" y="110">Витяг + OCR</text>
+        <text class="d-sub" x="264" y="134">PDF, Office,</text>
+        <text class="d-sub" x="264" y="151">зображення</text>
+        <text class="d-sub" x="264" y="168">OCR: EN · UK · RU</text>
+
+        <rect class="d-box" x="466" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="482" y="86">03</text>
+        <text class="d-title" x="482" y="110">Індекс Hindsight</text>
+        <text class="d-sub" x="482" y="134">Пошук із</text>
+        <text class="d-sub" x="482" y="151">мультимовним</text>
+        <text class="d-sub" x="482" y="168">реранкером</text>
+
+        <rect class="d-box d-box-key" x="684" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="700" y="86">04</text>
+        <text class="d-title" x="700" y="110">Зібрана вікі</text>
+        <text class="d-sub" x="700" y="134">Цитати звірено</text>
+        <text class="d-sub" x="700" y="151">з джерелом</text>
+        <text class="d-sub" x="700" y="168">Суперечності записано</text>
+
+        <rect class="d-box" x="902" y="60" width="186" height="62" rx="10"/>
+        <text class="d-title" x="918" y="86">Сховище Obsidian</text>
+        <text class="d-sub" x="918" y="106">Ваш розділ цілий</text>
+
+        <rect class="d-box" x="902" y="128" width="186" height="62" rx="10"/>
+        <text class="d-title" x="918" y="154">Ваші агенти</text>
+        <text class="d-sub" x="918" y="174">Скіл · MCP-сервер</text>
+
+        <path class="d-arrow" d="M216 125H244" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M434 125H462" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M652 125H680" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M870 125 896 94" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M870 125 896 156" marker-end="url(#dw-arrow)"/>
+
+        <path class="d-arrow d-zone" d="M341 190V256"/>
+        <path class="d-arrow d-zone" d="M559 190V256"/>
+        <path class="d-arrow d-zone" d="M777 190V256"/>
+
+        <rect class="d-cloud" x="248" y="258" width="186" height="58" rx="10"/>
+        <text class="d-title" x="264" y="282">Візуальна модель</text>
+        <text class="d-sub" x="264" y="302">типово вимкнена</text>
+
+        <rect class="d-cloud" x="466" y="258" width="404" height="58" rx="10"/>
+        <text class="d-title" x="482" y="282">Постачальник моделі на ваш вибір</text>
+        <text class="d-sub" x="482" y="302">Отримує витягнутий текст або працює локально</text>
+      </svg>
+
+      <svg class="diagram-tall" viewBox="0 0 360 712" role="img" aria-labelledby="dt-t dt-d">
+        <title id="dt-t">Як LifeContext обробляє документ</title>
+        <desc id="dt-d">На вашій машині: оригінали, далі витяг тексту й OCR, далі індекс Hindsight, далі зібрана вікі, з якої читають сховище Obsidian і ваші агенти. Поза вашою машиною: постачальник моделі, якого ви обрали, і необов’язкова візуальна модель.</desc>
+        <defs>
+          <marker id="dt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+        <rect class="d-zone" x="8" y="8" width="344" height="544" rx="14"/>
+        <text class="d-zone-label" x="30" y="36">ВАША МАШИНА</text>
+
+        <rect class="d-box" x="40" y="50" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="78">01</text>
+        <text class="d-title" x="82" y="78">Оригінали</text>
+        <text class="d-sub" x="56" y="102">Незмінні, версії, контрольні суми</text>
+
+        <path class="d-arrow" d="M185 120V146" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="150" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="178">02</text>
+        <text class="d-title" x="82" y="178">Витяг + OCR</text>
+        <text class="d-sub" x="56" y="202">PDF, Office, зображення; OCR EN/UK/RU</text>
+
+        <path class="d-arrow" d="M185 220V246" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="250" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="278">03</text>
+        <text class="d-title" x="82" y="278">Індекс Hindsight</text>
+        <text class="d-sub" x="56" y="302">Мультимовний реранкер</text>
+
+        <path class="d-arrow" d="M185 320V346" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box d-box-key" x="40" y="350" width="290" height="88" rx="10"/>
+        <text class="d-num" x="56" y="378">04</text>
+        <text class="d-title" x="82" y="378">Зібрана вікі</text>
+        <text class="d-sub" x="56" y="402">Цитати звірено з джерелом</text>
+        <text class="d-sub" x="56" y="420">Суперечності лишаються відкритими</text>
+
+        <path class="d-arrow" d="M130 438V470" marker-end="url(#dt-arrow)"/>
+        <path class="d-arrow" d="M240 438V470" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="474" width="140" height="62" rx="10"/>
+        <text class="d-title" x="54" y="500">Obsidian</text>
+        <text class="d-sub" x="54" y="520">нотатки цілі</text>
+
+        <rect class="d-box" x="190" y="474" width="140" height="62" rx="10"/>
+        <text class="d-title" x="204" y="500">Агенти</text>
+        <text class="d-sub" x="204" y="520">скіл · MCP</text>
+
+        <path class="d-arrow d-zone" d="M330 285H342V602H332"/>
+        <path class="d-arrow d-zone" d="M330 394H342"/>
+        <path class="d-arrow d-zone" d="M40 185H22V672H38"/>
+
+        <rect class="d-cloud" x="40" y="572" width="290" height="60" rx="10"/>
+        <text class="d-title" x="56" y="597">Постачальник моделі</text>
+        <text class="d-sub" x="56" y="617">Отримує текст або працює локально</text>
+
+        <rect class="d-cloud" x="40" y="644" width="290" height="58" rx="10"/>
+        <text class="d-title" x="56" y="668">Візуальна модель</text>
+        <text class="d-sub" x="56" y="688">типово вимкнена</text>
+      </svg>
+    </figure>
+
+    <ol class="steps">
+      <li>
+        <h3>Оригінали</h3>
+        <p>Кожен доданий файл зберігається як є, з контрольною сумою і версіями. Виправлення додає нову версію, попередні лишаються.</p>
+      </li>
+      <li>
+        <h3>Витяг тексту й OCR</h3>
+        <p>Текст береться з TXT, Markdown, PDF (зокрема книжкового обсягу), DOCX, XLSX, PPTX і зображень. Скани проходять локальне розпізнавання Tesseract англійською, українською та російською.</p>
+        <p>Візуальна модель, яку ви налаштуєте, читає рукопис, фото й діаграми. Типово вона вимкнена.</p>
+      </li>
+      <li>
+        <h3>Індекс</h3>
+        <p>Побудовано на рушії пам’яті <a href="https://github.com/vectorize-io/hindsight">Hindsight</a> з відкритим кодом. LifeContext налаштовує мультимовний реранкер для англійських, українських і російських текстів.</p>
+      </li>
+      <li class="key">
+        <h3>Зібрана вікі</h3>
+        <p>Кожен документ має власну сторінку. Спільні сторінки тем і сутностей збирають твердження з кількох документів і посилаються одна на одну.</p>
+        <ul>
+          <li>Кожне твердження є дослівною цитатою з посиланням на джерело, версію і фрагмент. Її звіряють із текстом джерела ще до запису сторінки.</li>
+          <li>Короткий підсумок над цитатами позначено як написаний моделлю.</li>
+          <li>Суперечності, які знаходить модель, записуються й ніколи не вирішуються автоматично.</li>
+          <li>Якщо джерело виправити або вилучити, залежні від нього сторінки позначаються як застарілі.</li>
+        </ul>
+      </li>
+      <li>
+        <h3>Obsidian і ваші агенти</h3>
+        <p>Сторінки записуються як Markdown у ваше сховище Obsidian. На кожній сторінці є розділ для ваших нотаток, і він зберігається байт у байт. Якщо ви зміните згенеровану частину, LifeContext повідомить про конфлікт і не перезапише її.</p>
+        <p>Агенти читають ті самі сторінки й докази через один скіл або MCP-сервер.</p>
+      </li>
+    </ol>
+
+    <div class="upkeep">
+      <h3>Як вікі лишається актуальною</h3>
+      <ul class="upkeep-list">
+        <li><strong>Щоденне зведення і журнал змін</strong>Що імпортовано, які сторінки змінилися, нові суперечності й сторінки, що застаріли.</li>
+        <li><strong><code>wiki lint</code></strong>Показує застарілі сторінки, відкриті суперечності, сторінки без посилань і прогалини. Нічого не змінює.</li>
+        <li><strong>Щоденник</strong>Записуйте щоденникові нотатки з командного рядка або через агента. Записи називаються за датою й заголовком.</li>
+        <li><strong>Експорт та імпорт</strong>Переносьте бібліотеку між машинами одним пакетом.</li>
+        <li><strong>Резервні копії</strong>Зберігайте оригінали, каталог, індекс і сховище та відновлюйте їх у новій домашній теці.</li>
+        <li><strong>Своя модель</strong>Anthropic, OpenAI, Gemini, OpenRouter або будь-який OpenAI-сумісний endpoint, зокрема локальний.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="install" aria-labelledby="install-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[3]</b>Встановлення</p>
+      <h2 id="install-h">Встановлення</h2>
+      <p class="lead">Одна команда на Linux і macOS, образ контейнера для решти систем або звичайний клон репозиторію, якщо спершу хочете прочитати код.</p>
+    </header>
+
+    <div class="install-grid">
+      <div class="tabs" data-tabs>
+        <div class="tablist" role="tablist" aria-label="Спосіб встановлення" hidden>
+          <button type="button" role="tab" id="tab-sh" aria-controls="panel-sh" aria-selected="true">install.sh</button>
+          <button type="button" role="tab" id="tab-docker" aria-controls="panel-docker" aria-selected="false" tabindex="-1">Docker</button>
+          <button type="button" role="tab" id="tab-src" aria-controls="panel-src" aria-selected="false" tabindex="-1">З коду</button>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-sh" aria-labelledby="tab-sh">
+          <h3 class="panel-title">install.sh</h3>
+          <p class="step-label">1 · Встановлення</p>
+          <div class="code">
+            <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-sh" aria-label="Копіювати команду встановлення" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre class="wrap-lines" tabindex="0"><code id="code-sh">curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh</code></pre>
+          </div>
+          <p class="step-label">2 · За бажанням: повторне налаштування</p>
+          <p><code>install.sh</code> уже виконує <code>init</code>, <code>service install</code>, <code>skills install</code> і <code>doctor</code>. Ці команди можна запустити знову будь-коли.</p>
+          <div class="code">
+            <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Копіювати команди налаштування" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre tabindex="0"><code id="code-sh-2">lifecontext init            <span class="c"># постачальник, модель, ключ API, тека сховища</span>
+lifecontext doctor          <span class="c"># готовність, мови OCR, стан візуальної моделі</span>
+lifecontext skills install  <span class="c"># Claude Code, Codex, Gemini CLI, Hermes</span></code></pre>
+          </div>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
+          <h3 class="panel-title">Docker</h3>
+          <p>Образ містить Tesseract з англійською, українською та російською мовами й локальні моделі та працює від непривілейованого користувача. Порт назовні не відкривається: сервіс слухає loopback усередині контейнера, і ви звертаєтеся до нього через <code>docker exec</code>. Ключ лежить у секреті Compose і в образ не потрапляє. Решта налаштувань застосовується під час першого запуску.</p>
+          <p class="step-label">compose.yaml</p>
+          <div class="code">
+            <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Копіювати compose.yaml" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre tabindex="0"><code id="code-compose">services:
+  lifecontext:
+    image: ghcr.io/hantok/lifecontext:1.2.0
+    container_name: lifecontext
+    restart: unless-stopped
+    environment:                      <span class="c"># лише для першого запуску</span>
+      LIFECONTEXT_PROVIDER: anthropic
+      LIFECONTEXT_MODEL: claude-sonnet-5
+    secrets: [lifecontext_api_key]    <span class="c"># ключ; файл має читати uid 1000</span>
+    volumes:
+      - home:/data/home               <span class="c"># налаштування, індекс, резервні копії</span>
+      - vault:/data/vault             <span class="c"># ваше сховище Obsidian</span>
+
+secrets:
+  lifecontext_api_key:
+    file: ./secrets/lifecontext_api_key
+
+volumes:
+  home:
+  vault:</code></pre>
+          </div>
+          <p class="step-label">Ключ, запуск, перевірка</p>
+          <div class="code">
+            <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-docker" aria-label="Копіювати команди Docker" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre tabindex="0"><code id="code-docker">mkdir -p secrets
+(umask 077 &amp;&amp; cat &gt; secrets/lifecontext_api_key)   <span class="c"># вставте ключ, Enter, Ctrl-D</span>
+docker compose up -d
+docker compose exec lifecontext lifecontext doctor</code></pre>
+          </div>
+          <p>Агенти на хост-машині звертаються до контейнера через обгортку <code>lifecontext-docker</code>. Повний <a href="https://github.com/Hantok/lifecontext/blob/main/compose.yaml">compose.yaml</a> з перевіркою стану й обмеженнями лежить у репозиторії.</p>
+          <p class="step-label">Без Compose</p>
+          <div class="code">
+            <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-run" aria-label="Копіювати команду docker run" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre tabindex="0"><code id="code-run">docker run -d --name lifecontext \
+  -e LIFECONTEXT_MODEL=claude-sonnet-5 \
+  -v "$PWD/secrets/lifecontext_api_key:/run/secrets/lifecontext_api_key:ro" \
+  -v lifecontext-home:/data/home -v lifecontext-vault:/data/vault \
+  ghcr.io/hantok/lifecontext:1.2.0</code></pre>
+          </div>
+          <p>На Linux файл із ключем має бути доступний для читання uid 1000 у контейнері (<code>sudo chown 1000</code>).</p>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-src" aria-labelledby="tab-src">
+          <h3 class="panel-title">З вихідного коду</h3>
+          <p>Потрібні Python від 3.11 до 3.13, <a href="https://github.com/astral-sh/uv">uv</a> і Tesseract з мовними даними <code>eng</code>, <code>ukr</code> та <code>rus</code>. На Linux файл обмежень залишає PyTorch у збірці для процесора; на macOS виконайте замість цього <code>uv pip install -e .</code>.</p>
+          <div class="code">
+            <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-src" aria-label="Копіювати команди встановлення з коду" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+            <pre tabindex="0"><code id="code-src">git clone https://github.com/Hantok/lifecontext.git
+cd lifecontext
+uv venv &amp;&amp; . .venv/bin/activate
+uv pip install -c constraints-cpu.txt -e . \
+  --extra-index-url https://download.pytorch.org/whl/cpu \
+  --index-strategy unsafe-best-match   <span class="c"># Linux, PyTorch лише для CPU</span>
+lifecontext init
+lifecontext service install
+lifecontext skills install
+lifecontext doctor</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <aside class="req" aria-labelledby="req-h">
+        <h3 id="req-h">Вимоги</h3>
+        <ul>
+          <li>Linux (x86_64 або aarch64, glibc 2.35 або новіша) чи macOS 14 або новіша на Apple silicon, нативно.</li>
+          <li>Windows через Docker або WSL.</li>
+          <li>Ключ API вашого постачальника моделі або локальний OpenAI-сумісний endpoint, наприклад Ollama чи vLLM.</li>
+          <li>Близько 3 ГБ на диску для середовища й моделей (виміряно в CI на Linux: 2,4 ГБ займає встановлення, 0,6 ГБ — моделі). Інсталятор один раз завантажує моделі ембедингів і реранкінгу.</li>
+          <li>Пошук переранжовує результати на процесорі; на 4-ядерній машині це займає десятки секунд.</li>
+        </ul>
+        <h3>Що робить інсталятор</h3>
+        <ul>
+          <li>Перевіряє операційну систему й процесор і зупиняється зі зрозумілим повідомленням, якщо таке поєднання не підтримується.</li>
+          <li>Завантажує реліз через HTTPS і перевіряє контрольні суми SHA-256, а з cosign 3 або новішим — і їхній підпис. Усі залежності ставить із lock-файлу із закріпленими хешами.</li>
+          <li>Встановлює все в домашню теку. Для роботи LifeContext права root не потрібні.</li>
+          <li>Ставить Tesseract з англійською, українською та російською мовами через brew або через apt чи dnf, якщо sudo працює без пароля. Пароль інсталятор ніколи не питає: якщо так не виходить, він показує команду, яку треба виконати.</li>
+          <li>Виконує <code>init</code>, <code>service install</code>, <code>skills install</code> і <code>doctor</code>. Ключ API запитує <code>init</code>, у командному рядку він не передається.</li>
+          <li>Повторний запуск оновлює встановлення: зупиняє сервіс, робить резервну копію даних, ставить нову версію й знову запускає сервіс.</li>
+          <li>Залишає візуальну модель вимкненою.</li>
+        </ul>
+        <p class="callout">Прочитайте скрипт, перш ніж передавати його в <code>sh</code>. Він лежить в <a href="https://github.com/Hantok/lifecontext/releases/latest">останньому релізі</a>.</p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="agents" aria-labelledby="agents-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[4]</b>Агенти</p>
+      <h2 id="agents-h">Працює з вашими агентами</h2>
+      <p class="lead">Один скіл для агентів командного рядка й один MCP-сервер для MCP-клієнтів. Обидва звертаються до того самого локального сервісу й читають ті самі сторінки з цитатами.</p>
+    </header>
+
+    <div class="agents-grid">
+      <div class="agent-group">
+        <h3>Скіл для агентів <code>lifecontext skills install</code></h3>
+        <p>Одна копія скілу, під’єднана до кожного знайденого агента. Через CLI <code>lifecontext</code> агенти записують щоденник, імпортують документи, шукають із доказами й читають сторінки вікі.</p>
+        <table class="matrix">
+          <caption>Підтримка через скіл</caption>
+          <thead><tr><th scope="col">Агент</th><th scope="col">Підключення</th><th scope="col">Доступ</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Claude Code</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Скіл</span></td><td>Читання й запис</td></tr>
+            <tr><th scope="row">Codex</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Скіл</span></td><td>Читання й запис</td></tr>
+            <tr><th scope="row">Gemini CLI</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Скіл</span></td><td>Читання й запис</td></tr>
+            <tr><th scope="row">Hermes</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Скіл</span></td><td>Читання й запис</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="agent-group">
+        <h3>MCP-сервер <code>lifecontext mcp</code></h3>
+        <p>Новинка версії 1.2. Локальний stdio-сервер для MCP-клієнтів, як-от Claude Desktop і Cursor. Типово він лише читає; додайте <code>--allow-writes</code> до аргументів, щоб клієнти могли записувати й імпортувати.</p>
+        <div class="code">
+          <div class="code-head"><span>JSON</span><button class="copy" type="button" data-copy="code-mcp" aria-label="Копіювати конфігурацію MCP" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
+          <pre tabindex="0"><code id="code-mcp">{
+  "mcpServers": {
+    "lifecontext": {
+      "command": "/home/you/.local/bin/lifecontext",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+        </div>
+        <p>У поле <code>command</code> вставте результат <code>command -v lifecontext</code>: настільні застосунки не читають <code>PATH</code> вашої оболонки.</p>
+        <table class="matrix">
+          <caption>Підтримка через MCP</caption>
+          <thead><tr><th scope="col">Клієнт</th><th scope="col">Підключення</th><th scope="col">Доступ</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Claude Desktop</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP-сервер</span></td><td>Лише читання; запис з <code>--allow-writes</code></td></tr>
+            <tr><th scope="row">Cursor</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP-сервер</span></td><td>Лише читання; запис з <code>--allow-writes</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="providers">
+      <div>
+        <h3>Своя модель</h3>
+        <p>LifeContext працює з одним постачальником моделі за раз; його задають під час <code>init</code>. Anthropic у документації описано першим.</p>
+        <ul class="provider-list">
+          <li class="featured">Anthropic</li>
+          <li>OpenAI</li>
+          <li>Gemini</li>
+          <li>OpenRouter</li>
+          <li>Будь-який OpenAI-сумісний endpoint</li>
+          <li>Ollama або vLLM локально</li>
+        </ul>
+      </div>
+      <p class="trust"><strong>Що дозволено агентам.</strong> Підключений агент запускає CLI з вашими повноваженнями. Скіл пояснює, чого робити не можна: нічого не лагодити, не чіпати внутрішній стан, повідомляти про збої замість обхідних спроб. Окремих дозволів для кожного агента LifeContext не застосовує.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="compare" aria-labelledby="compare-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[5]</b>Порівняння</p>
+      <h2 id="compare-h">LifeContext поруч з іншими</h2>
+      <p class="lead">Вісім продуктів, з якими LifeContext часто порівнюють, за тим, що пише їхня власна документація. Якщо документація виробника про щось мовчить, у клітинці так і написано. Це ще не означає «ні».</p>
+    </header>
+
+    <p class="scroll-hint" id="compare-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14M15 8l4 4-4 4"/></svg>Таблиця прокручується вбік; колонка з назвою продукту лишається на місці.</p>
+    <div class="table-scroll" role="region" aria-labelledby="compare-cap" aria-describedby="compare-hint" tabindex="0">
+      <table class="compare">
+        <caption id="compare-cap">Станом на 17 жовтня 2026 року; за публічною документацією кожного виробника.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Продукт</th>
+            <th scope="col">Ліцензія</th>
+            <th scope="col">Власний хостинг</th>
+            <th scope="col">Оригінали</th>
+            <th scope="col">PDF / Office / скани</th>
+            <th scope="col">Зібрана вікі</th>
+            <th scope="col">Цитування</th>
+            <th scope="col">Суперечності</th>
+            <th scope="col">Obsidian / Markdown</th>
+            <th scope="col">Доступ агентів</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="ours">
+            <th scope="row">LifeContext<sup><a href="#fn-ours" aria-label="Примітка 1">1</a></sup></th>
+            <td>BUSL-1.1, source-available, безкоштовно для приватних осіб</td>
+            <td>Так (сервіс на loopback)</td>
+            <td>Незмінні, з контрольними сумами, з версіями</td>
+            <td>TXT/MD/PDF/DOCX/XLSX/PPTX/зображення; локальний OCR Tesseract (EN/RU/UK)</td>
+            <td>Так</td>
+            <td>Дослівна цитата → джерело + версія + фрагмент, перевірено</td>
+            <td>Записуються, ніколи не вирішуються автоматично</td>
+            <td>Проєкція в Obsidian; ваш розділ зберігається, інші правки позначаються як конфлікти</td>
+            <td>Скіл для Claude Code, Codex, Gemini CLI, Hermes; MCP-сервер</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://support.google.com/notebooklm/answer/16179559">Gemini Notebook</a> (раніше NotebookLM)</th>
+            <td>Пропрієтарна</td>
+            <td>Ні</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>PDF, DOCX, PPTX, зображення, аудіо, YouTube; про OCR у документації виробника не зазначено</td>
+            <td>Ні (чат, нотатки, звіти)</td>
+            <td>Вбудовані прямі цитати, перехід до фрагмента; про перевірку в документації виробника не зазначено</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>MCP/API не знайдено</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context">Claude Projects + memory</a></th>
+            <td>Пропрієтарна</td>
+            <td>Ні</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>PDF, DOCX, XLSX, зображення; про OCR у документації виробника не зазначено</td>
+            <td>Ні (пам’ять складається з тематичних підсумків, написаних LLM)</td>
+            <td>Пошук у чатах посилається на минулі чати; про відповіді в проєктах у документації виробника не зазначено</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>Ні</td>
+            <td>Застосунки Claude (Claude Code має окрему пам’ять у CLAUDE.md)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/mem0ai/mem0">Mem0</a></th>
+            <td>Apache-2.0 (частина функцій лише в хмарі)</td>
+            <td>Так</td>
+            <td class="ns">У документації виробника не зазначено (зберігає витягнуті спогади)</td>
+            <td>Хмара: PDF, зображення; OSS: у документації виробника не зазначено; про OCR не зазначено</td>
+            <td>Ні (пошук)</td>
+            <td>Не задокументовано</td>
+            <td>Немає (v3 лише ADD: старі й нові факти співіснують)</td>
+            <td>Не задокументовано</td>
+            <td>Плагіни для Claude Code, Codex, Cursor, Hermes та інших; пошук через MCP</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/supermemoryai/supermemory">Supermemory</a></th>
+            <td>Репозиторій MIT; рушій закритий (локальний бінарник, «lite license»)</td>
+            <td>Частково</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>Хмара: PDF, Office, зображення, аудіо й відео; OCR для сканованих PDF</td>
+            <td>Ні (пошук + профілі)</td>
+            <td>Не задокументовано</td>
+            <td>Вирішуються автоматично («updates win»), історію можна зберегти</td>
+            <td>Не задокументовано</td>
+            <td>Плагіни для Claude Code, Codex, Cursor, Hermes; хмарний MCP-сервер</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/basicmachines-co/basic-memory">Basic Memory</a></th>
+            <td>AGPL-3.0</td>
+            <td>Так</td>
+            <td>Імпорт записує контрольну суму джерела</td>
+            <td>PDF, DOCX, PPTX (локально); рушія OCR немає</td>
+            <td>Нотатки + згенерований індекс; сторінки не збираються з джерел</td>
+            <td>Виноски на сторінки PDF, номер сторінки перевіряється; рівня цитат немає</td>
+            <td>Немає (документація: виявлення немає)</td>
+            <td>Markdown як основний формат; двобічна робота з Obsidian; не перезаписує нотатки, написані вручну</td>
+            <td>MCP (Claude Code, Codex, Cursor, ChatGPT та інші)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/AgriciDaniel/claude-obsidian">claude-obsidian</a></th>
+            <td>MIT</td>
+            <td>Так</td>
+            <td>Незмінні, адресовані за вмістом (SHA-256)</td>
+            <td>PDF і зображення: лише метадані; для OCR потрібен окремий зовнішній інструмент</td>
+            <td>Так</td>
+            <td>Сторінки з посиланнями на джерела + реєстр тверджень; про перевірку цитат у документації виробника не зазначено</td>
+            <td>Позначаються («contested»), без тихого переможця</td>
+            <td>Сховище Obsidian; конфлікти ніколи не перезаписуються мовчки</td>
+            <td>Agent Skills (Claude Code, Codex, Gemini, OpenCode, Cursor)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/nashsu/llm_wiki">LLM Wiki desktop</a> (nashsu/llm_wiki)</th>
+            <td>GPL-3.0</td>
+            <td>Так (настільний застосунок)</td>
+            <td>Шар «Raw Sources (immutable)»</td>
+            <td>PDF (+ MinerU за бажанням), Office, EPUB, зображення через візуальну LLM; OCR не названо</td>
+            <td>Так</td>
+            <td><code>sources[]</code> на рівні сторінки; чат посилається на сторінки вікі</td>
+            <td>Позначаються й потрапляють у чергу перевірки</td>
+            <td>Сумісно з Obsidian</td>
+            <td>Локальний API + MCP + скіл (Claude Code, Codex)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/atomicstrata/llm-wiki-compiler">llmwiki compiler</a> (atomicstrata)</th>
+            <td>MIT</td>
+            <td>Так</td>
+            <td class="ns">У документації виробника не зазначено</td>
+            <td>PDF, зображення; про OCR у документації виробника не зазначено</td>
+            <td>Так</td>
+            <td>Файл + діапазон рядків; lint перевіряє, що файл і діапазон існують; LLM-суддя за бажанням</td>
+            <td>Затримуються для перевірки («contradicted»)</td>
+            <td>Markdown зі стабільними для Obsidian посиланнями</td>
+            <td>MCP-сервер</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="compare-notes">
+      <p id="fn-ours"><sup>1</sup> Наш рядок описує LifeContext 1.2 за нашою власною документацією; решта рядків спирається на публічні сторінки виробників, перелічені нижче. Hindsight у таблиці немає, бо LifeContext побудовано на ньому. Ціни й кількість зірок часто змінюються, тому ми їх не наводимо.</p>
+    </div>
+
+    <div class="compare-after">
+      <div>
+        <h3>Чого ми не знайшли в інших</h3>
+        <p>Серед продуктів у таблиці ми не знайшли іншого продукту, який документує:</p>
+        <ul>
+          <li>механічну перевірку того, що кожна цитата дослівно є у вказаному фрагменті джерела, ще до запису сторінки;</li>
+          <li>посилання на конкретну версію джерела у сховищі з версіями;</li>
+          <li>вбудований локальний OCR, у якому названо українську й російську мови.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>У чому інші йдуть далі</h3>
+        <ul>
+          <li>Хмарні версії, якими можна користуватися без встановлення, як-от Gemini Notebook і Claude. LifeContext працює тільки на вашій машині чи сервері.</li>
+          <li>Власний інтерфейс для читання або перегляд графа. LifeContext для читання використовує Obsidian.</li>
+          <li>Аудіо, відео й збереження вебсторінок. LifeContext читає документи й зображення.</li>
+          <li>Спільна робота в команді. LifeContext розрахований на одну людину.</li>
+          <li>Ліцензії, схвалені OSI: більшість проєктів у таблиці, які можна розгорнути в себе, мають MIT, Apache-2.0, AGPL-3.0 або GPL-3.0.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Джерела</h3>
+        <ul class="sources-list">
+          <li><a href="https://support.google.com/notebooklm/answer/16179559">Gemini Notebook</a>, також <a href="https://support.google.com/notebooklm/answer/16215270">підтримувані джерела</a> і <a href="https://blog.google/innovation-and-ai/products/gemini-notebook/notebooklm-gemini-notebook/">перейменування</a></li>
+          <li><a href="https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context">Claude Projects + memory</a>, також <a href="https://support.claude.com/en/articles/8241126-upload-files-to-claude">завантаження файлів</a></li>
+          <li><a href="https://github.com/mem0ai/mem0">Mem0</a>, також <a href="https://docs.mem0.ai/migration/oss-v2-to-v3">нотатки до міграції на v3</a></li>
+          <li><a href="https://github.com/supermemoryai/supermemory">Supermemory</a>, також <a href="https://supermemory.ai/docs/self-hosting/local-vs-enterprise">власний хостинг</a></li>
+          <li><a href="https://github.com/basicmachines-co/basic-memory">Basic Memory</a>, також <a href="https://github.com/basicmachines-co/basic-memory/blob/main/docs/DOCUMENT_CITATIONS.md">цитування документів</a></li>
+          <li><a href="https://github.com/AgriciDaniel/claude-obsidian">claude-obsidian</a></li>
+          <li><a href="https://github.com/nashsu/llm_wiki">LLM Wiki desktop</a></li>
+          <li><a href="https://github.com/atomicstrata/llm-wiki-compiler">llmwiki compiler</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="privacy" aria-labelledby="privacy-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[6]</b>Дані</p>
+      <h2 id="privacy-h">Що залишає вашу машину</h2>
+    </header>
+    <p class="privacy-lead">Працює на вашій машині. Оригінали її не залишають. Витягнутий текст іде до постачальника моделі, якого ви обрали; з локальною моделлю він лишається на вашій машині (це підтримується, але ще не входить до кваліфікації релізу). Зображення сторінок ідуть до візуальної моделі, тільки якщо ви її ввімкнете.</p>
+
+    <div class="flows">
+      <div class="flow">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 11 12 4l9 7v9H3z"/></svg>Зберігається на вашій машині</h3>
+        <ul>
+          <li>Оригінали файлів і всі їхні версії; назовні вони не йдуть</li>
+          <li>Витягнутий текст і результати OCR</li>
+          <li>Індекс, зібрані сторінки та ваше сховище</li>
+          <li>Ваш ключ API, у приватному файлі <code>.env</code></li>
+        </ul>
+      </div>
+      <div class="flow out">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 17 17 7M8 7h9v9"/></svg>Іде до постачальника моделі</h3>
+        <p>Увесь витягнутий текст і записи щоденника частинами під час індексації, а потім ще раз фрагменти, коли збираються сторінки. Разом із ними йдуть запити для обох кроків. Постачальника обираєте ви; з локальною моделлю назовні нічого не йде.</p>
+      </div>
+      <div class="flow out">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Іде до візуальної моделі</h3>
+        <p>Зображення сторінок, і лише якщо ви налаштували візуальну модель. Типово її вимкнено.</p>
+      </div>
+      <div class="flow">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v12M6 12l6 6 6-6M5 20h14"/></svg>Завантажується один раз</h3>
+        <p>Під час першого запуску завантажуються моделі ембедингів і реранкінгу. Цей сайт нічого не вантажить з інших сайтів і не використовує аналітику чи cookies.</p>
+      </div>
+    </div>
+
+    <div class="not-claim">
+      <h3>Чого ми не стверджуємо</h3>
+      <dl>
+        <div>
+          <dt>Жодних сертифікатів відповідності</dt>
+          <dd>LifeContext не проходив аудиту чи сертифікації за GDPR, HIPAA, SOC 2 або будь-яким іншим стандартом.</dd>
+        </div>
+        <div>
+          <dt>Жодних обіцянок «без галюцинацій»</dt>
+          <dd>Перевірка цитат доводить, що процитований текст є в тексті, який LifeContext витягнув із джерела. Вона не доводить, що OCR чи візуальна модель правильно прочитали оригінал (текст, прочитаний моделлю, позначено), що підсумок правильний, що вибрано найкращі цитати чи що саме джерело не помиляється.</dd>
+        </div>
+        <div>
+          <dt>Не кожну суперечність буде знайдено</dt>
+          <dd>Модель пропонує їх під час збирання сторінок; LifeContext їх записує, але частину може пропустити.</dd>
+        </div>
+        <div>
+          <dt>Жодних окремих дозволів для агентів</dt>
+          <dd>Агенти діють з вашими повноваженнями. Скіл описує, чого їм робити не можна, але застосунок цього не контролює.</dd>
+        </div>
+        <div>
+          <dt>Жодних порівняльних тестів</dt>
+          <dd>Ми не проводили зіставного тестування з іншими продуктами, тому не публікуємо цифр точності чи швидкості.</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="licensing" aria-labelledby="licensing-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[7]</b>Ліцензування</p>
+      <h2 id="licensing-h">Безкоштовно для однієї людини, вдома чи на роботі</h2>
+      <p class="lead">Код LifeContext доступний (source-available) за ліцензією Business Source License 1.1 (BUSL-1.1). Безкоштовно для однієї людини, яка запускає власну копію для власного користування, вдома чи на роботі, зокрема з документами роботодавця або клієнтів і для роботи як фрилансер чи ФОП. Також безкоштовно для неприбуткових організацій, акредитованих навчальних закладів і неприбуткових або державних дослідницьких установ.</p>
+      <p class="lead">Комерційна ліцензія потрібна, коли компанія встановлює, надає чи адмініструє LifeContext для своїх працівників або інших людей, а також коли хтось пропонує його (чи похідний продукт) іншим як хостований, керований або вбудований сервіс. Читати, оцінювати й тестувати код може будь-хто безкоштовно. Кожен реліз переходить на Apache-2.0 не пізніше дати зміни ліцензії (для 1.2.0 — 2030-11-08).</p>
+    </header>
+
+    <div class="licence-grid">
+      <div class="licence-card free">
+        <h3>Безкоштовно</h3>
+        <p class="sub">Без реєстрації, ключів і обмежень у часі.</p>
+        <ul>
+          <li>Власні нотатки й документи.</li>
+          <li>Робочий ноутбук і документи роботодавця. Ліцензія не скасовує правил конфіденційності вашого роботодавця, зокрема щодо тексту, який надсилається постачальнику моделі.</li>
+          <li>Робота для клієнтів як фрилансер чи ФОП. Звіти, які ви здаєте клієнтам, є вашою роботою.</li>
+          <li>Неприбуткові організації, акредитовані навчальні заклади, неприбуткові або державні дослідницькі установи.</li>
+          <li>Читання, оцінювання й тестування коду, для будь-кого.</li>
+        </ul>
+      </div>
+      <div class="licence-card">
+        <h3>Комерційна ліцензія</h3>
+        <p class="sub">Потрібна, коли компанія встановлює, надає чи адмініструє LifeContext для працівників або інших людей, а також коли його пропонують як сервіс.</p>
+        <ul>
+          <li>Роботодавець встановлює чи адмініструє LifeContext для команди.</li>
+          <li>Спільний екземпляр у компанії, яким користуються кілька людей.</li>
+          <li>Хостований, керований або вбудований сервіс, який пропонує іншим LifeContext чи похідний продукт.</li>
+        </ul>
+        <p class="contact">Напишіть на <a href="mailto:roman@rundax.com">roman@rundax.com</a> і коротко опишіть, як плануєте його використовувати.</p>
+      </div>
+    </div>
+    <p class="licence-meta">Подробиці й більше прикладів є в <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">LICENSING.md</a>, повні умови — у <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSE">файлі ліцензії</a>. Рушій Hindsight усередині LifeContext має власну ліцензію MIT.</p>
+  </div>
+</section>
+
+<section class="section" id="faq" aria-labelledby="faq-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[8]</b>FAQ</p>
+      <h2 id="faq-h">Запитання</h2>
+    </header>
+
+    <div class="faq-group">
+      <h3>Ліцензування</h3>
+      <div class="faq">
+        <details>
+          <summary>Яка ліцензія і що можна робити з кодом?</summary>
+          <div class="answer"><p>BUSL-1.1. Код публічний, і читати, оцінювати й тестувати його може будь-хто безкоштовно. BUSL-1.1 не схвалена OSI, тому ми називаємо LifeContext source-available. Кожен реліз переходить на Apache-2.0 не пізніше дати зміни ліцензії (для 1.2.0 — 2030-11-08).</p></div>
+        </details>
+        <details>
+          <summary>Чи можна користуватися ним на роботі, з документами роботодавця?</summary>
+          <div class="answer"><p>Так, якщо ви запускаєте власну копію для власного користування, зокрема з документами роботодавця чи клієнтів. Ліцензія не скасовує правил конфіденційності вашого роботодавця, зокрема щодо тексту, який надсилається постачальнику моделі. Комерційна ліцензія потрібна, коли роботодавець сам встановлює, надає чи адмініструє LifeContext для працівників.</p></div>
+        </details>
+        <details>
+          <summary>Я фрилансер або ФОП. Робота для клієнтів безкоштовна?</summary>
+          <div class="answer"><p>Так. Власна копія для роботи з клієнтами безкоштовна, і звіти, які ви здаєте, є вашою роботою. Якщо ви встановлюєте чи адмініструєте LifeContext для клієнта або пропонуєте його іншим як хостований, керований чи вбудований сервіс, потрібна комерційна ліцензія.</p></div>
+        </details>
+        <details>
+          <summary>Моя компанія хоче ним користуватися. Що робити?</summary>
+          <div class="answer"><p>Якщо компанія встановлює, надає чи адмініструє LifeContext для працівників або інших людей, напишіть на <a href="mailto:roman@rundax.com">roman@rundax.com</a>, скільки людей ним користуватимуться і як. Неприбутковим організаціям, акредитованим навчальним закладам і неприбутковим або державним дослідницьким установам комерційна ліцензія не потрібна.</p></div>
+        </details>
+        <details>
+          <summary>Коли реліз переходить на Apache-2.0?</summary>
+          <div class="answer"><p>Не пізніше дати зміни ліцензії. Для 1.2.0 це 2030-11-08, кожен наступний реліз має власну дату. Подробиці є в <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">LICENSING.md</a>.</p></div>
+        </details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>Загальні</h3>
+      <div class="faq">
+        <details>
+          <summary>Чому б не взяти звичайний RAG?</summary>
+          <div class="answer">
+            <p>Пошук (retrieval) знаходить фрагменти в момент запитання, і відповідь щоразу складається наново. LifeContext теж шукає (це індекс Hindsight) і, крім того, збирає сторінки: їх можна читати, виправляти й пов’язувати, вони оновлюються, коли змінюються джерела, і на них видно, де джерела розходяться.</p>
+            <p>Агенти отримують обидва інструменти: пошук із доказами для запитань і сторінки для того, що ви вже знаєте.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Скільки коштує обробка одного документа?</summary>
+          <div class="answer">
+            <p>Власна копія для власного користування безкоштовна. Платите ви постачальнику моделі за токени: індексація і збирання документа потребують кількох запитів до моделі, тож довга книжка коштує більше за однусторінковий лист, а з простішою моделлю витрати менші. OCR працює локально й нічого не коштує.</p>
+            <p>Ціни за документ ми не публікуємо: надто багато залежить від моделі й самого документа. З локальною моделлю оплати за токени немає зовсім.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Чи працює він офлайн?</summary>
+          <div class="answer"><p>Сховище, OCR, індекс, реранкер і проєкція в Obsidian працюють локально. Для індексації та збирання сторінок потрібен постачальник моделі; із хмарним постачальником це означає підключення до мережі. З локальною моделлю через Ollama чи vLLM LifeContext може працювати без мережі, коли перший запуск уже завантажив моделі ембедингів і реранкінгу. Робота з локальною моделлю підтримується, але ще не входить до кваліфікації релізу.</p></div>
+        </details>
+        <details>
+          <summary>Які мови він підтримує?</summary>
+          <div class="answer"><p>OCR розпізнає англійську, українську та російську. LifeContext налаштовує мультимовний реранкер для англійських, українських і російських текстів. Цитати лишаються мовою джерела, бо вони дослівні.</p></div>
+        </details>
+        <details>
+          <summary>Чи використовують мої дані для навчання моделей?</summary>
+          <div class="answer"><p>Хмари LifeContext не існує, тож ваші дані до нас не потрапляють. Чи може постачальник моделі навчатися на трафіку API, залежить від його умов. Перевірте їх або використовуйте локальну модель.</p></div>
+        </details>
+        <details>
+          <summary>Чим це відрізняється від патерну LLM Wiki Андрея Карпаті?</summary>
+          <div class="answer"><p>LifeContext натхненний <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">патерном LLM Wiki</a>: сирі джерела, вікі, яку веде модель, і перевірка через lint. До нього додано зберігання оригіналів (незмінних, з контрольними сумами й версіями), дослівні цитати, звірені з джерелом до запису сторінки, суперечності, що лишаються відкритими, доки ви не вирішите, і позначки застарілості, коли джерело виправляють або вилучають.</p></div>
+        </details>
+        <details>
+          <summary>Чи потрібен Obsidian?</summary>
+          <div class="answer"><p>Ні. Сховище — це тека з Markdown-файлами, яку відкриє будь-який редактор. Посилання, назви сторінок і граф розраховані на Obsidian.</p></div>
+        </details>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-about">
+        <a class="brand" href="./">
+          <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="7"/><rect class="mark-fg" x="7" y="8.5" width="12" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="14.5" width="18" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="20.5" width="9" height="3" rx="1.5"/><circle class="mark-dot" cx="23.5" cy="10" r="2.5"/></svg>
+          LifeContext
+        </a>
+        <p>Шар контексту для AI-агентів, що працює на вашій машині. Зроблено в Україні.</p>
+        <p>Побудовано на рушії пам’яті <a href="https://github.com/vectorize-io/hindsight">Hindsight</a> з відкритим кодом (MIT, від Vectorize).</p>
+      </div>
+      <nav aria-labelledby="f-project">
+        <h2 id="f-project">Проєкт</h2>
+        <ul>
+          <li><a href="https://github.com/Hantok/lifecontext">GitHub</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/tree/main/docs">Документація</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/releases">Релізи</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/CHANGELOG.md">Журнал змін</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="f-policies">
+        <h2 id="f-policies">Правила</h2>
+        <ul>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/SECURITY.md">Політика безпеки</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/LICENSE">Ліцензія (BUSL-1.1)</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">Подробиці ліцензування</a></li>
+          <li><a href="#licensing">Комерційна ліцензія</a></li>
+          <li><a href="#privacy">Що залишає вашу машину</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="f-page">
+        <h2 id="f-page">На цій сторінці</h2>
+        <ul>
+          <li><a href="#example">Приклад</a></li>
+          <li><a href="#install">Встановлення</a></li>
+          <li><a href="#compare">Порівняння</a></li>
+          <li><a href="../" hreflang="en" lang="en">English</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer-base">
+      <p>Claude, Codex, Gemini, Hermes, Cursor, Obsidian та інші назви на цій сторінці є торговельними марками їхніх власників і згадуються лише для того, щоб назвати ці продукти; це не означає їхнього схвалення. LifeContext не пов’язаний із Vectorize, Anthropic, Obsidian чи Андреєм Карпаті.</p>
+      <p>Без аналітики. Без cookies.</p>
+    </div>
+  </div>
+</footer>
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+</body>
+</html>

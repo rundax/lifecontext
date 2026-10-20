@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hantok.github.io/lifecontext/sitemap.xml

@@ -1,0 +1,58 @@
+# Local runtime and personal data
+/.dev/
+/vault/
+/backups/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Source documents imported for ingestion (copyrighted or personal)
+/*.pdf
+
+# Planning and local assistant state
+/plan/
+/plans/
+/.planning/
+/.omc/
+/.claude/
+/.gsd/
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, builds, and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Docker Compose secrets (the provider key)
+/secrets/

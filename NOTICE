@@ -1,0 +1,85 @@
+LifeContext
+Copyright (c) 2026 Roman Slysh
+
+LifeContext is source-available under the Business Source License 1.1 with an
+Additional Use Grant; see LICENSE, LICENSING.md and COMMERCIAL-LICENSE.md.
+
+This repository contains no third-party source code. LifeContext installs the
+Python packages listed in pyproject.toml from PyPI, and on first start the
+memory engine downloads machine-learning models from Hugging Face. Each
+keeps its own license, summarised below. The upstream license texts apply.
+
+-------------------------------------------------------------------------------
+Memory engine
+-------------------------------------------------------------------------------
+
+Hindsight (hindsight-all, hindsight-api-slim, hindsight-embed,
+hindsight-client 0.9.2)
+  Copyright (c) 2025 Vectorize AI, Inc.
+  License: MIT
+  https://pypi.org/project/hindsight-all/
+
+pg0-embedded 0.15.1 (embedded PostgreSQL used by Hindsight)
+  License: MIT
+  https://github.com/vectorize-io/pg0
+  The pg0 binary bundles PostgreSQL 18 and pgvector and unpacks them under
+  ~/.pg0 on first start. PostgreSQL and pgvector are distributed under the
+  PostgreSQL License. On Linux the binary also bundles libxml2 (MIT License)
+  and ICU (Unicode License).
+
+-------------------------------------------------------------------------------
+Models downloaded on first start
+-------------------------------------------------------------------------------
+
+The files are fetched from huggingface.co into ~/.cache/huggingface. They are
+not part of this repository or of the LifeContext package. Licenses as stated
+on the Hugging Face model pages on 2026-10-17:
+
+BAAI/bge-small-en-v1.5 (text embeddings; Hindsight's default local
+embedding model)
+  License: MIT
+  https://huggingface.co/BAAI/bge-small-en-v1.5
+
+nreimers/mmarco-mMiniLMv2-L6-H384-v1 (multilingual reranker; selected by
+LifeContext in src/lifecontext/hindsight.py)
+  License: none declared. The model page has no license tag and no model
+  card; its base model, nreimers/mMiniLMv2-L6-H384-distilled-from-XLMR-Large,
+  declares none either. LifeContext does not distribute these files and
+  grants no rights in them; Hindsight downloads them from Hugging Face on your
+  machine. The model was trained on mMARCO, a machine translation of the MS
+  MARCO passage-ranking data. The mMARCO dataset card states Apache License
+  2.0; MS MARCO's own terms limit its use to non-commercial research. Review
+  these terms before relying on the model, in particular for commercial use.
+  https://huggingface.co/nreimers/mmarco-mMiniLMv2-L6-H384-v1
+  https://huggingface.co/datasets/unicamp-dl/mmarco
+
+-------------------------------------------------------------------------------
+Direct Python dependencies (pyproject.toml)
+-------------------------------------------------------------------------------
+
+anthropic 1.4.0             MIT
+defusedxml 0.7.1            Python Software Foundation License
+fastapi 0.141.1             MIT
+google-genai 2.22.0         Apache-2.0
+openai 2.54.0               Apache-2.0
+openpyxl 3.1.5              MIT
+Pillow 12.3.0               MIT-CMU
+pydantic 2.13.5             MIT
+pypdf 6.19.0                BSD-3-Clause
+pypdfium2 5.14.0            BSD-3-Clause, Apache-2.0 (bundles PDFium)
+python-docx 1.2.0           MIT
+python-pptx 1.0.2           MIT
+PyYAML 6.0.3                MIT
+uvicorn 0.53.0              BSD-3-Clause
+
+Hindsight installs further packages, among them PyTorch (BSD-3-Clause and
+others), sentence-transformers (Apache-2.0) and transformers (Apache-2.0).
+
+-------------------------------------------------------------------------------
+Optional system software
+-------------------------------------------------------------------------------
+
+Tesseract OCR and its language data are installed separately through the
+operating system's package manager and are not distributed with LifeContext.
+  License: Apache-2.0
+  https://github.com/tesseract-ocr/tesseract

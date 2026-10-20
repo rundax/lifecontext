@@ -1,0 +1,17 @@
+{
+  "name": "lifecontext",
+  "owner": {
+    "name": "Roman Slysh",
+    "url": "https://github.com/Hantok"
+  },
+  "description": "LifeContext: a private, durable context layer for AI. Journal entries and documents stay on your machine; agents read and add to them through one CLI, with citations.",
+  "plugins": [
+    {
+      "name": "lifecontext",
+      "source": "./src/lifecontext/agent_skill",
+      "description": "The personal-journal-operations skill: capture journal entries, import documents, read the compiled wiki and answer with cited evidence through the local lifecontext CLI.",
+      "category": "productivity",
+      "tags": ["journal", "wiki", "documents", "memory", "citations", "obsidian"]
+    }
+  ]
+}

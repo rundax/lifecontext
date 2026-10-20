@@ -1,0 +1,59 @@
+# LifeContext with Docker Compose; see docs/install.md.
+#
+#   mkdir -p secrets
+#   (umask 077 && printf '%s\n' 'YOUR-PROVIDER-KEY' > secrets/lifecontext_api_key)
+#   LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
+#   docker compose exec lifecontext lifecontext doctor
+#
+# No port is published: the API listens on 127.0.0.1 inside the container. Use
+# `docker compose exec`, or bin/lifecontext-docker for agents on the host.
+# Settings come from the shell or a .env file next to this file:
+# LIFECONTEXT_PROVIDER, LIFECONTEXT_MODEL, LIFECONTEXT_BASE_URL,
+# LIFECONTEXT_TIMEZONE (used on the first start only), LIFECONTEXT_API_KEY_FILE,
+# LIFECONTEXT_IMAGE, LIFECONTEXT_CONTAINER, LIFECONTEXT_MEMORY_LIMIT.
+
+name: lifecontext
+
+services:
+  lifecontext:
+    image: ${LIFECONTEXT_IMAGE:-ghcr.io/hantok/lifecontext:1.2.0}
+    build: .
+    container_name: ${LIFECONTEXT_CONTAINER:-lifecontext}
+    restart: unless-stopped
+    environment:
+      LIFECONTEXT_PROVIDER: ${LIFECONTEXT_PROVIDER:-}
+      LIFECONTEXT_MODEL: ${LIFECONTEXT_MODEL:-}
+      LIFECONTEXT_BASE_URL: ${LIFECONTEXT_BASE_URL:-}
+      LIFECONTEXT_TIMEZONE: ${LIFECONTEXT_TIMEZONE:-}
+    secrets:
+      - lifecontext_api_key
+    volumes:
+      - home:/data/home    # settings, catalog, index database, backups
+      - vault:/data/vault  # the Obsidian vault
+    mem_limit: ${LIFECONTEXT_MEMORY_LIMIT:-4g}
+    stop_grace_period: 90s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - /opt/lifecontext/venv/bin/python
+        - -I
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=5).status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 600s
+      start_interval: 5s
+
+secrets:
+  lifecontext_api_key:
+    # One line, readable by uid 1000 in the container (chown 1000 on Linux hosts).
+    file: ${LIFECONTEXT_API_KEY_FILE:-./secrets/lifecontext_api_key}
+
+volumes:
+  home:
+  vault:

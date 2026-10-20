@@ -1,0 +1,233 @@
+name: Release
+
+# On a v* tag: check that the tag, the package version, install.sh and
+# compose.yaml name the same release; build the wheel, sdist and release assets
+# (with the hashed dependency locks) and SHA256SUMS without write access; sign
+# SHA256SUMS (cosign keyless); push a linux/amd64 + linux/arm64 image with an
+# SBOM and provenance to GHCR and sign it; create a DRAFT GitHub release; and
+# publish the draft only after the image is pushed and signed, and only for a
+# final version (a pre-release such as 1.2.0rc1 stays a draft). A manual run is
+# a dry run: it builds and checks everything but signs, publishes and pushes
+# nothing. See "Releasing" in docs/development.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/hantok/lifecontext
+  PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  build:
+    if: github.repository == 'Hantok/lifecontext'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Check that every file names the same release
+        id: version
+        run: |
+          project=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          pinned=$(sed -n 's/^LIFECONTEXT_RELEASE="\(.*\)"$/\1/p' install.sh)
+          if [ "$PUBLISH" = true ]; then
+            version=${GITHUB_REF_NAME#v}
+            if [ "$version" != "$project" ] || [ "$version" != "$pinned" ]; then
+              echo "::error::tag $GITHUB_REF_NAME, pyproject.toml $project and install.sh $pinned differ"
+              exit 1
+            fi
+            grep -q "ghcr.io/hantok/lifecontext:$version}" compose.yaml || {
+              echo "::error::compose.yaml does not default to ghcr.io/hantok/lifecontext:$version"
+              exit 1
+            }
+          else
+            version=$project
+            echo "Dry run for $version (install.sh pins $pinned)"
+          fi
+          case "$version" in *[a-z]*) prerelease=true ;; *) prerelease=false ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Build and check the wheel and sdist
+        run: |
+          python -m pip install build==1.6.1
+          python -m build --outdir dist .
+          python .github/scripts/check_dist.py dist | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Assemble the release assets and SHA256SUMS
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir release
+          cp "dist/lifecontext-$VERSION-py3-none-any.whl" "dist/lifecontext-$VERSION.tar.gz" \
+            install.sh constraints-cpu.txt release/
+          for lock in requirements/linux-x86_64.txt requirements/linux-aarch64.txt requirements/macos-arm64.txt; do
+            cp "$lock" "release/requirements-$(basename "$lock")"
+          done
+          (cd release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS) | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign SHA256SUMS and verify it the way install.sh does
+        run: |
+          cosign version
+          # The transparency log can answer 409 to a retried upload; sign anew instead.
+          for attempt in 1 2 3; do
+            cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json release/SHA256SUMS && break
+            [ "$attempt" -lt 3 ] || exit 1
+            echo "Signing failed (attempt $attempt); trying again in 30 s"
+            sleep 30
+          done
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/Hantok/lifecontext/.github/workflows/release.yml@$GITHUB_REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com release/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signature
+          path: SHA256SUMS.sigstore.json
+          if-no-files-found: error
+          retention-days: 30
+
+  image:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # cosign keyless signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.build.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.build.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=LifeContext
+            org.opencontainers.image.licenses=BUSL-1.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Attestations need a registry to go to; a dry run only builds.
+          sbom: ${{ env.PUBLISH == 'true' }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.PUBLISH == 'true'
+      - name: Sign the image
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ join(fromJSON(steps.meta.outputs.json).tags, ', ') }}
+        run: |
+          for attempt in 1 2 3; do
+            cosign sign --yes "$IMAGE@$DIGEST" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            echo "Signing failed (attempt $attempt); trying again in 30 s"
+            sleep 30
+          done
+          {
+            echo "## Image"
+            echo
+            echo "\`$IMAGE@$DIGEST\`, signed; tags: $TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  draft:
+    needs: [build, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-signature
+          path: release
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          prerelease=()
+          if [ "$PRERELEASE" = true ]; then prerelease=(--prerelease); fi
+          {
+            echo "LifeContext $VERSION, source-available under the Business Source License 1.1."
+            echo
+            echo "Install: \`curl -fsSL https://github.com/Hantok/lifecontext/releases/download/$GITHUB_REF_NAME/install.sh | sh\`"
+            echo "Docker: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64)."
+            echo "Changes: [CHANGELOG.md](https://github.com/Hantok/lifecontext/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
+            echo "Verify: [docs/install.md](https://github.com/Hantok/lifecontext/blob/$GITHUB_REF_NAME/docs/install.md#verifying-a-release)."
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"
+
+  publish:
+    # Only a final version leaves draft, and only once the image is pushed and signed.
+    needs: [build, draft, image]
+    if: needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # publish the draft
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

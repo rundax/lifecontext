@@ -1,0 +1,66 @@
+# LifeContext
+
+> LifeContext is a self-hosted personal context layer for AI agents. A local service and the `lifecontext` CLI keep your original files, extract their text (with local OCR), index them with the open-source Hindsight memory engine, and compile a Markdown wiki in an Obsidian vault. Every claim is a literal quote, checked against the source text before the page is written; the short summary above the claims is labelled as model-written. Source-available under BUSL-1.1, free for individuals.
+
+Current version: 1.2. Platforms: Linux x86_64 and aarch64 (glibc 2.35 or later) and macOS 14 or later on arm64 natively; Windows through Docker or WSL.
+
+## What it does
+
+- Keeps original files immutable, checksummed and versioned. A correction adds a new version.
+- Extracts text from TXT, Markdown, PDF (including book-length PDFs), DOCX, XLSX, PPTX and images. Scans go through local Tesseract OCR for English, Ukrainian and Russian. An optional vision model that the owner configures can read handwriting, photos and charts; it is off by default.
+- Indexes everything with the Hindsight memory engine (MIT, by Vectorize). LifeContext configures a multilingual reranker for English, Ukrainian and Russian text. LifeContext is built on Hindsight and is not affiliated with Vectorize; no endorsement is implied.
+- Compiles a maintained wiki from imported documents. Each document gets its own page. Shared topic and entity pages collect claims from several documents and link to each other. Every claim is a literal quote with a citation to source, version and passage. A short summary above the quotes is labelled as model-written.
+- Records the contradictions the model finds between sources and never resolves them automatically.
+- Marks pages stale when a source they depend on is corrected or forgotten; `lifecontext wiki rebuild` rebuilds them.
+- Writes a daily brief and a change log; `lifecontext wiki lint` reports stale pages, open contradictions, orphan pages and gaps without changing anything.
+- Projects pages as Markdown into an Obsidian vault. Each page has a section for the owner's notes, kept byte for byte; edits to the generated part are reported as conflicts instead of being overwritten.
+- Also: journal capture for diary text, export and import bundles, backup and restore.
+
+## Agents and models
+
+- One agent skill for Claude Code, Codex, Gemini CLI and Hermes (`lifecontext skills install`).
+- An MCP server (`lifecontext mcp`, stdio) for MCP clients such as Claude Desktop and Cursor, new in 1.2. It is read-only by default; `--allow-writes` lets clients capture and import. Desktop apps do not read the shell PATH, so configure the full path from `command -v lifecontext`.
+- Connected agents run the CLI with the owner's authority. The skill tells them what not to do; LifeContext does not enforce per-agent permissions.
+- Bring your own model: Anthropic (documented first), OpenAI, Gemini, OpenRouter, or any OpenAI-compatible endpoint, including local Ollama or vLLM.
+
+## What leaves the machine
+
+Runs on your machine. Originals never leave it. Extracted text goes to the model provider you choose; with a local model it stays on your machine (supported, not yet part of release qualification). Page images go to a vision model only if you turn one on.
+
+In detail: all extracted text and journal entries go to the provider in chunks when they are indexed, and passages go again when pages are compiled, with the prompts for both. Separately, the first start downloads the embedding and rerank models once.
+
+## What LifeContext does not claim
+
+- No compliance certification or third-party security audit.
+- The quote check proves the quoted text exists in the text LifeContext extracted from the source. It does not prove that OCR or a vision model read the original correctly (model-read text is labelled), that a summary is right, that the best quotes were chosen, or that the source is correct.
+- Not every contradiction is found. The model proposes them while compiling; LifeContext records them but can miss some.
+- No benchmark comparisons against other products.
+
+## Licence
+
+Source-available under the Business Source License 1.1 (BUSL-1.1).
+
+Free for one person who runs their own copy for their own use, at home or at work — including documents that belong to your employer or your clients, and work as a freelancer or sole proprietor. Also free for non-profit organizations, accredited educational institutions and non-profit or publicly funded research institutions. A commercial licence is needed when a business installs, provides or manages LifeContext for its staff or others, or when anyone offers it (or a derivative) to others as a hosted, managed or embedded service. Reading, evaluating and testing the code is free for everyone. Each release becomes Apache-2.0 on or before its Change Date (2030-11-08 for 1.2.0).
+
+- Free: your own notes and documents; your work laptop and your employer's documents (the licence does not override your employer's confidentiality rules, including for text sent to your model provider); freelance client work, where the reports you deliver are your work.
+- Commercial licence: your employer installs or manages LifeContext for a team; a shared company instance; a hosted service.
+- Commercial licences: roman@rundax.com. Details and more examples: [LICENSING.md](https://github.com/Hantok/lifecontext/blob/main/LICENSING.md).
+
+## Install
+
+- Script: `curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh` (checks SHA256SUMS and, with cosign 3 or later, its signature; installs dependencies from a lock with pinned hashes; runs `init`, `service install`, `skills install` and `doctor`; installs Tesseract through brew, or through apt or dnf only when sudo works without a password, and otherwise prints the command; a re-run stops the service, backs up, upgrades and starts it again)
+- Docker image: `ghcr.io/hantok/lifecontext:1.2.0` (runs as uid 1000; volumes `/data/home` and `/data/vault`; the key as a Compose secret or a file mounted at `/run/secrets/lifecontext_api_key`; `LIFECONTEXT_*` settings on the first start; no published port; use `docker compose exec lifecontext lifecontext ...`; agents on the host use the `bin/lifecontext-docker` wrapper)
+- From source: `git clone https://github.com/Hantok/lifecontext.git`, then `uv pip install -c constraints-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -e .` on Linux (`uv pip install -e .` on macOS), then `lifecontext init`, `lifecontext service install`, `lifecontext skills install`, `lifecontext doctor`
+- Resources: about 3 GB of disk for the runtime and models (measured in CI on Linux: 2.4 GB installation, 0.6 GB models). Recall reranks on the CPU; expect tens of seconds on a 4-core machine.
+
+## Links
+
+- [Website (English)](https://hantok.github.io/lifecontext/)
+- [Website (Ukrainian)](https://hantok.github.io/lifecontext/uk/)
+- [Source repository](https://github.com/Hantok/lifecontext)
+- [Documentation](https://github.com/Hantok/lifecontext/tree/main/docs)
+- [Licence](https://github.com/Hantok/lifecontext/blob/main/LICENSE)
+- [Licensing details and examples](https://github.com/Hantok/lifecontext/blob/main/LICENSING.md)
+- [Security policy](https://github.com/Hantok/lifecontext/blob/main/SECURITY.md)
+- [Hindsight memory engine](https://github.com/vectorize-io/hindsight)
+- [LLM Wiki pattern by Andrej Karpathy, which inspired LifeContext](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)

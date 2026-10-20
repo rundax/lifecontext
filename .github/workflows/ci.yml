@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 03:23 UTC. Runs only the install-isolation job.
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  TORCH_VERSION: "2.14.0"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+defaults:
+  run:
+    # Explicit bash runs with -eo pipefail, so a failing command before a pipe fails the step.
+    shell: bash
+
+jobs:
+  ruff:
+    # Pull requests from branches of this repository are already covered by
+    # their push run; only pull requests from forks run here.
+    if: >-
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Not blocking yet: 191 known findings with ruff 0.16.10 and the rule set
+    # in pyproject.toml ([tool.ruff.lint]) on 2026-10-17. Remove
+    # continue-on-error once the lint cleanup lands, so new findings fail CI.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: python -m pip install ruff==0.16.10
+      - name: Lint
+        run: ruff check --output-format=github src tests scripts .github/scripts
+
+  test:
+    if: >-
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Tesseract OCR with English, Russian and Ukrainian data
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr
+          tesseract --version
+          tesseract --list-langs
+      - name: Create .dev/venv with CPU-only PyTorch, then LifeContext
+        # The same layout as a development checkout (docs/development.md):
+        # tests/test_dev_launcher.py runs bin/lifecontext-dev against
+        # .dev/venv/bin/python. constraints-cpu.txt pins the CPU wheel, which
+        # keeps the CUDA packages (several GB) out of the environment; this is
+        # the documented from-source install, so CI proves the file works.
+        run: |
+          mkdir -m 700 -p .dev/home .dev/tmp
+          chmod 700 .dev
+          grep -qx "torch==${TORCH_VERSION}+cpu ; sys_platform == \"linux\"" constraints-cpu.txt
+          python -m venv .dev/venv
+          .dev/venv/bin/python -m pip install -c constraints-cpu.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu -e .
+          .dev/venv/bin/python -c 'import torch; assert torch.__version__.endswith("+cpu"), torch.__version__'
+          .dev/venv/bin/python -m pip list
+          echo "$GITHUB_WORKSPACE/.dev/venv/bin" >> "$GITHUB_PATH"
+      - name: Provide a stand-in hermes command
+        # scripts/disposable_migration.py looks up the legacy `hermes` exporter
+        # with shutil.which before running it; tests/test_migration.py patches
+        # the call itself. The stand-in only makes the lookup succeed and
+        # fails if it is ever executed.
+        run: |
+          mkdir -p "$RUNNER_TEMP/stand-ins"
+          printf '#!/bin/sh\necho "CI stand-in: Hermes is not installed" >&2\nexit 127\n' \
+            > "$RUNNER_TEMP/stand-ins/hermes"
+          chmod 755 "$RUNNER_TEMP/stand-ins/hermes"
+          echo "$RUNNER_TEMP/stand-ins" >> "$GITHUB_PATH"
+      - name: Run the unit tests (all except install isolation)
+        # Same as the documented local run: HOME and TMPDIR under .dev, and
+        # tests/local_paths.py keeps scratch files in .dev/tmp.
+        working-directory: tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/tests
+        run: |
+          modules=$(ls test_*.py | grep -v '^test_install_isolation\.py$' | sed 's/\.py$//')
+          HOME="$GITHUB_WORKSPACE/.dev/home" TMPDIR="$GITHUB_WORKSPACE/.dev/tmp" \
+            python -m unittest -v $modules
+
+  locks:
+    # install.sh and the image install only what requirements/*.txt pin, with
+    # hashes. Re-resolving with the existing pins as preferences must give the
+    # same files; anything else means pyproject.toml or the constraints changed.
+    if: >-
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Check that the dependency locks match pyproject.toml
+        run: |
+          python -m pip install uv==0.12.24
+          sh requirements/compile.sh --check
+
+  wheel:
+    if: >-
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build the sdist and the wheel
+        run: |
+          python -m pip install build==1.6.1
+          python -m build --outdir dist .
+      - name: List the contents
+        run: |
+          python -m zipfile -l dist/*.whl
+          tar -tzvf dist/*.tar.gz
+      - name: Check the contents
+        run: python .github/scripts/check_dist.py dist | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Resolve the documented uv install of the wheel
+        # constraints-cpu.txt, the README and install.sh install with uv this
+        # way. uv's default first-index strategy fails here (the PyTorch index
+        # also carries old urllib3 and numpy), so the documented command needs
+        # --index-strategy unsafe-best-match. A dry run resolves everything
+        # against PyPI and the CPU index without downloading the packages.
+        run: |
+          python -m pip install uv==0.11.14
+          uv venv --python "$(command -v python)" "$RUNNER_TEMP/uv-venv"
+          uv pip install --python "$RUNNER_TEMP/uv-venv/bin/python" --dry-run \
+            -c constraints-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu \
+            --index-strategy unsafe-best-match dist/*.whl 2>&1 | tee "$RUNNER_TEMP/uv-plan.txt"
+          grep -q "torch==${TORCH_VERSION}+cpu" "$RUNNER_TEMP/uv-plan.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lifecontext-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  install-isolation:
+    # Builds the wheel and installs it with the full pinned dependency set
+    # (CUDA torch included) into a fresh environment: slow and several GB.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run the install-isolation test
+        working-directory: tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tests
+        run: python -m unittest -v test_install_isolation

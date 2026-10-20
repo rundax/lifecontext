@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>LifeContext · Your documents, compiled into a cited wiki</title>
+<meta name="description" content="A self-hosted context layer for AI agents. LifeContext keeps your original files, extracts text with local OCR and compiles an Obsidian wiki where every claim is a literal quote checked against its source.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f7f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c1110" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="https://hantok.github.io/lifecontext/">
+<link rel="alternate" hreflang="en" href="https://hantok.github.io/lifecontext/">
+<link rel="alternate" hreflang="uk" href="https://hantok.github.io/lifecontext/uk/">
+<link rel="alternate" hreflang="x-default" href="https://hantok.github.io/lifecontext/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LifeContext">
+<meta property="og:title" content="LifeContext: your documents and notes, compiled. Every claim cited.">
+<meta property="og:description" content="Self-hosted context layer for AI agents. Original files stay on your machine; the wiki it compiles quotes them, cites them and records where they disagree.">
+<meta property="og:url" content="https://hantok.github.io/lifecontext/">
+<meta property="og:image" content="https://hantok.github.io/lifecontext/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="LifeContext: a wiki page claim shown as a literal quote with a citation to lease-2024.pdf, version 1, page 3.">
+<meta property="og:locale" content="en_GB">
+<meta property="og:locale:alternate" content="uk_UA">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-row">
+    <a class="brand" href="./" aria-label="LifeContext, home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="7"/><rect class="mark-fg" x="7" y="8.5" width="12" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="14.5" width="18" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="20.5" width="9" height="3" rx="1.5"/><circle class="mark-dot" cx="23.5" cy="10" r="2.5"/></svg>
+      LifeContext
+    </a>
+    <nav class="site-nav" aria-label="Sections">
+      <ul class="nav-links">
+        <li><a href="#example">Example</a></li>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#agents">Agents</a></li>
+        <li><a href="#compare">Compare</a></li>
+        <li><a href="#privacy">Privacy</a></li>
+        <li><a href="#licensing">Licensing</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ul>
+    </nav>
+    <div class="header-tools">
+      <details class="menu">
+        <summary>Menu</summary>
+        <ul class="menu-list">
+          <li><a href="#example">Example</a></li>
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="#agents">Agents</a></li>
+          <li><a href="#compare">Compare</a></li>
+          <li><a href="#privacy">Privacy</a></li>
+          <li><a href="#licensing">Licensing</a></li>
+          <li><a href="#faq">FAQ</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext">GitHub</a></li>
+        </ul>
+      </details>
+      <a class="lang-link" href="uk/" hreflang="uk" lang="uk"><span aria-hidden="true">УКР</span><span class="sr-only">Українська версія</span></a>
+      <button class="icon-btn theme-toggle" type="button" data-theme-toggle aria-pressed="false" hidden>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <span class="sr-only">Dark theme</span>
+      </button>
+      <a class="icon-btn gh-link" href="https://github.com/Hantok/lifecontext">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero-grid">
+    <div class="hero-head">
+      <p class="eyebrow">Self-hosted · source-available · v1.2</p>
+      <h1 id="hero-h">Your documents and notes, compiled. <span class="accent-line">Every claim cited.</span></h1>
+    </div>
+    <div class="hero-copy">
+      <p class="lead">LifeContext is a self-hosted context layer for your AI agents. It keeps your original files, reads them (scans included) and compiles a Markdown wiki in your Obsidian vault. Every claim is a literal quote, checked against the source text before the page is written; the short summary above the claims is labelled as model-written.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#install">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v12M6 12l6 6 6-6M5 20h14"/></svg>
+          Install
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/Hantok/lifecontext">View on GitHub</a>
+      </div>
+      <ul class="hero-facts">
+        <li>Linux and macOS; Windows via Docker or WSL</li>
+        <li>Free for individuals</li>
+        <li>OCR for English, Ukrainian and Russian</li>
+      </ul>
+    </div>
+
+    <figure class="anatomy" aria-labelledby="anatomy-cap">
+      <div class="anatomy-card">
+        <div class="card-bar"><span class="path">wiki/Topics/Apartment lease.md</span><span class="badge badge-example">Example</span></div>
+        <div class="anatomy-body">
+          <p class="anatomy-title">Apartment lease</p>
+          <div class="anatomy-claim">
+            <span class="n" aria-hidden="true">2</span>
+            <div>
+              <blockquote><p>“The monthly rent is EUR 950, payable in advance on the first (1st) day of each month.”</p></blockquote>
+              <p class="cite-row">
+                <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg><span>lease-2024.pdf <b>v1</b> · p.3</span></span>
+                <span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>quote found in source</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ol class="anatomy-notes">
+        <li><b>Literal quote.</b> Copied from the extracted text, never paraphrased.</li>
+        <li><b>Source, version, passage.</b> The citation points at one stored version of the original.</li>
+        <li><b>Checked first.</b> The quote is matched against the source text before the page is written.</li>
+      </ol>
+      <figcaption id="anatomy-cap">Anatomy of one claim. Fictional example.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="section section-band" id="example" aria-labelledby="example-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[1]</b>Example</p>
+      <h2 id="example-h">What a compiled page looks like</h2>
+      <p class="lead">Three sources about one flat: a lease PDF, an email from the landlord and your own moving-in notes. Each gets its own page, and their claims meet on a shared topic page. This is a static example; every name, file and number in it is made up.</p>
+    </header>
+
+    <div class="demo">
+      <article class="note" aria-labelledby="note-title">
+        <div class="card-bar"><span class="path">vault/wiki/Topics/Apartment lease.md</span><span class="badge badge-example">Example · fictional</span></div>
+        <div class="note-body">
+          <h3 id="note-title">Apartment lease</h3>
+          <p class="note-meta">Topic page · 3 sources · revision r4 · compiled 2026-10-14</p>
+
+          <aside class="summary" aria-label="Model summary">
+            <p class="summary-label"><strong>Model summary</strong><span>Written by the model from the numbered claims below. Verify before relying on it.</span></p>
+            <p>The lease runs for twelve months from 1 March 2024 at EUR 950 a month <span class="ref">[<a href="#c1">1</a>, <a href="#c2">2</a>]</span>. The deposit is two months’ rent <span class="ref">[<a href="#c3">3</a>]</span>. The lease and the landlord’s email give different due dates for the rent; this is recorded below as an open contradiction <span class="ref">[<a href="#c2">2</a>, <a href="#c5">5</a>]</span>. Pets need written consent, and the landlord’s email welcomes the cat <span class="ref">[<a href="#c4">4</a>, <a href="#c6">6</a>]</span>. The bedroom radiator is due to be replaced before winter <span class="ref">[<a href="#c7">7</a>]</span>.</p>
+          </aside>
+
+          <h4>Claims</h4>
+          <ol class="claims">
+            <li class="claim" id="c1">
+              <blockquote><p>“The term of this lease is twelve (12) months, commencing on 1 March 2024.”</p></blockquote>
+              <p class="cite-row"><span class="chip">lease-2024.pdf <b>v1</b> · p.1</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c2">
+              <blockquote><p>“The monthly rent is EUR 950, payable in advance on the first (1st) day of each month.”</p></blockquote>
+              <p class="cite-row"><span class="chip">lease-2024.pdf <b>v1</b> · p.3</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c3">
+              <blockquote><p>“The Tenant shall pay a security deposit equal to two (2) months’ rent.”</p></blockquote>
+              <p class="cite-row"><span class="chip">lease-2024.pdf <b>v1</b> · p.4</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c4">
+              <blockquote><p>“Keeping pets requires the prior written consent of the Landlord.”</p></blockquote>
+              <p class="cite-row"><span class="chip">lease-2024.pdf <b>v1</b> · p.5</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c5">
+              <blockquote><p>“Just to confirm: rent is due on the 5th of each month, as we discussed.”</p></blockquote>
+              <p class="cite-row"><span class="chip">landlord-email.txt <b>v1</b> · ¶2</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c6">
+              <blockquote><p>“You’re welcome to bring the cat, just keep her off the balcony.”</p></blockquote>
+              <p class="cite-row"><span class="chip">landlord-email.txt <b>v1</b> · ¶3</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+            <li class="claim" id="c7">
+              <blockquote><p>“Marta says the radiator in the bedroom will be replaced before winter.”</p></blockquote>
+              <p class="cite-row"><span class="chip">moving-in-notes.md <b>v1</b> · ¶2</span><span class="verified"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg><span class="sr-only">Quote found in source</span></span></p>
+            </li>
+          </ol>
+
+          <section class="conflict" aria-labelledby="conflict-h">
+            <div class="conflict-head">
+              <h4 id="conflict-h">Contradiction: rent due date</h4>
+              <span class="badge badge-open">Open · not auto-resolved</span>
+            </div>
+            <div class="conflict-sides">
+              <div class="side">
+                <p class="side-label">Claim 2 · source dated 2024-02-20</p>
+                <blockquote><p>“…payable in advance on the <mark>first (1st) day</mark> of each month.”</p></blockquote>
+                <p class="cite-row"><span class="chip">lease-2024.pdf <b>v1</b> · p.3</span></p>
+              </div>
+              <div class="vs" aria-hidden="true">vs</div>
+              <div class="side">
+                <p class="side-label">Claim 5 · source dated 2024-03-02</p>
+                <blockquote><p>“Just to confirm: rent is due on <mark>the 5th</mark> of each month, as we discussed.”</p></blockquote>
+                <p class="cite-row"><span class="chip">landlord-email.txt <b>v1</b> · ¶2</span></p>
+              </div>
+            </div>
+            <p class="conflict-foot">Both claims stay on the page, with their dates, until you decide which one holds. Dates come from the capture date you give at import, otherwise the import date.</p>
+          </section>
+
+          <section class="mine" aria-labelledby="mine-h">
+            <div class="mine-head">
+              <h4 id="mine-h">My notes</h4>
+              <span class="badge badge-mine">Your section · kept on every rebuild</span>
+            </div>
+            <p>Ask Marta to put the 5th in writing as an amendment to the lease.</p>
+          </section>
+
+          <section class="related" aria-labelledby="related-h">
+            <h4 id="related-h">Related</h4>
+            <ul>
+              <li><span class="wikilink">[[Marta Kovalenko]]</span><span class="kind">entity · 2 sources</span></li>
+              <li><span class="wikilink">[[Deposit account]]</span><span class="kind">topic</span><span class="badge badge-stale">Stale</span><span class="stale-note">A source behind this page was corrected; rebuild it with <code>lifecontext wiki rebuild</code>.</span></li>
+              <li><span class="wikilink">[[lease-2024.pdf]]</span><span class="kind">document page</span></li>
+              <li><span class="wikilink">[[landlord-email.txt]]</span><span class="kind">document page</span></li>
+              <li><span class="wikilink">[[moving-in-notes.md]]</span><span class="kind">document page</span></li>
+            </ul>
+          </section>
+        </div>
+      </article>
+
+      <div class="demo-side">
+        <article class="brief" aria-labelledby="brief-h">
+          <div class="card-bar"><span class="path">wiki/Briefs/2026-10-14 - Brief.md</span></div>
+          <div class="brief-body">
+            <h3 id="brief-h">Daily brief, 14 October 2026</h3>
+            <dl>
+              <div><dt>Imported</dt><dd>landlord-email.txt</dd></div>
+              <div><dt>Pages changed</dt><dd>Apartment lease <span class="delta">r3 → r4, +2 claims</span><br>Marta Kovalenko <span class="delta">r1 → r2, +1 claim</span></dd></div>
+              <div><dt>New contradiction</dt><dd>Apartment lease: rent due on the 1st (lease, 2024-02-20) or the 5th (email, 2024-03-02)</dd></div>
+              <div><dt>Became stale</dt><dd>Deposit account, after bank-letter.pdf was corrected to v2</dd></div>
+              <div><dt>Lint</dt><dd>0 errors · 2 warnings: 1 orphan page, 1 document with pages OCR could not read</dd></div>
+            </dl>
+          </div>
+        </article>
+
+        <div class="legend">
+          <p class="legend-title" id="legend-h">How to read it</p>
+          <dl aria-labelledby="legend-h">
+          <div><dt><span class="swatch swatch-quote"></span><span class="sr-only">Numbered quote</span></dt><dd>Numbered serif text is a literal quote from a source.</dd></div>
+          <div><dt><span class="chip" aria-hidden="true">v1</span><span class="sr-only">Citation chip</span></dt><dd>The chip names the source, its stored version and the passage.</dd></div>
+          <div><dt><span class="swatch swatch-model"></span><span class="sr-only">Hatched box</span></dt><dd>The hatched box is written by the model and points to claim numbers.</dd></div>
+          <div><dt><span class="swatch swatch-conflict"></span><span class="sr-only">Amber box</span></dt><dd>Amber marks a contradiction between sources, left open for you.</dd></div>
+          <div><dt><span class="swatch swatch-stale"></span><span class="sr-only">Grey badge</span></dt><dd>Stale pages depend on a source that was corrected or forgotten.</dd></div>
+          <div><dt><span class="swatch swatch-mine"></span><span class="sr-only">Your section</span></dt><dd>Your own section is kept byte for byte on every rebuild.</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+    <p class="demo-foot">Select a claim number in the summary to jump to the quote it refers to.</p>
+  </div>
+</section>
+
+<section class="section" id="how" aria-labelledby="how-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[2]</b>How it works</p>
+      <h2 id="how-h">From original file to cited page</h2>
+      <p class="lead">Everything runs on your machine. Apart from the one-time model download, requests leave it for two destinations: the model provider you choose, and a vision model if you turn one on.</p>
+    </header>
+
+    <figure class="diagram">
+      <svg class="diagram-wide" viewBox="0 0 1120 330" role="img" aria-labelledby="dw-t dw-d">
+        <title id="dw-t">How LifeContext processes a document</title>
+        <desc id="dw-d">Inside your machine: originals, then extraction and OCR, then the Hindsight index, then the compiled wiki, which feeds your Obsidian vault and your agents. Outside your machine: the model provider you choose, used by indexing and compiling, and an optional vision model used by extraction.</desc>
+        <defs>
+          <marker id="dw-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+        <rect class="d-zone" x="10" y="10" width="1100" height="220" rx="14"/>
+        <text class="d-zone-label" x="30" y="40">YOUR MACHINE</text>
+
+        <rect class="d-box" x="30" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="46" y="86">01</text>
+        <text class="d-title" x="46" y="110">Originals</text>
+        <text class="d-sub" x="46" y="134">Stored unchanged:</text>
+        <text class="d-sub" x="46" y="151">checksummed,</text>
+        <text class="d-sub" x="46" y="168">versioned</text>
+
+        <rect class="d-box" x="248" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="264" y="86">02</text>
+        <text class="d-title" x="264" y="110">Extraction + OCR</text>
+        <text class="d-sub" x="264" y="134">PDF, Office, images</text>
+        <text class="d-sub" x="264" y="151">Tesseract OCR:</text>
+        <text class="d-sub" x="264" y="168">EN · UK · RU</text>
+
+        <rect class="d-box" x="466" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="482" y="86">03</text>
+        <text class="d-title" x="482" y="110">Hindsight index</text>
+        <text class="d-sub" x="482" y="134">Search and recall</text>
+        <text class="d-sub" x="482" y="151">with a multilingual</text>
+        <text class="d-sub" x="482" y="168">reranker</text>
+
+        <rect class="d-box d-box-key" x="684" y="60" width="186" height="130" rx="10"/>
+        <text class="d-num" x="700" y="86">04</text>
+        <text class="d-title" x="700" y="110">Compiled wiki</text>
+        <text class="d-sub" x="700" y="134">Quotes checked</text>
+        <text class="d-sub" x="700" y="151">against the source</text>
+        <text class="d-sub" x="700" y="168">Contradictions kept</text>
+
+        <rect class="d-box" x="902" y="60" width="186" height="62" rx="10"/>
+        <text class="d-title" x="918" y="86">Obsidian vault</text>
+        <text class="d-sub" x="918" y="106">Your section kept</text>
+
+        <rect class="d-box" x="902" y="128" width="186" height="62" rx="10"/>
+        <text class="d-title" x="918" y="154">Your agents</text>
+        <text class="d-sub" x="918" y="174">Skill · MCP server</text>
+
+        <path class="d-arrow" d="M216 125H244" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M434 125H462" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M652 125H680" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M870 125 896 94" marker-end="url(#dw-arrow)"/>
+        <path class="d-arrow" d="M870 125 896 156" marker-end="url(#dw-arrow)"/>
+
+        <path class="d-arrow d-zone" d="M341 190V256"/>
+        <path class="d-arrow d-zone" d="M559 190V256"/>
+        <path class="d-arrow d-zone" d="M777 190V256"/>
+
+        <rect class="d-cloud" x="248" y="258" width="186" height="58" rx="10"/>
+        <text class="d-title" x="264" y="282">Vision model</text>
+        <text class="d-sub" x="264" y="302">optional, off by default</text>
+
+        <rect class="d-cloud" x="466" y="258" width="404" height="58" rx="10"/>
+        <text class="d-title" x="482" y="282">Model provider you choose</text>
+        <text class="d-sub" x="482" y="302">Receives extracted text, or runs locally</text>
+      </svg>
+
+      <svg class="diagram-tall" viewBox="0 0 360 712" role="img" aria-labelledby="dt-t dt-d">
+        <title id="dt-t">How LifeContext processes a document</title>
+        <desc id="dt-d">Inside your machine: originals, then extraction and OCR, then the Hindsight index, then the compiled wiki, which feeds your Obsidian vault and your agents. Outside your machine: the model provider you choose and an optional vision model.</desc>
+        <defs>
+          <marker id="dt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-head" d="M0 0 10 5 0 10z"/></marker>
+        </defs>
+        <rect class="d-zone" x="8" y="8" width="344" height="544" rx="14"/>
+        <text class="d-zone-label" x="30" y="36">YOUR MACHINE</text>
+
+        <rect class="d-box" x="40" y="50" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="78">01</text>
+        <text class="d-title" x="82" y="78">Originals</text>
+        <text class="d-sub" x="56" y="102">Unchanged, checksummed, versioned</text>
+
+        <path class="d-arrow" d="M185 120V146" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="150" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="178">02</text>
+        <text class="d-title" x="82" y="178">Extraction + OCR</text>
+        <text class="d-sub" x="56" y="202">PDF, Office, images; OCR EN/UK/RU</text>
+
+        <path class="d-arrow" d="M185 220V246" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="250" width="290" height="70" rx="10"/>
+        <text class="d-num" x="56" y="278">03</text>
+        <text class="d-title" x="82" y="278">Hindsight index</text>
+        <text class="d-sub" x="56" y="302">Recall, multilingual reranker</text>
+
+        <path class="d-arrow" d="M185 320V346" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box d-box-key" x="40" y="350" width="290" height="88" rx="10"/>
+        <text class="d-num" x="56" y="378">04</text>
+        <text class="d-title" x="82" y="378">Compiled wiki</text>
+        <text class="d-sub" x="56" y="402">Quotes checked against the source</text>
+        <text class="d-sub" x="56" y="420">Contradictions kept open</text>
+
+        <path class="d-arrow" d="M130 438V470" marker-end="url(#dt-arrow)"/>
+        <path class="d-arrow" d="M240 438V470" marker-end="url(#dt-arrow)"/>
+
+        <rect class="d-box" x="40" y="474" width="140" height="62" rx="10"/>
+        <text class="d-title" x="54" y="500">Obsidian vault</text>
+        <text class="d-sub" x="54" y="520">your notes kept</text>
+
+        <rect class="d-box" x="190" y="474" width="140" height="62" rx="10"/>
+        <text class="d-title" x="204" y="500">Your agents</text>
+        <text class="d-sub" x="204" y="520">skill · MCP</text>
+
+        <path class="d-arrow d-zone" d="M330 285H342V602H332"/>
+        <path class="d-arrow d-zone" d="M330 394H342"/>
+        <path class="d-arrow d-zone" d="M40 185H22V672H38"/>
+
+        <rect class="d-cloud" x="40" y="572" width="290" height="60" rx="10"/>
+        <text class="d-title" x="56" y="597">Model provider you choose</text>
+        <text class="d-sub" x="56" y="617">Gets extracted text, or runs locally</text>
+
+        <rect class="d-cloud" x="40" y="644" width="290" height="58" rx="10"/>
+        <text class="d-title" x="56" y="668">Vision model</text>
+        <text class="d-sub" x="56" y="688">optional, off by default</text>
+      </svg>
+    </figure>
+
+    <ol class="steps">
+      <li>
+        <h3>Originals</h3>
+        <p>Every file you add is stored unchanged: checksummed, immutable and versioned. A correction adds a new version; nothing is overwritten.</p>
+      </li>
+      <li>
+        <h3>Extraction and OCR</h3>
+        <p>Text comes out of TXT, Markdown, PDF (book-length too), DOCX, XLSX, PPTX and images. Scans go through local Tesseract OCR for English, Ukrainian and Russian.</p>
+        <p>A vision model you configure can read handwriting, photos and charts. It is off by default.</p>
+      </li>
+      <li>
+        <h3>Index</h3>
+        <p>Built on the open-source <a href="https://github.com/vectorize-io/hindsight">Hindsight memory engine</a>. LifeContext configures a multilingual reranker for English, Ukrainian and Russian text.</p>
+      </li>
+      <li class="key">
+        <h3>Compiled wiki</h3>
+        <p>Each document gets its own page. Shared topic and entity pages collect claims from several documents and link to each other.</p>
+        <ul>
+          <li>Every claim is a literal quote, checked against the source text before the page is written, with a citation to source, version and passage.</li>
+          <li>A short summary above the quotes is labelled as model-written.</li>
+          <li>Contradictions the model finds are recorded and never auto-resolved.</li>
+          <li>Correcting or forgetting a source marks the pages that depend on it as stale.</li>
+        </ul>
+      </li>
+      <li>
+        <h3>Obsidian and your agents</h3>
+        <p>Pages are written as Markdown into your Obsidian vault. Each page has a section for your own notes, kept byte for byte. If you edit the generated part, LifeContext reports a conflict instead of overwriting it.</p>
+        <p>Your agents read the same pages and evidence through one skill or the MCP server.</p>
+      </li>
+    </ol>
+
+    <div class="upkeep">
+      <h3>Keeping it current</h3>
+      <ul class="upkeep-list">
+        <li><strong>Daily brief and change log</strong>What was imported, which pages changed, new contradictions and pages that went stale.</li>
+        <li><strong><code>wiki lint</code></strong>Reports stale pages, open contradictions, orphan pages and gaps. It reports; it changes nothing.</li>
+        <li><strong>Journal</strong>Capture diary text from the command line or through an agent. Entries are named by date and title.</li>
+        <li><strong>Export and import</strong>Move a library between machines as a bundle.</li>
+        <li><strong>Backup and restore</strong>Back up originals, catalog, index and vault, and restore them into a fresh home directory.</li>
+        <li><strong>Bring your own model</strong>Anthropic, OpenAI, Gemini, OpenRouter or any OpenAI-compatible endpoint, local ones included.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="install" aria-labelledby="install-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[3]</b>Install</p>
+      <h2 id="install-h">Install</h2>
+      <p class="lead">One command on Linux and macOS, a container image for everything else, or a plain checkout if you want to read the code first.</p>
+    </header>
+
+    <div class="install-grid">
+      <div class="tabs" data-tabs>
+        <div class="tablist" role="tablist" aria-label="Install method" hidden>
+          <button type="button" role="tab" id="tab-sh" aria-controls="panel-sh" aria-selected="true">install.sh</button>
+          <button type="button" role="tab" id="tab-docker" aria-controls="panel-docker" aria-selected="false" tabindex="-1">Docker</button>
+          <button type="button" role="tab" id="tab-src" aria-controls="panel-src" aria-selected="false" tabindex="-1">From source</button>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-sh" aria-labelledby="tab-sh">
+          <h3 class="panel-title">install.sh</h3>
+          <p class="step-label">1 · Install</p>
+          <div class="code">
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh" aria-label="Copy install command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre class="wrap-lines" tabindex="0"><code id="code-sh">curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh</code></pre>
+          </div>
+          <p class="step-label">2 · Optional: rerun setup any time</p>
+          <p><code>install.sh</code> already runs <code>init</code>, <code>service install</code>, <code>skills install</code> and <code>doctor</code>; rerun them any time.</p>
+          <div class="code">
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Copy setup commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-sh-2">lifecontext init            <span class="c"># provider, model, API key, vault folder</span>
+lifecontext doctor          <span class="c"># readiness, OCR languages, vision status</span>
+lifecontext skills install  <span class="c"># Claude Code, Codex, Gemini CLI, Hermes</span></code></pre>
+          </div>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
+          <h3 class="panel-title">Docker</h3>
+          <p>The image includes Tesseract with English, Ukrainian and Russian and the local models, and runs as an unprivileged user. No port is published: the service listens on loopback inside the container, and you talk to it with <code>docker exec</code>. Your key goes in a Compose secret, never into the image; the other settings apply on the first start.</p>
+          <p class="step-label">compose.yaml</p>
+          <div class="code">
+            <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Copy compose.yaml" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-compose">services:
+  lifecontext:
+    image: ghcr.io/hantok/lifecontext:1.2.0
+    container_name: lifecontext
+    restart: unless-stopped
+    environment:                      <span class="c"># used on the first start only</span>
+      LIFECONTEXT_PROVIDER: anthropic
+      LIFECONTEXT_MODEL: claude-sonnet-5
+    secrets: [lifecontext_api_key]    <span class="c"># the key, readable by uid 1000</span>
+    volumes:
+      - home:/data/home               <span class="c"># settings, index, backups</span>
+      - vault:/data/vault             <span class="c"># your Obsidian vault</span>
+
+secrets:
+  lifecontext_api_key:
+    file: ./secrets/lifecontext_api_key
+
+volumes:
+  home:
+  vault:</code></pre>
+          </div>
+          <p class="step-label">Add the key, start, check</p>
+          <div class="code">
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-docker" aria-label="Copy Docker commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-docker">mkdir -p secrets
+(umask 077 &amp;&amp; cat &gt; secrets/lifecontext_api_key)   <span class="c"># paste the key, Enter, Ctrl-D</span>
+docker compose up -d
+docker compose exec lifecontext lifecontext doctor</code></pre>
+          </div>
+          <p>Agents on the host reach the container through the <code>lifecontext-docker</code> wrapper. The full <a href="https://github.com/Hantok/lifecontext/blob/main/compose.yaml">compose.yaml</a>, with the health check and limits, is in the repository.</p>
+          <p class="step-label">Without Compose</p>
+          <div class="code">
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-run" aria-label="Copy docker run command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-run">docker run -d --name lifecontext \
+  -e LIFECONTEXT_MODEL=claude-sonnet-5 \
+  -v "$PWD/secrets/lifecontext_api_key:/run/secrets/lifecontext_api_key:ro" \
+  -v lifecontext-home:/data/home -v lifecontext-vault:/data/vault \
+  ghcr.io/hantok/lifecontext:1.2.0</code></pre>
+          </div>
+          <p>On Linux, the key file must be readable by uid 1000 in the container (<code>sudo chown 1000</code> it).</p>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-src" aria-labelledby="tab-src">
+          <h3 class="panel-title">From source</h3>
+          <p>Needs Python 3.11 to 3.13, <a href="https://github.com/astral-sh/uv">uv</a>, and Tesseract with the <code>eng</code>, <code>ukr</code> and <code>rus</code> language data. On Linux the constraints file keeps PyTorch on its CPU build; on macOS run <code>uv pip install -e .</code> instead.</p>
+          <div class="code">
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-src" aria-label="Copy source install commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-src">git clone https://github.com/Hantok/lifecontext.git
+cd lifecontext
+uv venv &amp;&amp; . .venv/bin/activate
+uv pip install -c constraints-cpu.txt -e . \
+  --extra-index-url https://download.pytorch.org/whl/cpu \
+  --index-strategy unsafe-best-match   <span class="c"># Linux, CPU-only PyTorch</span>
+lifecontext init
+lifecontext service install
+lifecontext skills install
+lifecontext doctor</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <aside class="req" aria-labelledby="req-h">
+        <h3 id="req-h">Requirements</h3>
+        <ul>
+          <li>Linux (x86_64 or aarch64, glibc 2.35 or later) or macOS 14 or later on Apple silicon, natively.</li>
+          <li>Windows through Docker or WSL.</li>
+          <li>An API key for your model provider, or a local OpenAI-compatible endpoint such as Ollama or vLLM.</li>
+          <li>About 3 GB of disk for the runtime and models (measured in CI on Linux: 2.4 GB for the installation, 0.6 GB for the models). The installer downloads the embedding and rerank models once.</li>
+          <li>Recall reranks on the CPU; expect tens of seconds on a 4-core machine.</li>
+        </ul>
+        <h3>What the installer does</h3>
+        <ul>
+          <li>Checks your operating system and CPU, and stops with a clear message on combinations it does not support.</li>
+          <li>Downloads the release over HTTPS, checks its SHA-256 checksums and, with cosign 3 or later, their signature, and installs every dependency from a lock with pinned hashes.</li>
+          <li>Installs into your home directory. Running LifeContext never needs root.</li>
+          <li>Installs Tesseract with English, Ukrainian and Russian through brew, or through apt or dnf when sudo works without a password. It never asks for a password; otherwise it prints the command to run.</li>
+          <li>Runs <code>init</code>, <code>service install</code>, <code>skills install</code> and <code>doctor</code>. Your API key is asked for at <code>init</code>, never passed on the command line.</li>
+          <li>Run it again to upgrade: it stops the service, backs up your data, installs, and starts the service again.</li>
+          <li>Leaves vision off.</li>
+        </ul>
+        <p class="callout">Read the script before piping it to <code>sh</code>: it is in the <a href="https://github.com/Hantok/lifecontext/releases/latest">latest release</a>.</p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="agents" aria-labelledby="agents-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[4]</b>Agents</p>
+      <h2 id="agents-h">Works with your agents</h2>
+      <p class="lead">One skill for command-line agents and one MCP server for MCP clients. Both talk to the same local service and read the same cited pages.</p>
+    </header>
+
+    <div class="agents-grid">
+      <div class="agent-group">
+        <h3>Agent skill <code>lifecontext skills install</code></h3>
+        <p>One copy of the skill, linked into each agent it finds. Agents capture journal text, import documents, recall with evidence and read wiki pages through the <code>lifecontext</code> CLI.</p>
+        <table class="matrix">
+          <caption>Supported through the skill</caption>
+          <thead><tr><th scope="col">Agent</th><th scope="col">Connection</th><th scope="col">Access</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Claude Code</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Skill</span></td><td>Read and write</td></tr>
+            <tr><th scope="row">Codex</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Skill</span></td><td>Read and write</td></tr>
+            <tr><th scope="row">Gemini CLI</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Skill</span></td><td>Read and write</td></tr>
+            <tr><th scope="row">Hermes</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>Skill</span></td><td>Read and write</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="agent-group">
+        <h3>MCP server <code>lifecontext mcp</code></h3>
+        <p>New in 1.2. A local stdio server for MCP clients such as Claude Desktop and Cursor. It is read-only by default; add <code>--allow-writes</code> to the arguments to let clients capture and import.</p>
+        <div class="code">
+            <div class="code-head"><span>JSON</span><button class="copy" type="button" data-copy="code-mcp" aria-label="Copy MCP configuration" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre tabindex="0"><code id="code-mcp">{
+  "mcpServers": {
+    "lifecontext": {
+      "command": "/home/you/.local/bin/lifecontext",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+          </div>
+        <p>For <code>command</code>, use the output of <code>command -v lifecontext</code>; desktop apps do not read your shell <code>PATH</code>.</p>
+        <table class="matrix">
+          <caption>Supported through MCP</caption>
+          <thead><tr><th scope="col">Client</th><th scope="col">Connection</th><th scope="col">Access</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Claude Desktop</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP server</span></td><td>Read-only; writes with <code>--allow-writes</code></td></tr>
+            <tr><th scope="row">Cursor</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP server</span></td><td>Read-only; writes with <code>--allow-writes</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="providers">
+      <div>
+        <h3>Bring your own model</h3>
+        <p>LifeContext uses one model provider at a time, set at <code>init</code>. Anthropic is the one we document first.</p>
+        <ul class="provider-list">
+          <li class="featured">Anthropic</li>
+          <li>OpenAI</li>
+          <li>Gemini</li>
+          <li>OpenRouter</li>
+          <li>Any OpenAI-compatible endpoint</li>
+          <li>Ollama or vLLM, locally</li>
+        </ul>
+      </div>
+      <p class="trust"><strong>What agents are allowed to do.</strong> A connected agent runs the CLI with your authority. The skill tells it what not to do (no repairs, no edits to internal state, report failures instead of retrying around them); LifeContext does not enforce separate permissions per agent.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="compare" aria-labelledby="compare-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[5]</b>Compare</p>
+      <h2 id="compare-h">How it compares</h2>
+      <p class="lead">Eight products people often compare with LifeContext, described by what their own documentation says. When a vendor’s docs do not mention something, the cell says so; that is not the same as “no”.</p>
+    </header>
+
+    <p class="scroll-hint" id="compare-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14M15 8l4 4-4 4"/></svg>The table scrolls sideways; the product column stays in place.</p>
+    <div class="table-scroll" role="region" aria-labelledby="compare-cap" aria-describedby="compare-hint" tabindex="0">
+      <table class="compare">
+        <caption id="compare-cap">As of 17 October 2026; based on each vendor’s public docs.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Product</th>
+            <th scope="col">Licence</th>
+            <th scope="col">Self-host</th>
+            <th scope="col">Originals kept</th>
+            <th scope="col">PDF / Office / scans</th>
+            <th scope="col">Compiled wiki</th>
+            <th scope="col">Citations</th>
+            <th scope="col">Contradictions</th>
+            <th scope="col">Obsidian / Markdown</th>
+            <th scope="col">Agent access</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="ours">
+            <th scope="row">LifeContext<sup><a href="#fn-ours" aria-label="Note 1">1</a></sup></th>
+            <td>BUSL-1.1, source-available, free for individuals</td>
+            <td>Yes (loopback service)</td>
+            <td>Immutable, checksummed, versioned</td>
+            <td>TXT/MD/PDF/DOCX/XLSX/PPTX/images; local Tesseract OCR (EN/RU/UK)</td>
+            <td>Yes</td>
+            <td>Literal quote → source + version + passage, validated</td>
+            <td>Recorded, never auto-resolved</td>
+            <td>Projects to Obsidian; keeps your section, flags other edits as conflicts</td>
+            <td>Skill for Claude Code, Codex, Gemini CLI, Hermes; MCP server</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://support.google.com/notebooklm/answer/16179559">Gemini Notebook</a> (formerly NotebookLM)</th>
+            <td>Proprietary</td>
+            <td>No</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>PDF, DOCX, PPTX, images, audio, YouTube; OCR not stated in vendor docs</td>
+            <td>No (chat, notes, reports)</td>
+            <td>Inline direct quotes, jump to passage; validation not stated in vendor docs</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>No MCP/API found</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context">Claude Projects + memory</a></th>
+            <td>Proprietary</td>
+            <td>No</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>PDF, DOCX, XLSX, images; OCR not stated in vendor docs</td>
+            <td>No (memory = LLM-written topic summaries)</td>
+            <td>Chat search cites past chats; project answers not stated in vendor docs</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>No</td>
+            <td>Claude apps (Claude Code uses separate CLAUDE.md memory)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/mem0ai/mem0">Mem0</a></th>
+            <td>Apache-2.0 (some features cloud-only)</td>
+            <td>Yes</td>
+            <td class="ns">Not stated in vendor docs (stores extracted memories)</td>
+            <td>Cloud: PDF, images; OSS not stated in vendor docs; OCR not stated in vendor docs</td>
+            <td>No (retrieval)</td>
+            <td>None documented</td>
+            <td>None (v3 ADD-only: old and new facts coexist)</td>
+            <td>None documented</td>
+            <td>Plugins for Claude Code, Codex, Cursor, Hermes and others; MCP search</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/supermemoryai/supermemory">Supermemory</a></th>
+            <td>MIT repo; engine closed (local binary, “lite license”)</td>
+            <td>Partial</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>Cloud: PDF, Office, images, AV; OCR for scanned PDFs</td>
+            <td>No (retrieval + profiles)</td>
+            <td>None documented</td>
+            <td>Auto-resolved (“updates win”), history can be kept</td>
+            <td>None documented</td>
+            <td>Plugins for Claude Code, Codex, Cursor, Hermes; hosted MCP</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/basicmachines-co/basic-memory">Basic Memory</a></th>
+            <td>AGPL-3.0</td>
+            <td>Yes</td>
+            <td>Import records source checksum</td>
+            <td>PDF, DOCX, PPTX (local); no OCR engine</td>
+            <td>Notes + generated index; not source-compiled</td>
+            <td>PDF page footnotes, page number checked; no quote level</td>
+            <td>None (docs: no detection)</td>
+            <td>Native Markdown; Obsidian two-way; won’t overwrite hand-written notes</td>
+            <td>MCP (Claude Code, Codex, Cursor, ChatGPT and others)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/AgriciDaniel/claude-obsidian">claude-obsidian</a></th>
+            <td>MIT</td>
+            <td>Yes</td>
+            <td>Immutable, content-addressed (SHA-256)</td>
+            <td>PDF/images: metadata only; OCR needs external runner</td>
+            <td>Yes</td>
+            <td>Source-cited pages + claim ledger; quote check not stated in vendor docs</td>
+            <td>Flagged (“contested”), no silent winner</td>
+            <td>Obsidian vault; conflicts never silently overwritten</td>
+            <td>Agent Skills (Claude Code, Codex, Gemini, OpenCode, Cursor)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/nashsu/llm_wiki">LLM Wiki desktop</a> (nashsu/llm_wiki)</th>
+            <td>GPL-3.0</td>
+            <td>Yes (desktop app)</td>
+            <td>“Raw Sources (immutable)” layer</td>
+            <td>PDF (+ optional MinerU), Office, EPUB, images via vision LLM; OCR not named</td>
+            <td>Yes</td>
+            <td>Page-level <code>sources[]</code>; chat cites wiki pages</td>
+            <td>Flagged to review queue</td>
+            <td>Obsidian-compatible</td>
+            <td>Local API + MCP + skill (Claude Code, Codex)</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://github.com/atomicstrata/llm-wiki-compiler">llmwiki compiler</a> (atomicstrata)</th>
+            <td>MIT</td>
+            <td>Yes</td>
+            <td class="ns">Not stated in vendor docs</td>
+            <td>PDFs, images; OCR not stated in vendor docs</td>
+            <td>Yes</td>
+            <td>File + line range; lint checks file/range exist; optional LLM judge</td>
+            <td>Held for review (“contradicted”)</td>
+            <td>Markdown with Obsidian-stable links</td>
+            <td>MCP server</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="compare-notes">
+      <p id="fn-ours"><sup>1</sup> Our row describes LifeContext 1.2 from our own documentation; the other rows come from each vendor’s public pages, listed below. Hindsight is not in the table because LifeContext is built on it. Prices and star counts change often, so we left them out.</p>
+    </div>
+
+    <div class="compare-after">
+      <div>
+        <h3>What we found no one else documenting</h3>
+        <p>Among the products above, we found no other product that documents:</p>
+        <ul>
+          <li>a mechanical check that each quoted claim appears word for word in the cited source passage before a page is written;</li>
+          <li>citations pinned to a specific version of a source in a versioned store;</li>
+          <li>built-in local OCR that names Ukrainian and Russian.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Where others go further</h3>
+        <ul>
+          <li>Hosted versions you can use without installing anything, for example Gemini Notebook and Claude. LifeContext is self-hosted only.</li>
+          <li>Their own reading interface or graph view. LifeContext uses Obsidian for reading.</li>
+          <li>Audio, video and web capture. LifeContext reads documents and images.</li>
+          <li>Team sharing. LifeContext is built for one person.</li>
+          <li>OSI-approved licences: most of the self-hosted projects above are MIT, Apache-2.0, AGPL-3.0 or GPL-3.0.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Sources</h3>
+        <ul class="sources-list">
+          <li><a href="https://support.google.com/notebooklm/answer/16179559">Gemini Notebook</a>, also <a href="https://support.google.com/notebooklm/answer/16215270">supported sources</a> and <a href="https://blog.google/innovation-and-ai/products/gemini-notebook/notebooklm-gemini-notebook/">the rename</a></li>
+          <li><a href="https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context">Claude Projects + memory</a>, also <a href="https://support.claude.com/en/articles/8241126-upload-files-to-claude">file uploads</a></li>
+          <li><a href="https://github.com/mem0ai/mem0">Mem0</a>, also <a href="https://docs.mem0.ai/migration/oss-v2-to-v3">v3 migration notes</a></li>
+          <li><a href="https://github.com/supermemoryai/supermemory">Supermemory</a>, also <a href="https://supermemory.ai/docs/self-hosting/local-vs-enterprise">self-hosting</a></li>
+          <li><a href="https://github.com/basicmachines-co/basic-memory">Basic Memory</a>, also <a href="https://github.com/basicmachines-co/basic-memory/blob/main/docs/DOCUMENT_CITATIONS.md">document citations</a></li>
+          <li><a href="https://github.com/AgriciDaniel/claude-obsidian">claude-obsidian</a></li>
+          <li><a href="https://github.com/nashsu/llm_wiki">LLM Wiki desktop</a></li>
+          <li><a href="https://github.com/atomicstrata/llm-wiki-compiler">llmwiki compiler</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="privacy" aria-labelledby="privacy-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[6]</b>Privacy</p>
+      <h2 id="privacy-h">What leaves your machine</h2>
+    </header>
+    <p class="privacy-lead">Runs on your machine. Originals never leave it. Extracted text goes to the model provider you choose; with a local model it stays on your machine (supported, not yet part of release qualification). Page images go to a vision model only if you turn one on.</p>
+
+    <div class="flows">
+      <div class="flow">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 11 12 4l9 7v9H3z"/></svg>Stored on your machine</h3>
+        <ul>
+          <li>Original files and every version of them; these never leave it</li>
+          <li>Extracted text and OCR output</li>
+          <li>The index, the compiled pages and your vault</li>
+          <li>Your API key, in a private <code>.env</code> file</li>
+        </ul>
+      </div>
+      <div class="flow out">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 17 17 7M8 7h9v9"/></svg>Goes to your model provider</h3>
+        <p>All extracted text and journal entries, in chunks, when they are indexed, and passages again when pages are compiled, with the prompts for both. You pick the provider; with a local model nothing goes out.</p>
+      </div>
+      <div class="flow out">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Goes to a vision model</h3>
+        <p>Page images, and only if you configure a vision model. Vision is off by default.</p>
+      </div>
+      <div class="flow">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v12M6 12l6 6 6-6M5 20h14"/></svg>Downloaded once</h3>
+        <p>The first start downloads the embedding and rerank models. This website loads nothing from other sites and uses no analytics or cookies.</p>
+      </div>
+    </div>
+
+    <div class="not-claim">
+      <h3>What we do not claim</h3>
+      <dl>
+        <div>
+          <dt>No compliance certifications</dt>
+          <dd>LifeContext has not been audited or certified against GDPR, HIPAA, SOC 2 or any other standard.</dd>
+        </div>
+        <div>
+          <dt>Not “no hallucinations”</dt>
+          <dd>The quote check proves the quoted text exists in the text LifeContext extracted from the source. It does not prove that OCR or a vision model read the original correctly (model-read text is labelled), that a summary is right, that the best quotes were chosen, or that the source is correct.</dd>
+        </div>
+        <div>
+          <dt>Not every contradiction is found</dt>
+          <dd>The model proposes them while compiling; LifeContext records them but can miss some.</dd>
+        </div>
+        <div>
+          <dt>No per-agent permissions</dt>
+          <dd>Agents act with your authority. The skill sets out what they must not do; the application does not enforce it.</dd>
+        </div>
+        <div>
+          <dt>No benchmark numbers</dt>
+          <dd>We have not run a comparable test against other products, so we publish no accuracy or speed comparisons.</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<section class="section section-band" id="licensing" aria-labelledby="licensing-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[7]</b>Licensing</p>
+      <h2 id="licensing-h">Free for one person, at home or at work</h2>
+      <p class="lead">LifeContext is source-available under the Business Source License 1.1 (BUSL-1.1). Free for one person who runs their own copy for their own use, at home or at work — including documents that belong to your employer or your clients, and work as a freelancer or sole proprietor. Also free for non-profit organizations, accredited educational institutions and non-profit or publicly funded research institutions.</p>
+      <p class="lead">A commercial licence is needed when a business installs, provides or manages LifeContext for its staff or others, or when anyone offers it (or a derivative) to others as a hosted, managed or embedded service. Reading, evaluating and testing the code is free for everyone. Each release becomes Apache-2.0 on or before its Change Date (2030-11-08 for 1.2.0).</p>
+    </header>
+
+    <div class="licence-grid">
+      <div class="licence-card free">
+        <h3>Free</h3>
+        <p class="sub">No sign-up, no key, no time limit.</p>
+        <ul>
+          <li>Your own notes and documents.</li>
+          <li>Your work laptop and your employer’s documents. The licence does not override your employer’s confidentiality rules, including for text sent to your model provider.</li>
+          <li>Freelance client work, as a freelancer or sole proprietor. The reports you deliver are your work.</li>
+          <li>Non-profit organizations, accredited educational institutions and non-profit or publicly funded research institutions.</li>
+          <li>Reading, evaluating and testing the code, for anyone.</li>
+        </ul>
+      </div>
+      <div class="licence-card">
+        <h3>Commercial licence</h3>
+        <p class="sub">Needed when a business installs, provides or manages LifeContext for its staff or others, or when it is offered as a service.</p>
+        <ul>
+          <li>Your employer installs or manages LifeContext for a team.</li>
+          <li>A shared company instance that several people use.</li>
+          <li>A hosted, managed or embedded service that offers LifeContext, or a derivative, to others.</li>
+        </ul>
+        <p class="contact">Write to <a href="mailto:roman@rundax.com">roman@rundax.com</a> with a short description of how you want to use it.</p>
+      </div>
+    </div>
+    <p class="licence-meta">Details and more examples are in <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">LICENSING.md</a>; the full terms are in the <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSE">licence file</a>. The Hindsight engine inside LifeContext keeps its own MIT licence.</p>
+  </div>
+</section>
+
+<section class="section" id="faq" aria-labelledby="faq-h">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow"><b>[8]</b>FAQ</p>
+      <h2 id="faq-h">Questions</h2>
+    </header>
+
+    <div class="faq-group">
+      <h3>Licensing</h3>
+      <div class="faq">
+        <details>
+          <summary>Which licence is it, and what can I do with the code?</summary>
+          <div class="answer"><p>BUSL-1.1. The code is public, and reading, evaluating and testing it is free for everyone. BUSL-1.1 is not an OSI-approved licence, so we describe LifeContext as source-available. Each release becomes Apache-2.0 on or before its Change Date (2030-11-08 for 1.2.0).</p></div>
+        </details>
+        <details>
+          <summary>Can I use it at work, with my employer’s documents?</summary>
+          <div class="answer"><p>Yes, if you run your own copy for your own use. That includes documents that belong to your employer or your clients. The licence does not override your employer’s confidentiality rules, including for text sent to your model provider. A commercial licence is needed when your employer installs, provides or manages LifeContext for its staff.</p></div>
+        </details>
+        <details>
+          <summary>I work as a freelancer or sole proprietor. Is client work free?</summary>
+          <div class="answer"><p>Yes. Running your own copy for client work is free, and the reports you deliver are your work. Installing or managing LifeContext for a client, or offering it to others as a hosted, managed or embedded service, needs a commercial licence.</p></div>
+        </details>
+        <details>
+          <summary>My company wants to use it. What next?</summary>
+          <div class="answer"><p>If the company installs, provides or manages LifeContext for its staff or others, write to <a href="mailto:roman@rundax.com">roman@rundax.com</a> with how many people would use it and how. Non-profit organizations, accredited educational institutions and non-profit or publicly funded research institutions do not need a commercial licence.</p></div>
+        </details>
+        <details>
+          <summary>When does a release become Apache-2.0?</summary>
+          <div class="answer"><p>On or before its Change Date. For 1.2.0 that is 2030-11-08; each later release has its own date. <a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">LICENSING.md</a> has the details.</p></div>
+        </details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>General</h3>
+      <div class="faq">
+        <details>
+          <summary>Why not just RAG?</summary>
+          <div class="answer">
+            <p>Retrieval finds passages when you ask, and the answer is assembled again every time. LifeContext retrieves too (that is the Hindsight index), and it also compiles: it writes pages you can read, correct and link, keeps them current as sources change, and records where sources disagree.</p>
+            <p>Your agents get both: recall with evidence for a question, and pages for what you already know.</p>
+          </div>
+        </details>
+        <details>
+          <summary>What does it cost per document?</summary>
+          <div class="answer">
+            <p>Running your own copy is free. The cost is your model provider’s token price: indexing and compiling a document takes several model requests, so a long book costs more than a one-page letter, and a cheaper model costs less. OCR runs locally and costs nothing.</p>
+            <p>We do not publish a per-document figure because it depends so much on the model and the document. With a local model there is no per-token cost at all.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Does it work offline?</summary>
+          <div class="answer"><p>Storage, OCR, the index, the reranker and the Obsidian projection all run locally. Indexing and compiling need the model provider; with a cloud provider that means a connection. With a local model through Ollama or vLLM, LifeContext can run without one once the first start has downloaded the embedding and rerank models. Local-model operation is supported but not yet part of release qualification.</p></div>
+        </details>
+        <details>
+          <summary>Which languages does it handle?</summary>
+          <div class="answer"><p>OCR covers English, Ukrainian and Russian. LifeContext configures a multilingual reranker for English, Ukrainian and Russian text. Quotes stay in the language of the source, because they are literal.</p></div>
+        </details>
+        <details>
+          <summary>Is my data used for training?</summary>
+          <div class="answer"><p>There is no LifeContext cloud, so your data never reaches us. Whether your model provider may use API traffic for training depends on that provider’s terms; check them, or use a local model.</p></div>
+        </details>
+        <details>
+          <summary>How is this different from Karpathy’s LLM Wiki pattern?</summary>
+          <div class="answer"><p>LifeContext is inspired by <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">the LLM Wiki pattern</a>: raw sources, a wiki maintained by a model, and a lint pass. It adds custody (immutable, checksummed, versioned originals), literal quotes checked against the source before a page is written, contradictions that stay open until you decide, and stale markers when a source is corrected or forgotten.</p></div>
+        </details>
+        <details>
+          <summary>Do I need Obsidian?</summary>
+          <div class="answer"><p>No. The vault is a folder of Markdown files that any editor can open. Links, page names and the graph view are designed with Obsidian in mind.</p></div>
+        </details>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-about">
+        <a class="brand" href="./">
+          <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="7"/><rect class="mark-fg" x="7" y="8.5" width="12" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="14.5" width="18" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="20.5" width="9" height="3" rx="1.5"/><circle class="mark-dot" cx="23.5" cy="10" r="2.5"/></svg>
+          LifeContext
+        </a>
+        <p>A self-hosted context layer for AI agents. Built in Ukraine.</p>
+        <p>Built on the open-source <a href="https://github.com/vectorize-io/hindsight">Hindsight</a> memory engine (MIT, by Vectorize).</p>
+      </div>
+      <nav aria-labelledby="f-project">
+        <h2 id="f-project">Project</h2>
+        <ul>
+          <li><a href="https://github.com/Hantok/lifecontext">GitHub</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/tree/main/docs">Documentation</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/releases">Releases</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/CHANGELOG.md">Changelog</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="f-policies">
+        <h2 id="f-policies">Policies</h2>
+        <ul>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/SECURITY.md">Security policy</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/LICENSE">Licence (BUSL-1.1)</a></li>
+          <li><a href="https://github.com/Hantok/lifecontext/blob/main/LICENSING.md">Licensing details</a></li>
+          <li><a href="#licensing">Commercial licence</a></li>
+          <li><a href="#privacy">What leaves your machine</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="f-page">
+        <h2 id="f-page">On this page</h2>
+        <ul>
+          <li><a href="#example">Example</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="#compare">Compare</a></li>
+          <li><a href="uk/" hreflang="uk" lang="uk">Українська</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer-base">
+      <p>Claude, Codex, Gemini, Hermes, Cursor, Obsidian and the other names here are trademarks of their owners and are used only to identify those products; no endorsement is implied. LifeContext is not affiliated with Vectorize, Anthropic, Obsidian or Andrej Karpathy.</p>
+      <p>No analytics. No cookies.</p>
+    </div>
+  </div>
+</footer>
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+</body>
+</html>

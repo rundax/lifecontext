@@ -1,0 +1,94 @@
+name: Spike A - CPU torch install
+
+# Manual only: macOS minutes count ten times on private repositories.
+on:
+  workflow_dispatch:
+    inputs:
+      include_macos:
+        description: Also run on macos-14 (arm64); its minutes count ten times on a private repository
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  spike:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.include_macos && '["ubuntu-24.04", "macos-14"]' || '["ubuntu-24.04"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TORCH_VERSION: "2.14.0"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install into a fresh venv with CPU-only torch
+        run: |
+          venv="$RUNNER_TEMP/spike-venv"
+          python -m venv "$venv"
+          start=$SECONDS
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # The default PyPI wheel for Linux pulls CUDA; the CPU index does not.
+            "$venv/bin/python" -m pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+          else
+            # macOS wheels on PyPI have no CUDA.
+            "$venv/bin/python" -m pip install "torch==${TORCH_VERSION}"
+          fi
+          torch_seconds=$((SECONDS - start))
+          start=$SECONDS
+          "$venv/bin/python" -m pip install .
+          package_seconds=$((SECONDS - start))
+          {
+            echo "VENV=$venv"
+            echo "TORCH_SECONDS=$torch_seconds"
+            echo "PACKAGE_SECONDS=$package_seconds"
+          } >> "$GITHUB_ENV"
+      - name: Measure and smoke-test
+        run: |
+          bin="$VENV/bin"
+          site=$("$bin/python" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          venv_size=$(du -sh "$VENV" | cut -f1)
+          torch_size=$(du -sh "$site/torch" | cut -f1)
+          packages=$("$bin/python" -m pip list --format=freeze | wc -l | tr -d ' ')
+          pip_list_lines=$("$bin/python" -m pip list | wc -l | tr -d ' ')
+          cuda=$("$bin/python" -m pip list --format=freeze | grep -c -i -E '^(nvidia-|triton=)' || true)
+          version=$(cd "$RUNNER_TEMP" && "$bin/lifecontext" --version)
+          alias_version=$(cd "$RUNNER_TEMP" && "$bin/life-context" --version)
+          {
+            echo "## Spike A on ${{ matrix.os }} ($(uname -m))"
+            echo
+            echo "| Measure | Value |"
+            echo "|---|---|"
+            echo "| \`du -sh\` of the venv | $venv_size |"
+            echo "| \`du -sh\` of site-packages/torch | $torch_size |"
+            echo "| Installed packages (\`pip list --format=freeze\`) | $packages |"
+            echo "| \`pip list \| wc -l\` (with 2 header lines) | $pip_list_lines |"
+            echo "| CUDA packages (\`nvidia-*\`, \`triton\`) | $cuda |"
+            echo "| torch install | ${TORCH_SECONDS} s |"
+            echo "| LifeContext + dependencies install | ${PACKAGE_SECONDS} s |"
+            echo "| \`lifecontext --version\` | $version |"
+            echo "| \`life-context --version\` | $alias_version |"
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          "$bin/python" -I .github/scripts/spike_probe.py | tee -a "$GITHUB_STEP_SUMMARY"
+          "$bin/python" -m pip list --format=freeze > "$RUNNER_TEMP/pip-freeze.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: spike-pip-freeze-${{ matrix.os }}
+          path: ${{ runner.temp }}/pip-freeze.txt
+          if-no-files-found: ignore
+          retention-days: 30
