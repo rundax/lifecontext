@@ -95,7 +95,7 @@ changes or deletes the note. The rules:
 `--inbox` the folder is `Journal/Inbox` of the vault in `config.yaml`.
 
 The timer is a `systemd --user` timer (`lifecontext-capture.timer`, every 30
-seconds) or a launchd agent (`io.github.hantok.lifecontext.capture`), listed by
+seconds) or a launchd agent (`io.github.rundax.lifecontext.capture`), listed by
 `lifecontext service status` and removed by `lifecontext service uninstall`
 (`uninstall --capture` removes only it). See
 [operations](operations.md#running-as-a-user-service).

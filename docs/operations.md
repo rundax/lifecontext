@@ -525,7 +525,7 @@ With `--capture` it adds `lifecontext-capture.service` (`lifecontext capture
 --once --json`, a oneshot with the same limits as maintenance, after the API
 unit) and `lifecontext-capture.timer` (`OnActiveSec=30s`, `OnUnitActiveSec=30s`,
 `AccuracySec=1s`, so runs are not merged into one per minute); on macOS the agent
-`io.github.hantok.lifecontext.capture.plist` has `StartInterval` 30. What
+`io.github.rundax.lifecontext.capture.plist` has `StartInterval` 30. What
 `capture` does is in [sync](sync.md#2-capture-notes-from-the-inbox).
 Re-running with the same options changes nothing. `--no-start` writes the units
 and runs `daemon-reload` and `enable` without `--now`: nothing starts or
