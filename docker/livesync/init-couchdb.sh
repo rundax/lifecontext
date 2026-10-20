@@ -1,5 +1,6 @@
 #!/bin/sh
-# Create the LiveSync database and a restricted sync user in the CouchDB hub of compose.yaml.
+# Set up the CouchDB hub of compose.yaml for LiveSync: the system databases, the settings in
+# livesync.ini, the LiveSync database and a restricted sync user.
 #
 #   sh init-couchdb.sh [--env-file FILE] [--database NAME] [--user NAME] [--password-file FILE]
 #
@@ -161,6 +162,34 @@ done
 
 status=$(request admin GET /_all_dbs) || die "could not reach CouchDB"
 [ "$status" = 200 ] || die "CouchDB refused the admin account from $env_file (HTTP $status)"
+
+# The system databases a single CouchDB node needs (412: they exist).
+for system_database in _users _replicator; do
+	status=$(request admin PUT "/$system_database") || die "could not reach CouchDB"
+	case "$status" in 201 | 202 | 412) ;; *) die "could not create $system_database (HTTP $status)" ;; esac
+done
+
+# The settings in livesync.ini, applied through the configuration API. Each value is sent as
+# a JSON string; CouchDB stores it in the couchdb-config volume.
+settings_file="$(dirname "$0")/livesync.ini"
+[ -f "$settings_file" ] || die "$settings_file not found"
+section=""
+applied=0
+while IFS= read -r line || [ -n "$line" ]; do
+	case "$line" in
+	'' | \;* | \#*) continue ;;
+	\[*\]) section=${line#[}; section=${section%]}; continue ;;
+	esac
+	key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+	value=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+	case "$section" in "" | *[!A-Za-z0-9_]*) die "bad section [$section] in $settings_file" ;; esac
+	case "$key" in "" | *[!A-Za-z0-9_-]*) die "bad setting name '$key' in $settings_file" ;; esac
+	printf '"%s"' "$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g')" >"$work/setting.json"
+	status=$(request admin PUT "/_node/_local/_config/$section/$key" "$work/setting.json") || die "could not reach CouchDB"
+	[ "$status" = 200 ] || die "could not set $section/$key (HTTP $status)"
+	applied=$((applied + 1))
+done <"$settings_file"
+printf 'Applied %s settings from %s\n' "$applied" "$settings_file"
 
 # The sync user (a CouchDB user document; an existing one is updated with its current revision).
 user_path="/_users/org.couchdb.user:$sync_user"

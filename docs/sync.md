@@ -106,11 +106,16 @@ Self-hosted LiveSync is an Obsidian plugin that replicates a vault through a
 CouchDB database. `docker/livesync/` in the repository holds a hub for it:
 
 - `compose.yaml`: CouchDB pinned by image digest, published on `127.0.0.1:5984`
-  only, data in a named volume, the admin account from `couchdb.env`.
+  only, data and CouchDB's own settings in two named volumes, the admin account
+  from `couchdb.env`.
 - `livesync.ini`: the settings LiveSync needs (CORS for the Obsidian apps, the
   large size limits) and `require_valid_user`, so every request needs an
-  account.
-- `init-couchdb.sh`: creates the database and a sync user that can use that
+  account. It is not mounted into the container: the image's start script
+  changes the owner of every file under `/opt/couchdb` and stops when it
+  cannot, so `init-couchdb.sh` applies these settings through CouchDB's
+  configuration API instead, and CouchDB keeps them in its settings volume.
+- `init-couchdb.sh`: creates CouchDB's system databases, applies
+  `livesync.ini`, then creates the database and a sync user that can use that
   database and nothing else.
 
 ```bash
@@ -132,8 +137,9 @@ them or change their security. Run the script again at any time; it keeps the
 database and sets the user's password to the one in the file. `--database`,
 `--user`, `--env-file` and `--password-file` change the names and places.
 
-The compose file and the script were checked here against a stand-in for
-CouchDB, not against a running container.
+Checked against the pinned CouchDB image: requests without an account are
+refused, the sync user can open its database but cannot list databases, and the
+settings and accounts survive `docker compose down` and `up`.
 
 ## 4. Reach the hub only over Tailscale
 
