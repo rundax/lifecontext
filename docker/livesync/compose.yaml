@@ -25,7 +25,11 @@ services:
       - "127.0.0.1:5984:5984"
     volumes:
       - couchdb-data:/opt/couchdb/data
-      - ./livesync.ini:/opt/couchdb/etc/local.d/livesync.ini:ro
+      # CouchDB's own settings, the admin account and the LiveSync settings that
+      # init-couchdb.sh applies. A volume, not a bind mount of livesync.ini: the
+      # image's start script changes the owner of every file under /opt/couchdb
+      # and stops when it cannot.
+      - couchdb-config:/opt/couchdb/etc/local.d
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -39,3 +43,4 @@ services:
 
 volumes:
   couchdb-data:
+  couchdb-config:

@@ -106,11 +106,16 @@ Self-hosted LiveSync is an Obsidian plugin that replicates a vault through a
 CouchDB database. `docker/livesync/` in the repository holds a hub for it:
 
 - `compose.yaml`: CouchDB pinned by image digest, published on `127.0.0.1:5984`
-  only, data in a named volume, the admin account from `couchdb.env`.
+  only, data and CouchDB's own settings in two named volumes, the admin account
+  from `couchdb.env`.
 - `livesync.ini`: the settings LiveSync needs (CORS for the Obsidian apps, the
   large size limits) and `require_valid_user`, so every request needs an
-  account.
-- `init-couchdb.sh`: creates the database and a sync user that can use that
+  account. It is not mounted into the container: the image's start script
+  changes the owner of every file under `/opt/couchdb` and stops when it
+  cannot, so `init-couchdb.sh` applies these settings through CouchDB's
+  configuration API instead, and CouchDB keeps them in its settings volume.
+- `init-couchdb.sh`: creates CouchDB's system databases, applies
+  `livesync.ini`, then creates the database and a sync user that can use that
   database and nothing else.
 
 ```bash
@@ -120,6 +125,7 @@ printf 'COUCHDB_USER=admin\nCOUCHDB_PASSWORD=%s\n' \
   "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)" > couchdb.env
 docker compose up -d
 sh init-couchdb.sh
+docker compose restart    # once, so every setting is in effect
 ```
 
 `couchdb.env` is the admin account; keep it private (the folder's
@@ -132,8 +138,26 @@ them or change their security. Run the script again at any time; it keeps the
 database and sets the user's password to the one in the file. `--database`,
 `--user`, `--env-file` and `--password-file` change the names and places.
 
-The compose file and the script were checked here against a stand-in for
-CouchDB, not against a running container.
+Checked against the pinned CouchDB image: requests without an account are
+refused, the sync user can open its database but cannot list databases, and the
+settings and accounts survive `docker compose down` and `up`.
+
+CouchDB keeps its settings and the admin account in the `couchdb-config`
+volume, so editing `couchdb.env` later does not change the admin password. To
+change it, set the new password in CouchDB first, then in `couchdb.env`:
+
+```bash
+umask 077
+printf 'user = "admin:%s"\n' "$(sed -n 's/^COUCHDB_PASSWORD=//p' couchdb.env)" > .admin.curlrc
+printf '"%s"' "NEW-PASSWORD" > .new-password.json   # replace NEW-PASSWORD, letters and digits only
+curl -s --config .admin.curlrc -X PUT --data-binary @.new-password.json \
+  http://127.0.0.1:5984/_node/_local/_config/admins/admin
+rm -f .admin.curlrc .new-password.json
+```
+
+Then write the same password into `couchdb.env`. Removing the volumes
+(`docker compose down -v`) starts the hub empty, with the account from
+`couchdb.env`.
 
 ## 4. Reach the hub only over Tailscale
 
@@ -154,8 +178,11 @@ public address. Never run `tailscale funnel` for it, which would publish it to
 the internet, and never publish port 5984 from Docker on another interface.
 To limit which tailnet devices may connect, use the tailnet's access policy.
 
-The address from `tailscale serve status` is what you enter as the URI in
-steps 5 and 6. CouchDB still asks for the sync user's name and password, so a
+The address from `tailscale serve status` is what the devices use as the URI
+in step 6. The server's own client uses `http://127.0.0.1:5984` (step 5), so
+it does not depend on the server resolving its own tailnet name, which some
+Linux setups do not do. `tailscale serve` can proxy a path to another local
+port without `sudo`, but serving a folder directly needs root. CouchDB still asks for the sync user's name and password, so a
 device that is on your tailnet but is not set up cannot read the notes.
 
 ## 5. The headless LiveSync client on the server
@@ -177,27 +204,48 @@ node src/apps/cli/dist/index.cjs --help
 
 `--ignore-scripts` keeps dependencies from running install scripts. Give the
 client a protected settings file; never use its `setup <setup URI>` command
-here, because the URI would appear in the process list:
+here, because the URI would appear in the process list. The client writes a
+complete settings file with `init-settings`; then fill in the hub and the
+account from the files of step 3, without passing any secret as an argument:
 
 ```bash
 umask 077
 mkdir -p ~/.config/livesync ~/.local/state/livesync
-HUB_FILES=/path/to/lifecontext/docker/livesync
-printf '{\n  "couchDB_URI": "https://HUB-ADDRESS",\n  "couchDB_USER": "livesync",\n  "couchDB_PASSWORD": "%s",\n  "couchDB_DBNAME": "obsidian-livesync",\n  "isConfigured": true,\n  "liveSync": true\n}\n' \
-  "$(head -n 1 "$HUB_FILES/sync-user.password")" > ~/.config/livesync/settings.json
+# Both only the first time: a new passphrase would no longer read the hub.
+[ -s ~/.config/livesync/settings.json ] ||
+  node src/apps/cli/dist/index.cjs init-settings ~/.config/livesync/settings.json
+[ -s ~/.config/livesync/e2ee.passphrase ] ||
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > ~/.config/livesync/e2ee.passphrase
+HUB_FILES=/path/to/lifecontext/docker/livesync python3 - <<'PY'
+import json, os
+home, hub = os.path.expanduser("~"), os.environ["HUB_FILES"]
+path = f"{home}/.config/livesync/settings.json"
+settings = json.load(open(path))
+settings.update({
+    "couchDB_URI": "http://127.0.0.1:5984",
+    "couchDB_USER": "livesync",
+    "couchDB_PASSWORD": open(f"{hub}/sync-user.password").readline().strip(),
+    "couchDB_DBNAME": "obsidian-livesync",
+    "encrypt": True,
+    "passphrase": open(f"{home}/.config/livesync/e2ee.passphrase").read().strip(),
+    "isConfigured": True,
+    "liveSync": True,
+})
+json.dump(settings, open(path, "w"), indent=2)
+PY
 ```
 
-Replace `HUB-ADDRESS` with the address from step 4. (`printf` is a shell
-built-in, so the password is not an argument of any process.) For end-to-end
-encryption add `"encrypt": true` and `"passphrase": "..."` by editing the file.
+The client on the server talks to the hub on `127.0.0.1` directly; only the
+devices use the Tailscale address. `encrypt` with a passphrase makes the hub
+hold only encrypted data; every device needs the same passphrase (step 6), and
+`e2ee.passphrase` is where it is kept on the server.
 
-Run the client once in the foreground to see it work (stop it with Ctrl-C),
-with `VAULT` set to your vault folder:
+The database folder comes first and the command last. Run the client once in
+the foreground to see it work (stop it with Ctrl-C):
 
 ```bash
-VAULT=~/LifeContext/vault
-node src/apps/cli/dist/index.cjs ~/.local/state/livesync daemon \
-  --vault "$VAULT" --settings ~/.config/livesync/settings.json
+node src/apps/cli/dist/index.cjs ~/.local/state/livesync \
+  --settings ~/.config/livesync/settings.json --vault ~/LifeContext/vault daemon
 ```
 
 It mirrors the vault into the hub, then keeps both sides in step. Then keep it
@@ -208,12 +256,14 @@ folder if yours is elsewhere):
 ```ini
 [Unit]
 Description=Self-hosted LiveSync client for the LifeContext vault
+After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/node %h/.local/share/livesync-src/src/apps/cli/dist/index.cjs %h/.local/state/livesync daemon --vault %h/LifeContext/vault --settings %h/.config/livesync/settings.json
+ExecStart=/usr/bin/node %h/.local/share/livesync-src/src/apps/cli/dist/index.cjs %h/.local/state/livesync --settings %h/.config/livesync/settings.json --vault %h/LifeContext/vault daemon
 UMask=0077
 Restart=on-failure
 RestartSec=10
+MemoryMax=1G
 
 [Install]
 WantedBy=default.target
@@ -223,13 +273,14 @@ WantedBy=default.target
 systemctl --user daemon-reload
 systemctl --user enable --now livesync-client.service
 loginctl enable-linger "$USER"        # keep user services running after you log out
+journalctl --user -u livesync-client   # "Initial replication complete", then "LiveSync active"
 ```
 
 The client keeps its own state in `~/.local/state/livesync`, outside the
 vault. Conflicting versions of one file are skipped by the client and shown by
 its `ls` command; resolve them with its `resolve` command or in Obsidian.
-The commands in this section follow the client's README and were not run when
-this page was written; start with `--help`.
+These steps were run with release 1.0.32 on an Arch Linux server: the client
+mirrored a 70-note vault into the hub and stayed in continuous sync.
 
 ## 6. The LiveSync plugin on each device
 
@@ -240,10 +291,12 @@ LiveSync". In its setup choose CouchDB and enter:
 - Username `livesync`, and the password from `sync-user.password` (move it to
   the device with a password manager, not through chat or email).
 - Database name `obsidian-livesync`.
+- End-to-end encryption on, with the passphrase from
+  `~/.config/livesync/e2ee.passphrase` on the server (step 5).
 
-Choose the continuous "LiveSync" mode. Optionally turn on end-to-end
-encryption: then CouchDB holds only encrypted data, and every client,
-including the one in step 5, must use the same passphrase. Losing it makes the
+Choose the continuous "LiveSync" mode. Turn on end-to-end encryption with the
+passphrase of step 5: CouchDB holds only encrypted data, and every client,
+including the one on the server, must use the same passphrase. Losing it makes the
 hub unreadable, but not the vault on the server.
 
 The server's client (step 5) fills the hub from the server's vault, which
@@ -277,8 +330,8 @@ returns to every device. `lifecontext capture --once --json` shows the counts,
 
 - The hub holds a copy of everything in the vault that the client syncs:
   your notes, LifeContext's entries and wiki pages, and the copies of imported
-  originals. Encrypt it end to end if the hub's disk
-  is not trusted.
+  originals. Step 5 encrypts it end to end, so the hub's disk holds no
+  readable notes.
 - Notes and entries reach every device you set up. Nothing leaves your tailnet,
   except what LifeContext sends to the model you configured
   ([privacy](privacy.md)).

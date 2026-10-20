@@ -86,6 +86,11 @@ class FakeCouch(BaseHTTPRequestHandler):
         if role != "admin":
             return self._send(401 if role is None else 403)
         body = self._body()
+        if path.startswith("/_node/_local/_config/"):
+            section, _, key = path.removeprefix("/_node/_local/_config/").partition("/")
+            previous = FakeCouch.config.get((section, key), "")
+            FakeCouch.config[(section, key)] = body
+            return self._send(200, previous)
         if path.startswith("/_users/"):
             key = path.rsplit("/", 1)[1]
             existing = self.users.get(key)
@@ -116,7 +121,12 @@ class StaticFilesTests(unittest.TestCase):
         self.assertNotIn("environment", service)
         self.assertEqual(service["restart"], "unless-stopped")
         self.assertIn("healthcheck", service)
-        self.assertIn("./livesync.ini:/opt/couchdb/etc/local.d/livesync.ini:ro", service["volumes"])
+        # The settings live in a volume and are applied by init-couchdb.sh: a bind mount of
+        # livesync.ini stops the image's start script, which changes the owner of every file
+        # under /opt/couchdb.
+        self.assertIn("couchdb-config:/opt/couchdb/etc/local.d", service["volumes"])
+        self.assertIn("couchdb-config", compose["volumes"])
+        self.assertFalse([volume for volume in service["volumes"] if "livesync.ini" in volume])
 
     def test_couchdb_settings_require_accounts_and_allow_what_livesync_needs(self) -> None:
         settings = configparser.ConfigParser(interpolation=None)
@@ -145,7 +155,7 @@ class InitScriptTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-livesync-test.")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        FakeCouch.users, FakeCouch.databases = {}, {}
+        FakeCouch.users, FakeCouch.databases, FakeCouch.config = {}, {}, {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeCouch)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -188,6 +198,20 @@ class InitScriptTests(unittest.TestCase):
             self.assertNotIn(ADMIN_PASSWORD, text)
         self.assertEqual(os.listdir(self.root / "stubs"), ["curl"])
         self.assertEqual([name for name in os.listdir(self.root) if name.startswith("livesync-init.")], [])
+
+    def test_creates_the_system_databases_and_applies_every_setting(self) -> None:
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("_users", FakeCouch.databases)
+        self.assertIn("_replicator", FakeCouch.databases)
+        settings = configparser.ConfigParser(interpolation=None)
+        settings.optionxform = str
+        settings.read(LIVESYNC / "livesync.ini")
+        expected = {(section, key): value for section in settings.sections()
+                    for key, value in settings[section].items()}
+        self.assertEqual(FakeCouch.config, expected)
+        self.assertEqual(FakeCouch.config[("httpd", "WWW-Authenticate")], 'Basic realm="couchdb"')
+        self.assertIn(f"Applied {len(expected)} settings", result.stdout)
 
     def test_running_it_again_keeps_the_database_and_updates_the_user(self) -> None:
         self.assertEqual(self.run_script().returncode, 0)
