@@ -191,8 +191,29 @@ def _build_parser() -> argparse.ArgumentParser:
         if name != "check":
             command.add_argument("--dry-run", action="store_true", help="show what would change")
 
+    llm = commands.add_parser("llm", help="show or change the model, endpoint and key")
+    _shared_options(llm)
+    llm_commands = llm.add_subparsers(dest="llm_command", required=True)
+    _shared_options(llm_commands.add_parser(
+        "show", help="print provider, model and base URL, and whether a key is stored (never the key)"))
+    llm_set = llm_commands.add_parser(
+        "set", help="change only the given fields, then restart the service if it runs")
+    _shared_options(llm_set)
+    llm_set.add_argument("--provider", help="model provider ID")
+    llm_set.add_argument("--model", help="exact model ID")
+    llm_set.add_argument("--base-url", help="provider API root, required for openai_compatible")
+    llm_set.add_argument("--api-key-stdin", action="store_true",
+                         help="replace the stored key with one line from stdin (else from $LIFECONTEXT_API_KEY_FILE)")
+
+    capture = commands.add_parser(
+        "capture", help="turn settled Markdown notes in the vault's Journal/Inbox into journal entries")
+    _shared_options(capture)
+    capture.add_argument("--once", action="store_true", required=True, help="scan the inbox once, then exit")
+    capture.add_argument("--inbox", metavar="DIR",
+                         help="a folder named Inbox (default: Journal/Inbox of the configured vault)")
+
     service = commands.add_parser(
-        "service", help="run the API (and daily maintenance) as a systemd --user or launchd service"
+        "service", help="run the API (and daily maintenance, note capture) as a systemd --user or launchd service"
     )
     _shared_options(service)
     service_commands = service.add_subparsers(dest="service_command", required=True)
@@ -206,6 +227,9 @@ def _build_parser() -> argparse.ArgumentParser:
         if name != "status":
             command.add_argument("--maintenance", action="store_true",
                                  help="install: add the daily 07:00 maintenance timer; "
+                                      "uninstall: remove only that timer")
+            command.add_argument("--capture", action="store_true",
+                                 help="install: add the 30-second Journal/Inbox capture timer; "
                                       "uninstall: remove only that timer")
             command.add_argument("--dry-run", action="store_true", help="print the files and commands only")
         if name == "install":
@@ -1322,15 +1346,92 @@ def _service(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         if args.service_command == "install":
             report = service.install(
                 system, home, executable=service.lifecontext_executable(), port=args.port,
-                maintenance=args.maintenance, dry_run=args.dry_run, start=not args.no_start,
+                maintenance=args.maintenance, capture=args.capture, dry_run=args.dry_run, start=not args.no_start,
                 data_home=None if os.path.realpath(data_home) == os.path.realpath(home) else data_home)
         elif args.service_command == "uninstall":
-            report = service.uninstall(system, home, maintenance_only=args.maintenance, dry_run=args.dry_run)
+            report = service.uninstall(system, home, maintenance_only=args.maintenance, capture_only=args.capture,
+                                       dry_run=args.dry_run)
         else:
             report = service.status(system, home, data_home=data_home)
     except service.ServiceError as exc:
         raise CLIError(exc.code) from None
     return report, service.render(report), 0
+
+
+class _CaptureApi:
+    """Capture's API calls; one the API refuses or cannot answer counts as not completed and is retried."""
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+
+    def _completed(self, args: argparse.Namespace, receipt: dict[str, object]) -> bool:
+        operation = _get(args, "/v1/operations/" + quote(str(receipt["operation_id"]), safe=""))
+        return operation.get("state") == "completed"
+
+    def retain(self, source_id: str, raw: bytes, key: str) -> bool:
+        args = argparse.Namespace(**{**vars(self.args), "source_id": source_id, "source_version": 1,
+                                     "idempotency_key": key})
+        try:
+            return self._completed(args, _retain(args, raw, None))
+        except CLIError:
+            return False
+
+    def correct(self, source_id: str, expected_version: int, raw: bytes, key: str) -> bool:
+        args = argparse.Namespace(**{**vars(self.args), "idempotency_key": key})
+        try:
+            receipt = _post_json(args, "/v1/curation", {
+                "action": "correct", "source_id": source_id, "expected_version": expected_version,
+                "content": raw.decode("utf-8")})
+            return self._completed(args, receipt)
+        except CLIError:
+            return False
+
+    def evidence(self, source_id: str, version: int) -> dict[str, object] | None:
+        try:
+            return _get(self.args, f"/v1/evidence/{quote(source_id, safe='')}?" + urlencode({
+                "version": version, "include_content": "false"}))
+        except CLIError:
+            return None
+
+
+def _capture(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
+    from lifecontext import capture
+    from lifecontext.config import ConfigError, load_settings
+
+    paths = LifeContextPaths.current()
+    try:
+        inbox = Path(args.inbox).expanduser() if args.inbox else capture.default_inbox(load_settings(), paths)
+        report = capture.run_once(inbox, paths, _CaptureApi(args))
+    except ConfigError:
+        raise CLIError("invalid_config") from None
+    except capture.CaptureError as exc:
+        raise CLIError(exc.code) from None
+    return report, capture.render(report), 0
+
+
+def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
+    import platform
+
+    from lifecontext import initialize, service
+
+    try:
+        if args.llm_command == "show":
+            report = initialize.show_llm()
+            return report, initialize.render_llm(report), 0
+        if (args.provider is None and args.model is None and args.base_url is None and not args.api_key_stdin
+                and not os.environ.get(initialize.KEY_FILE_VARIABLE)):
+            raise CLIError("nothing_to_change")
+        report = initialize.set_llm(
+            initialize.InitOptions(provider=args.provider, model=args.model, base_url=args.base_url,
+                                   api_key_stdin=args.api_key_stdin),
+            key_stream=sys.stdin.buffer if args.api_key_stdin else None)
+    except initialize.InitError as exc:
+        raise CLIError(exc.code) from None
+    except OSError:
+        raise CLIError("setup_failed") from None
+    restart = service.restart_if_running(platform.system())
+    text = "\n".join([initialize.render_llm(report), service.render_restart(restart)])
+    return {**report, "service": restart}, text, 0
 
 
 def _configured_today() -> date:
@@ -1434,6 +1535,7 @@ def _backup(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
 
 
 _LOCAL_COMMANDS = {"init": _init, "doctor": _doctor, "skills": _skills, "service": _service,
+                   "llm": _llm, "capture": _capture,
                    "maintain": _maintain, "backup": _backup, "restore": _backup, "hindsight": _backup}
 
 

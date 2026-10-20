@@ -1,4 +1,4 @@
-"""``lifecontext service``: run the API, and optionally daily maintenance, as a user service.
+"""``lifecontext service``: run the API, and optionally daily maintenance and note capture, as a user service.
 
 Linux uses ``systemd --user`` units, macOS launchd agents. Only the files named
 here are ever written or removed; other units (for example a development
@@ -23,10 +23,14 @@ from lifecontext.paths import LifeContextPaths, atomic_write
 SERVICE_UNIT = "lifecontext.service"
 MAINTAIN_SERVICE = "lifecontext-maintain.service"
 MAINTAIN_TIMER = "lifecontext-maintain.timer"
+CAPTURE_SERVICE = "lifecontext-capture.service"
+CAPTURE_TIMER = "lifecontext-capture.timer"
 LAUNCHD_LABEL = "io.github.rundax.lifecontext"
 LAUNCHD_MAINTAIN_LABEL = "io.github.rundax.lifecontext.maintain"
+LAUNCHD_CAPTURE_LABEL = "io.github.rundax.lifecontext.capture"
 MAINTENANCE_HOUR = 7
-# The maintenance run is an HTTP client of the service; these bound the client process.
+CAPTURE_INTERVAL_SECONDS = 30
+# The maintenance and capture runs are HTTP clients of the service; these bound the client process.
 MAINTAIN_LIMITS = {"MemoryMax": "512M", "CPUQuota": "50%", "Nice": "10"}
 # The API, its Hindsight daemon and Postgres share the service's control group: past
 # MemoryHigh the kernel reclaims and throttles instead of starving the desktop, and a
@@ -97,7 +101,7 @@ def _environment(executable: str, manager: str, data_home: Path | None) -> dict[
 
 
 def systemd_units(executable: str, port: int, maintenance: bool, *,
-                  data_home: Path | None = None) -> dict[str, str]:
+                  data_home: Path | None = None, capture: bool = False) -> dict[str, str]:
     """``data_home`` becomes ``Environment=HOME=`` when the data lives under a HOME other than the account's."""
     environment = [f"Environment={_systemd_word(f'{name}={value}', assignment=True)}"
                    for name, value in _environment(executable, "systemd", data_home).items()]
@@ -148,11 +152,42 @@ def systemd_units(executable: str, port: int, maintenance: bool, *,
             "WantedBy=timers.target",
             "",
         ])
+    if capture:
+        capture_command = " ".join(_systemd_word(word) for word in (executable, "capture", "--once", "--json",
+                                                                   "--port", str(port)))
+        units[CAPTURE_SERVICE] = "\n".join([
+            "[Unit]",
+            "Description=LifeContext capture: settled notes in Journal/Inbox become journal entries",
+            f"Documentation={_DOCS}",
+            f"After={SERVICE_UNIT}",
+            "",
+            "[Service]",
+            "Type=oneshot",
+            f"ExecStart={capture_command}",
+            *environment,
+            *(f"{name}={value}" for name, value in MAINTAIN_LIMITS.items()),
+            "",
+        ])
+        units[CAPTURE_TIMER] = "\n".join([
+            "[Unit]",
+            f"Description=Run LifeContext capture every {CAPTURE_INTERVAL_SECONDS} seconds",
+            "",
+            "[Timer]",
+            f"OnActiveSec={CAPTURE_INTERVAL_SECONDS}s",
+            f"OnUnitActiveSec={CAPTURE_INTERVAL_SECONDS}s",
+            # The default accuracy of one minute would merge the 30-second runs.
+            "AccuracySec=1s",
+            f"Unit={CAPTURE_SERVICE}",
+            "",
+            "[Install]",
+            "WantedBy=timers.target",
+            "",
+        ])
     return units
 
 
 def launchd_agents(home: Path, executable: str, port: int, maintenance: bool, *,
-                   data_home: Path | None = None) -> dict[str, bytes]:
+                   data_home: Path | None = None, capture: bool = False) -> dict[str, bytes]:
     logs = home / "Library" / "Logs" / "lifecontext"
     environment = _environment(executable, "launchd", data_home)
     agents = {f"{LAUNCHD_LABEL}.plist": plistlib.dumps({
@@ -179,6 +214,18 @@ def launchd_agents(home: Path, executable: str, port: int, maintenance: bool, *,
             "StandardOutPath": str(logs / "maintain.log"),
             "StandardErrorPath": str(logs / "maintain.log"),
         })
+    if capture:
+        agents[f"{LAUNCHD_CAPTURE_LABEL}.plist"] = plistlib.dumps({
+            "Label": LAUNCHD_CAPTURE_LABEL,
+            "ProgramArguments": [executable, "capture", "--once", "--json", "--port", str(port)],
+            "EnvironmentVariables": environment,
+            "StartInterval": CAPTURE_INTERVAL_SECONDS,
+            "Nice": int(MAINTAIN_LIMITS["Nice"]),
+            "ProcessType": "Background",
+            "LowPriorityIO": True,
+            "StandardOutPath": str(logs / "capture.log"),
+            "StandardErrorPath": str(logs / "capture.log"),
+        })
     return agents
 
 
@@ -189,10 +236,16 @@ def _unit_directory(home: Path, manager: str, environ: Mapping[str, str]) -> Pat
     return config / "systemd" / "user"
 
 
-def _our_files(manager: str) -> tuple[str, ...]:
+def _our_files(manager: str, *, maintenance: bool = True, capture: bool = True,
+               api: bool = True) -> tuple[str, ...]:
+    """The unit files of the API, the maintenance timer and the capture timer, in that order."""
     if manager == "launchd":
-        return (f"{LAUNCHD_LABEL}.plist", f"{LAUNCHD_MAINTAIN_LABEL}.plist")
-    return (SERVICE_UNIT, MAINTAIN_SERVICE, MAINTAIN_TIMER)
+        groups = ((f"{LAUNCHD_LABEL}.plist",), (f"{LAUNCHD_MAINTAIN_LABEL}.plist",),
+                  (f"{LAUNCHD_CAPTURE_LABEL}.plist",))
+    else:
+        groups = ((SERVICE_UNIT,), (MAINTAIN_SERVICE, MAINTAIN_TIMER), (CAPTURE_SERVICE, CAPTURE_TIMER))
+    return tuple(name for group, wanted in zip(groups, (api, maintenance, capture), strict=True) if wanted
+                 for name in group)
 
 
 def _run(runner: Runner, command: list[str], *, allowed: bool = False,
@@ -218,7 +271,7 @@ def _loaded(runner: Runner, domain: str, label: str) -> bool:
 
 
 def install(system: str, home: Path, *, executable: str, port: int, maintenance: bool, dry_run: bool,
-            start: bool = True, data_home: Path | None = None,
+            start: bool = True, data_home: Path | None = None, capture: bool = False,
             runner: Runner = subprocess.run, environ: Mapping[str, str] | None = None,
             uid: int | None = None) -> dict[str, Any]:
     """Write the units under ``home`` (the account's) and start them unless ``start`` is false.
@@ -232,8 +285,9 @@ def install(system: str, home: Path, *, executable: str, port: int, maintenance:
         raise ServiceError("executable_not_found")
     directory = _unit_directory(home, manager, environ)
     content = ({name: text.encode() for name, text in
-                systemd_units(executable, port, maintenance, data_home=data_home).items()}
-               if manager == "systemd" else launchd_agents(home, executable, port, maintenance, data_home=data_home))
+                systemd_units(executable, port, maintenance, data_home=data_home, capture=capture).items()}
+               if manager == "systemd" else
+               launchd_agents(home, executable, port, maintenance, data_home=data_home, capture=capture))
     files = []
     for name, data in content.items():
         path = directory / name
@@ -251,6 +305,8 @@ def install(system: str, home: Path, *, executable: str, port: int, maintenance:
         commands.append([*enable, SERVICE_UNIT])
         if maintenance:
             commands.append([*enable, MAINTAIN_TIMER])
+        if capture:
+            commands.append([*enable, CAPTURE_TIMER])
     elif start:
         domain = f"gui/{os.getuid() if uid is None else uid}"
         for item in files:
@@ -262,7 +318,8 @@ def install(system: str, home: Path, *, executable: str, port: int, maintenance:
                 # Unchanged but not loaded, for example after a first bootstrap failed.
                 commands.append(["launchctl", "bootstrap", domain, item["path"]])
     report = {"command": "install", "manager": manager, "dry_run": dry_run, "files": files,
-              "commands": commands, "port": port, "maintenance": maintenance, "start": start}
+              "commands": commands, "port": port, "maintenance": maintenance, "capture": capture,
+              "start": start}
     if dry_run:
         return report
     try:
@@ -280,19 +337,19 @@ def install(system: str, home: Path, *, executable: str, port: int, maintenance:
     return report
 
 
-def uninstall(system: str, home: Path, *, maintenance_only: bool, dry_run: bool,
+def uninstall(system: str, home: Path, *, maintenance_only: bool, dry_run: bool, capture_only: bool = False,
               runner: Runner = subprocess.run, environ: Mapping[str, str] | None = None,
               uid: int | None = None) -> dict[str, Any]:
+    """Remove every unit of ours, or only the timers named by ``maintenance_only`` and ``capture_only``."""
     environ = os.environ if environ is None else environ
     manager = manager_for(system)
     directory = _unit_directory(home, manager, environ)
-    names = _our_files(manager)
-    if maintenance_only:
-        names = names[1:]
+    names = (_our_files(manager, api=False, maintenance=maintenance_only, capture=capture_only)
+             if maintenance_only or capture_only else _our_files(manager))
     present = [directory / name for name in names if os.path.lexists(directory / name)]
     commands: list[list[str]] = []
     if manager == "systemd":
-        for name in (MAINTAIN_TIMER, SERVICE_UNIT):
+        for name in (CAPTURE_TIMER, MAINTAIN_TIMER, SERVICE_UNIT):
             if directory / name in present:
                 commands.append(["systemctl", "--user", "disable", "--now", name])
         if present:
@@ -370,6 +427,56 @@ def start_again(system: str, home: Path, units: list[str], *, runner: Runner = s
         else:
             domain = f"gui/{os.getuid() if uid is None else uid}"
             _run(runner, ["launchctl", "bootstrap", domain, str(_unit_directory(home, manager, environ) / name)])
+
+
+def restart_command(system: str, *, uid: int | None = None) -> list[str]:
+    if manager_for(system) == "systemd":
+        return ["systemctl", "--user", "restart", SERVICE_UNIT]
+    return ["launchctl", "kickstart", "-k", f"gui/{os.getuid() if uid is None else uid}/{LAUNCHD_LABEL}"]
+
+
+def restart_if_running(system: str, *, runner: Runner = subprocess.run, uid: int | None = None) -> dict[str, Any]:
+    """Restart the API unit when it runs, so it reads changed settings.
+
+    ``state`` is ``restarted``, ``restart_failed``, ``not_running`` or ``no_manager`` (no usable
+    systemd user session or launchd, or an unsupported system); ``command`` is the restart command
+    to run by hand, or None when this system has none.
+    """
+    try:
+        command = restart_command(system, uid=uid)
+    except ServiceError:
+        return {"state": "no_manager", "command": None}
+    try:
+        if command[0] == "systemctl":
+            probe = runner(["systemctl", "--user", "is-active", SERVICE_UNIT], capture_output=True, text=True,
+                           timeout=30, check=False)
+            state = (probe.stdout or "").strip()
+            if not state:  # systemctl answers nothing when there is no user session bus
+                return {"state": "no_manager", "command": command}
+            running = state in {"active", "activating", "reloading"}
+        else:
+            running = _loaded(runner, f"gui/{os.getuid() if uid is None else uid}", LAUNCHD_LABEL)
+    except (OSError, subprocess.SubprocessError):
+        return {"state": "no_manager", "command": command}
+    if not running:
+        return {"state": "not_running", "command": command}
+    try:
+        _run(runner, command, timeout=180)
+    except ServiceError:
+        return {"state": "restart_failed", "command": command}
+    return {"state": "restarted", "command": command}
+
+
+def render_restart(result: Mapping[str, Any]) -> str:
+    command = " ".join(result["command"]) if result["command"] else None
+    return {
+        "restarted": "Restarted the service; it uses the new settings now.",
+        "not_running": "The service is not running; the new settings apply when it starts.",
+        "restart_failed": f"The service could not be restarted. Restart it with: {command}",
+        "no_manager": ("No service manager is available here. Restart the API to use the new settings"
+                       + (f" with: {command}" if command else "") + ". If you run lifecontext serve in a "
+                       "terminal, stop it, run lifecontext hindsight stop, and start it again."),
+    }[result["state"]]
 
 
 def read_maintenance_record(paths: LifeContextPaths) -> dict[str, Any] | None:

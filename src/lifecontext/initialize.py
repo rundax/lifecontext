@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -429,4 +429,70 @@ def render(report: Mapping[str, Any]) -> str:
                      "them (every other setting is kept).")
     lines.append("Next steps:")
     lines += [f"  {number}. {step}" for number, step in enumerate(report["next_steps"], 1)]
+    return "\n".join(lines)
+
+
+def show_llm() -> dict[str, Any]:
+    """The configured provider, model and endpoint, and whether a key is stored; never the key."""
+    paths = LifeContextPaths.current()
+    try:
+        settings = load_settings()
+    except ConfigError:
+        raise InitError("invalid_config") from None
+    if "llm" not in settings:
+        raise InitError("config_missing")
+    try:
+        llm = _validated_profile_settings({"llm": settings["llm"]})
+    except HindsightStartupError:
+        raise InitError("invalid_llm_settings") from None
+    credentials = _existing_credentials(paths)
+    if credentials and credentials.get("LIFEWEAVE_LLM_API_KEY"):
+        key = "set"
+    else:
+        key = "missing" if llm_key_required(llm) else "not_required"
+    return {"provider": llm["provider"], "model": llm["model"], "base_url": llm.get("base_url"), "api_key": key}
+
+
+def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Change only the given provider, model and base URL of an initialized HOME, and the key if one is given.
+
+    The key comes from ``key_stream`` (``options.api_key_stdin``) or the file named by
+    ``LIFECONTEXT_API_KEY_FILE``. Every other setting stays as it is; the other
+    ``LIFECONTEXT_*`` variables are ignored here. Validation is ``run_init``'s.
+    """
+    environ = os.environ if environ is None else environ
+    if not os.path.lexists(LifeContextPaths.current().config_path):
+        raise InitError("config_missing")
+    before = show_llm()
+    key_file = environ.get(KEY_FILE_VARIABLE)
+    key_given = options.api_key_stdin or bool(key_file)
+    run_init(
+        replace(options, vault=None, timezone=None, force=True, interactive=False, replace_key=key_given),
+        key_stream=key_stream, environ={KEY_FILE_VARIABLE: key_file} if key_file else {},
+    )
+    report = {**show_llm(), "api_key_updated": key_given, "warnings": []}
+    if report["provider"] != before["provider"] and not key_given and report["api_key"] == "set":
+        report["warnings"].append("provider_changed_key_kept")
+    if report["provider"] == "anthropic" and report["model"] in _FORCED_TOOL_REJECTING_MODELS:
+        report["warnings"].append("model_rejects_forced_tool_use")
+    return report
+
+
+def render_llm(report: Mapping[str, Any]) -> str:
+    key = {"set": "set", "missing": "MISSING (this provider needs one)",
+           "not_required": "not set (not needed for this loopback endpoint)"}[report["api_key"]]
+    lines = ["Model settings updated." if "api_key_updated" in report else "Model settings:",
+             f"- Provider: {report['provider']}",
+             f"- Model: {report['model']}",
+             f"- Base URL: {report['base_url'] or 'the provider default'}",
+             f"- API key: {key}"]
+    if report["api_key"] == "missing":
+        lines.append("Add it with: lifecontext llm set --api-key-stdin < FILE  "
+                     "(or run lifecontext llm set with LIFECONTEXT_API_KEY_FILE=FILE)")
+    if "provider_changed_key_kept" in report.get("warnings", ()):
+        lines.append("Warning: the provider changed but the stored key was kept; if it belongs to the old "
+                     "provider, replace it with: lifecontext llm set --api-key-stdin < FILE")
+    if "model_rejects_forced_tool_use" in report.get("warnings", ()):
+        lines.append(f"Warning: {report['model']} rejects the forced tool call Hindsight uses to extract facts, "
+                     f"so retain will fail; use {DEFAULT_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL}.")
     return "\n".join(lines)
