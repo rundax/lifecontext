@@ -59,6 +59,7 @@ PAGE_STATES = ("current", "stale", "conflict")
 # forgotten or deleted (its title is hidden too), or, for a shared page, no
 # document routes its claims there any more.
 WITHDRAWN_TITLE = "Withdrawn page"
+ERASED = "[erased]"  # stands for the quote and claim text of a deleted document in stored revisions
 WITHDRAWN_LINES = {"forgotten": "Withdrawn: this page's sources were forgotten.",
                    "retired": "Retired: no document routes claims here anymore."}
 INDEX_PAGE = "index"
@@ -424,6 +425,16 @@ class WikiRevisionStore:
             raise WikiError("wiki identity mismatch")
         return patch
 
+    def retire(self, page_id: str, revision: int, keep_sha256: str) -> None:
+        """Remove every stored artifact of the revision except the one with this checksum."""
+        _id(page_id)
+        _integer(revision)
+        with self._directories(("wiki_revisions", page_id), create=False) as fds:
+            for name in os.listdir(fds[-1]):
+                if re.fullmatch(rf"r{revision}-[a-f0-9]{{64}}\.json", name) and name != f"r{revision}-{keep_sha256}.json":
+                    os.unlink(name, dir_fd=fds[-1])
+            os.fsync(fds[-1])
+
 
 # Within one compile (per asyncio task), an extraction is read and its original
 # hashed once; other tasks keep their own reads.
@@ -502,6 +513,33 @@ def _sample(windows: list, limit: int) -> list:
 
 def _cites(claim: Claim, source_id: str) -> bool:
     return any(citation.source_id == source_id for citation in claim.citations)
+
+
+def _erase_claim(claim: Claim, source_id: str) -> tuple[Claim, bool]:
+    """The claim without a deleted document's text, and whether its own text went.
+
+    The document's citations keep their place and passage but quote ``ERASED``; the claim
+    text goes too unless a quote of another document holds it."""
+    if not _cites(claim, source_id):
+        return claim, False
+    held = any(claim.text in c.quote for c in claim.citations if c.source_id != source_id)
+    citations = tuple(replace(c, quote=ERASED) if c.source_id == source_id else c for c in claim.citations)
+    return Claim(claim.text if held else ERASED, citations), not held
+
+
+def erase_contradiction(contradiction: Contradiction, source_id: str) -> Contradiction:
+    return replace(contradiction, left=_erase_claim(contradiction.left, source_id)[0],
+                   right=_erase_claim(contradiction.right, source_id)[0])
+
+
+def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
+    """The patch with a deleted document's text taken out and its shape unchanged, so the
+    stored dependencies still match and ``WikiService._visible`` shows the same page.
+    Summary sentences resting on a claim whose text went go too. Repeating it changes nothing."""
+    claims, lost = zip(*(_erase_claim(claim, source_id) for claim in patch.claims), strict=True)
+    gone = {number for number, was_lost in enumerate(lost, 1) if was_lost}
+    return replace(patch, claims=claims, summary=tuple(s for s in patch.summary if gone.isdisjoint(s.claims)),
+                   contradictions=tuple(erase_contradiction(c, source_id) for c in patch.contradictions))
 
 
 # Front-matter lines that say nothing about the content: copyright and licence
@@ -777,6 +815,32 @@ class WikiService:
         """A stored revision as v1.1 rendered it; only to recognize files projected before front matter."""
         row = self.catalog.get_wiki_revision(page_id, revision)
         return render_managed_v11(self.store.read(page_id, revision, row["artifact_sha256"]))
+
+    def erase_source(self, source_id: str) -> None:
+        """After a delete, replace the document's text in every stored revision and contradiction
+        review with ``ERASED``. A revision gets a new artifact under its new checksum and loses the
+        old file; nothing else changes. Safe to repeat, so an interrupted delete finishes it."""
+        for page_id in self.catalog.list_wiki_pages_citing(source_id, any_revision=True):
+            for row in self.catalog.list_wiki_revisions(page_id):
+                if not any(dependency["source_id"] == source_id for dependency in row["dependencies"]):
+                    continue
+                patch = self.store.read(page_id, row["revision"], row["artifact_sha256"])
+                erased, checksum = erase_patch(patch, source_id), row["artifact_sha256"]
+                if erased != patch:
+                    stored = self.store.write(erased)
+                    checksum = stored.sha256
+                    self.catalog.replace_wiki_artifact(
+                        page_id, row["revision"], row["artifact_sha256"],
+                        artifact_path=str(stored.path.relative_to(self.paths.lifeweave_home)), artifact_sha256=checksum)
+                self.store.retire(page_id, row["revision"], checksum)
+        reviews, total = self.catalog.find_wiki_reviews(limit=4096)
+        if total > len(reviews):
+            reviews, _ = self.catalog.find_wiki_reviews(limit=total)
+        for review in reviews:
+            if review["code"] == "contradiction":
+                contradiction = Contradiction.parse(review["details"]["sources"])
+                if (erased := erase_contradiction(contradiction, source_id)) != contradiction:
+                    self.catalog.replace_wiki_review_sources(review["review_id"], asdict(erased))
 
     def mark_dependent_stale(self, source_id: str, version: int) -> int:
         return self.catalog.mark_dependent_wiki_stale(source_id, version)

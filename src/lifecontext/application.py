@@ -2501,6 +2501,9 @@ class JournalApplication:
                 source_id,
                 {manifest.source_version: manifest.sha256 for manifest in manifests},
             )
+            # Revisions and reviews that quoted the document keep no text of it; a failure
+            # leaves custody_delete running, so a retry erases again.
+            self.wiki.erase_source(source_id)
             self.catalog.update_tombstone_progress(
                 source_id, manifests[-1].source_version, "custody_delete", "completed",
                 whole_source=True,

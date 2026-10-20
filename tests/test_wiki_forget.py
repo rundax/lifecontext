@@ -15,7 +15,15 @@ from lifecontext.application import ApplicationError, JournalApplication
 from lifecontext.brief import render_brief
 from lifecontext.paths import LifeContextPaths
 from lifecontext.vault import ManagedVault, VaultError
-from lifecontext.wiki import USER_END, USER_START, WikiService, source_page_id
+from lifecontext.wiki import (
+    ERASED,
+    USER_END,
+    USER_START,
+    WikiPatch,
+    WikiService,
+    erase_patch,
+    source_page_id,
+)
 
 TOPICS = {"coffee": ("topic", "Coffee"), "copywriting": ("topic", "Copywriting")}
 # What the forgotten document of ``import_pair`` says, is called and names.
@@ -236,6 +244,70 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
                 self.app.show_document(source_id)
             self.assertEqual(error.exception.code, "source_not_found")
 
+    def home_files_holding(self, *needles):
+        """Every file under the application's home, the vault and the catalog file included, that holds any needle.
+        The extraction artifacts under derived/ are left out: a delete does not remove them yet."""
+        home = self.app.paths.lifeweave_home.parent
+        return sorted(str(path.relative_to(home)) for path in home.rglob("*")
+                      if path.is_file() and "derived" not in path.relative_to(home).parts
+                      and any(needle.encode() in path.read_bytes() for needle in needles))
+
+    def revision_rows(self):
+        return {(page["page_id"], row["revision"]): row
+                for page in self.app.catalog.list_wiki_pages() for row in self.app.catalog.list_wiki_revisions(page["page_id"])}
+
+    def test_a_delete_erases_the_documents_text_from_revisions_and_reviews(self):
+        quotes = ("Coffee is a stimulant.", "Copywriting is persuasive writing.", "stimulant", "persuasive")
+        deleted = self.import_pair()
+        catalog, store = self.app.catalog, self.app.wiki.store
+        other_page = next(page["page_id"] for page in catalog.list_wiki_pages()
+                          if page["page_id"].startswith("source_") and page["page_id"] != source_page_id(deleted))
+        before = self.revision_rows()
+        self.assertEqual(len(catalog.list_wiki_revisions("topic_coffee")), 2)
+        # Its own page, a shared page with history and a contradiction review quote it.
+        stored = "\n".join(path.read_text() for path in (self.app.paths.lifeweave_home / "wiki_revisions").rglob("*.json"))
+        for quote in quotes[:2]:
+            self.assertIn(quote, stored)
+        self.assertIn("Coffee is a stimulant.", json.dumps(catalog.find_wiki_reviews()[0]))
+        self.curate("delete", deleted)
+        self.assertEqual(self.home_files_holding(*quotes), [])
+        after = self.revision_rows()
+        text = json.dumps([catalog.find_wiki_reviews()[0], list(after.values())]) + "\n".join(catalog._connection.iterdump())
+        for quote in quotes:
+            self.assertNotIn(quote, text)
+        # The shape stays: the same revisions and dependencies, each read through its new checksum.
+        self.assertEqual({key: (after[key]["parent_revision"], after[key]["dependencies"]) for key in before},
+                         {key: (row["parent_revision"], row["dependencies"]) for key, row in before.items()})
+        for (page_id, revision), row in after.items():
+            self.assertEqual(store.read(page_id, revision, row["artifact_sha256"]).page_id, page_id)
+        self.assertNotEqual(after["topic_coffee", 2]["artifact_sha256"], before["topic_coffee", 2]["artifact_sha256"])
+        # What other documents said is untouched, byte for byte.
+        self.assertEqual(after[other_page, 1]["artifact_sha256"], before[other_page, 1]["artifact_sha256"])
+        self.assertIn("Coffee is a sedative.", self.app.show_wiki("topic_coffee")["managed"])
+        self.assertIn("Coffee is a sedative.", self.app.show_wiki(other_page)["managed"])
+        self.assertEqual([review["code"] for review in catalog.find_wiki_reviews()[0]], ["contradiction"])
+        # The vault files written before the erasure are what a fresh render gives, and the checks pass.
+        files = self.wiki_files()
+        report = self.app.reconcile_projections(limit=4096)
+        self.assertEqual(report["failed"], 0, report)
+        self.assertEqual(self.wiki_files(), files)
+        # An export refuses or leaves the text out.
+        try:
+            exported = self.app.export_bundle()
+        except ApplicationError:
+            exported = b""
+        for quote in quotes:
+            self.assertNotIn(quote.encode(), exported)
+        # Repeating the erasure changes nothing, and removes an artifact an interrupted one left behind.
+        directory = self.app.paths.lifeweave_home / "wiki_revisions" / "topic_coffee"
+        (directory / f"r2-{'0' * 64}.json").write_text(quotes[0])
+        self.app.wiki.erase_source(deleted)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()),
+                         sorted(f"r{n}-{row['artifact_sha256']}.json" for (page, n), row in after.items() if page == "topic_coffee"))
+        self.assertEqual({key: row["artifact_sha256"] for key, row in self.revision_rows().items()},
+                         {key: row["artifact_sha256"] for key, row in after.items()})
+        self.assertEqual(self.home_files_holding(*quotes), [])
+
     def test_a_delete_rewrites_the_briefs_that_name_the_document(self):
         deleted = self.import_pair()
         self.app.project_brief()
@@ -299,6 +371,37 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         self.assertNotIn("stimulant", query)
         self.assertNotIn("Copywriting", query)
         self.assertIn("Coffee is a sedative.", query)
+
+
+class ErasePatchTests(unittest.TestCase):
+    @staticmethod
+    def citation(source_id, quote):
+        return {"source_id": source_id, "source_version": 1, "extraction_revision": 1, "passage_start": 0,
+                "passage_end": 1, "original_sha256": "a" * 64, "quote": quote}
+
+    def test_only_the_deleted_documents_text_goes_and_the_shape_stays(self):
+        gone, live = self.citation("doc_gone", "Tea is calming. Rain is wet."), self.citation("doc_live", "Rain is wet. Ice is cold.")
+        claims = [{"text": "Tea is calming.", "citations": [gone]},
+                  {"text": "Rain is wet.", "citations": [gone, live]},
+                  {"text": "Ice is cold.", "citations": [live]}]
+        value = {"page_id": "topic_weather", "title": "Weather", "expected_revision": 0, "claims": claims,
+                 "contradictions": [{"left": claims[0], "right": claims[2], "left_date": "2026-01-01", "right_date": "2026-01-02"}],
+                 "links": ["source_doc_gone"],
+                 "summary": [{"text": "Tea calms.", "claims": [1]}, {"text": "Ice is cold.", "claims": [3]}]}
+        patch = WikiPatch.parse(json.dumps(value))
+        erased = erase_patch(patch, "doc_gone")
+        self.assertEqual(erase_patch(erased, "doc_gone"), erased)
+        self.assertEqual([claim.text for claim in erased.claims], [ERASED, "Rain is wet.", "Ice is cold."])
+        # The shared quote is kept for the live citation only; the live claim is byte for byte what it was.
+        self.assertEqual([[c.quote for c in claim.citations] for claim in erased.claims],
+                         [[ERASED], [ERASED, live["quote"]], [live["quote"]]])
+        self.assertEqual(erased.claims[2], patch.claims[2])
+        self.assertEqual([c.dependency() for claim in erased.claims for c in claim.citations],
+                         [c.dependency() for claim in patch.claims for c in claim.citations])
+        self.assertEqual((erased.contradictions[0].left.text, erased.contradictions[0].right), (ERASED, patch.claims[2]))
+        self.assertEqual([sentence.text for sentence in erased.summary], ["Ice is cold."])
+        self.assertEqual((erased.title, erased.links, erased.expected_revision), (patch.title, patch.links, 0))
+        self.assertEqual(erase_patch(patch, "doc_other"), patch)
 
 
 if __name__ == "__main__":

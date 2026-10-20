@@ -17,6 +17,12 @@
   (image pinned by digest, `127.0.0.1` only, `require_valid_user`) and
   `init-couchdb.sh`; [docs/sync.md](docs/sync.md) describes the setup with
   capture, Tailscale and a headless LiveSync client.
+- A confirmed `delete` now also erases the document's quoted text from the
+  wiki revision store and the catalog: the citations and claims in every
+  stored revision of a page that cited it (a shared page's history included)
+  and in contradiction reviews read `[erased]`; the rest is unchanged, and the
+  vault shows the same pages. `forget` still hides and keeps. The extracted
+  text under `~/.lifeweave/derived` is still left in place by a delete.
 
 - Security: other accounts on the same computer can no longer read or change
   your memory. The `lifeweave` Hindsight daemon used to answer anyone on
