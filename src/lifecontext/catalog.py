@@ -3393,6 +3393,14 @@ class LifeContextCatalog:
                                   (artifact_path, artifact_sha256, page_id, revision, old_sha256)).rowcount != 1:
                 raise CatalogConflict("wiki artifact conflict")
 
+    def retitle_wiki_page(self, page_id: str, title: str) -> None:
+        """Give a page the withdrawn title after its document was deleted; a page's ID and revisions stay."""
+        _validate_identity(page_id, 1)
+        _document_text(title, 1024)
+        with self.transaction() as connection:
+            if connection.execute("UPDATE wiki_pages SET title=? WHERE page_id=?", (title, page_id)).rowcount != 1:
+                raise CatalogConflict("wiki page identity conflict")
+
     def get_wiki_revision(self, page_id: str, revision: int) -> dict[str, Any] | None:
         _validate_identity(page_id, revision)
         self._ensure_open()

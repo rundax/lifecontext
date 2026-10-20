@@ -2501,9 +2501,9 @@ class JournalApplication:
                 source_id,
                 {manifest.source_version: manifest.sha256 for manifest in manifests},
             )
-            # Revisions and reviews that quoted the document keep no text of it; a failure
-            # leaves custody_delete running, so a retry erases again.
-            self.wiki.erase_source(source_id)
+            # The extracted text, and the revisions and reviews that quoted the document, keep
+            # none of it; a failure leaves custody_delete running, so a retry erases again.
+            self._erase_deleted_text(source_id)
             self.catalog.update_tombstone_progress(
                 source_id, manifests[-1].source_version, "custody_delete", "completed",
                 whole_source=True,
@@ -2512,6 +2512,19 @@ class JournalApplication:
             self._rewrite_briefs_naming(source_id)
         except Exception as exc:  # noqa: BLE001 -- the delete is done; later briefs leave the source out
             logging.getLogger(__name__).warning("Brief rewrite after delete deferred: %s", type(exc).__name__)
+
+    def _erase_deleted_text(self, source_id: str) -> None:
+        self.derived.remove_source(source_id)
+        self.wiki.erase_source(source_id)
+
+    def _sweep_deleted_text(self, source_id: str) -> None:
+        """Erase again for a document deleted before the erasure existed, or whose erasure was lost;
+        a delete still under way does its own, and nothing is left to do on a repeat."""
+        source, tombstones = self.catalog.get_source(source_id), self.catalog.list_tombstones(source_id)
+        if source is not None and source["layer"] == "document" and tombstones and all(
+                item["tombstone_type"] == "deleted" and item["progress"]["custody_delete"] == "completed"
+                for item in tombstones):
+            self._erase_deleted_text(source_id)
 
     def _rewrite_briefs_naming(self, source_id: str) -> None:
         """After a delete, write again the brief notes that name the source or quote it in
@@ -3516,11 +3529,18 @@ class JournalApplication:
         }
 
         document_items = []
+        swept: set[str] = set()
         for item in inventory:
             source_id: str = item["source_id"]
             source_version: int = item["source_version"]
             report["examined"] += 1
 
+            if item["lifecycle_state"] == "deleted" and source_id not in swept:
+                swept.add(source_id)
+                try:
+                    self._sweep_deleted_text(source_id)
+                except Exception:  # noqa: BLE001 -- counted, and the next reconcile tries again
+                    report["failed"] += 1
             if item["lifecycle_state"] != "active":
                 if item["lifecycle_state"] == "forgotten":
                     source = self.catalog.get_source(source_id)

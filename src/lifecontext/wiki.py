@@ -535,11 +535,13 @@ def erase_contradiction(contradiction: Contradiction, source_id: str) -> Contrad
 def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
     """The patch with a deleted document's text taken out and its shape unchanged, so the
     stored dependencies still match and ``WikiService._visible`` shows the same page.
-    Summary sentences resting on a claim whose text went go too. Repeating it changes nothing."""
+    Summary sentences resting on a claim whose text went go too, and the document's own
+    page takes the withdrawn title it is shown under. Repeating it changes nothing."""
     claims, lost = zip(*(_erase_claim(claim, source_id) for claim in patch.claims), strict=True)
     gone = {number for number, was_lost in enumerate(lost, 1) if was_lost}
     return replace(patch, claims=claims, summary=tuple(s for s in patch.summary if gone.isdisjoint(s.claims)),
-                   contradictions=tuple(erase_contradiction(c, source_id) for c in patch.contradictions))
+                   contradictions=tuple(erase_contradiction(c, source_id) for c in patch.contradictions),
+                   title=WITHDRAWN_TITLE if patch.page_id == source_page_id(source_id) else patch.title)
 
 
 # Front-matter lines that say nothing about the content: copyright and licence
@@ -818,8 +820,9 @@ class WikiService:
 
     def erase_source(self, source_id: str) -> None:
         """After a delete, replace the document's text in every stored revision and contradiction
-        review with ``ERASED``. A revision gets a new artifact under its new checksum and loses the
-        old file; nothing else changes. Safe to repeat, so an interrupted delete finishes it."""
+        review with ``ERASED``, and its own page's title with the withdrawn one. A revision gets a
+        new artifact under its new checksum and loses the old file; nothing else changes. Safe to
+        repeat, so an interrupted delete finishes it."""
         for page_id in self.catalog.list_wiki_pages_citing(source_id, any_revision=True):
             for row in self.catalog.list_wiki_revisions(page_id):
                 if not any(dependency["source_id"] == source_id for dependency in row["dependencies"]):
@@ -833,11 +836,16 @@ class WikiService:
                         page_id, row["revision"], row["artifact_sha256"],
                         artifact_path=str(stored.path.relative_to(self.paths.lifeweave_home)), artifact_sha256=checksum)
                 self.store.retire(page_id, row["revision"], checksum)
+        own = self.catalog.get_wiki_page(source_page_id(source_id))
+        if own is not None and own["title"] != WITHDRAWN_TITLE:
+            self.catalog.retitle_wiki_page(own["page_id"], WITHDRAWN_TITLE)
         reviews, total = self.catalog.find_wiki_reviews(limit=4096)
         if total > len(reviews):
             reviews, _ = self.catalog.find_wiki_reviews(limit=total)
         for review in reviews:
-            if review["code"] == "contradiction":
+            if review["code"] == "contradiction" and any(
+                    citation["source_id"] == source_id for side in ("left", "right")
+                    for citation in review["details"]["sources"][side]["citations"]):
                 contradiction = Contradiction.parse(review["details"]["sources"])
                 if (erased := erase_contradiction(contradiction, source_id)) != contradiction:
                     self.catalog.replace_wiki_review_sources(review["review_id"], asdict(erased))

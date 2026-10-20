@@ -65,6 +65,35 @@ class DerivedStoreTests(unittest.TestCase):
             [("source-1", 1, 1), ("source-1", 1, 2), ("source-1", 2, 1)],
         )
 
+    def test_remove_source_takes_every_version_of_one_source_and_repeats(self) -> None:
+        self.write()
+        self.store.write("source-1", 1, 2, {"text": "next extraction"})
+        self.store.write("source-1", 2, 1, {"text": "next original"})
+        kept = self.store.write("source-2", 1, 1, {"text": "another"})
+        self.store.remove_source("source-1")
+        self.assertEqual(self.store.list_inventory(), [("source-2", 1, 1)])
+        self.assertEqual(self.store.read("source-2", 1, 1, expected_sha256=kept.sha256), {"text": "another"})
+        self.assertFalse((self.paths.lifeweave_home / "derived" / "source-1").exists())
+        self.store.remove_source("source-1")
+        self.store.remove_source("never-written")
+        self.store.remove_source("source-2")
+        self.assertEqual(self.store.list_inventory(), [])
+        DerivedStore(LifeContextPaths(self.home / "empty")).remove_source("source-1")
+
+    def test_remove_source_fails_closed_on_an_unexpected_entry(self) -> None:
+        stored = self.write()
+        (stored.path.parent.parent / "notes.txt").write_text("x")
+        with self.assertRaises(DerivedError):
+            self.store.remove_source("source-1")
+        self.assertTrue(stored.path.exists())
+        outside = self.home / "outside"
+        outside.mkdir(mode=0o700)
+        other = self.paths.lifeweave_home / "derived" / "linked"
+        other.symlink_to(outside)
+        with self.assertRaises(DerivedError):
+            self.store.remove_source("linked")
+        self.assertTrue(outside.exists())
+
     def test_empty_inventory(self) -> None:
         self.assertEqual(self.store.list_inventory(), [])
         self.assertFalse((self.paths.lifeweave_home / "derived").exists())

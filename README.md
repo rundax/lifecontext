@@ -333,9 +333,9 @@ lifecontext reflect --query "What did I decide about learning Spanish?" --json
 Forget withdraws a source from recall and the wiki but keeps it on your
 machine: the original stays in custody, vault files already written stay (for
 a document, its source note under `documents/`), and a document stays in
-`documents list`. Delete removes the original, the vault files and the recall
-index, and replaces its quoted text in the stored wiki revisions and review
-records with `[erased]`, so use delete to remove a source.
+`documents list`. Delete removes the original, the vault files, the recall
+index and the extracted text, and replaces its quoted text in the stored wiki
+revisions and review records with `[erased]`, so use delete to remove a source.
 [docs/operations.md](docs/operations.md) covers recovery, rebuilds, file names
 and failure codes.
 

@@ -245,12 +245,11 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "source_not_found")
 
     def home_files_holding(self, *needles):
-        """Every file under the application's home, the vault and the catalog file included, that holds any needle.
-        The extraction artifacts under derived/ are left out: a delete does not remove them yet."""
+        """Every file under the application's home, the vault, the extraction artifacts and the
+        catalog file included, that holds any needle."""
         home = self.app.paths.lifeweave_home.parent
         return sorted(str(path.relative_to(home)) for path in home.rglob("*")
-                      if path.is_file() and "derived" not in path.relative_to(home).parts
-                      and any(needle.encode() in path.read_bytes() for needle in needles))
+                      if path.is_file() and any(needle.encode() in path.read_bytes() for needle in needles))
 
     def revision_rows(self):
         return {(page["page_id"], row["revision"]): row
@@ -262,6 +261,7 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         catalog, store = self.app.catalog, self.app.wiki.store
         other_page = next(page["page_id"] for page in catalog.list_wiki_pages()
                           if page["page_id"].startswith("source_") and page["page_id"] != source_page_id(deleted))
+        other_id = other_page.removeprefix("source_")
         before = self.revision_rows()
         self.assertEqual(len(catalog.list_wiki_revisions("topic_coffee")), 2)
         # Its own page, a shared page with history and a contradiction review quote it.
@@ -269,8 +269,18 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         for quote in quotes[:2]:
             self.assertIn(quote, stored)
         self.assertIn("Coffee is a stimulant.", json.dumps(catalog.find_wiki_reviews()[0]))
+        self.assertEqual(catalog.get_wiki_page(source_page_id(deleted))["title"], "Secret notes")
+        derived = self.app.paths.lifeweave_home / "derived"
+        self.assertEqual(sorted(path.name for path in derived.iterdir()), sorted([deleted, other_id]))
         self.curate("delete", deleted)
         self.assertEqual(self.home_files_holding(*quotes), [])
+        # The extracted text goes with the document; another document's stays.
+        self.assertEqual([path.name for path in derived.iterdir()], [other_id])
+        # The document's own page takes the title it is shown under, in the catalog and in its artifacts.
+        self.assertEqual(catalog.get_wiki_page(source_page_id(deleted))["title"], "Withdrawn page")
+        revisions = self.app.paths.lifeweave_home / "wiki_revisions"
+        self.assertNotIn("Secret notes", "\n".join(path.read_text() for path in revisions.rglob("*.json")))
+        self.assertIn("Withdrawn page", "\n".join(path.read_text() for path in (revisions / source_page_id(deleted)).glob("*.json")))
         after = self.revision_rows()
         text = json.dumps([catalog.find_wiki_reviews()[0], list(after.values())]) + "\n".join(catalog._connection.iterdump())
         for quote in quotes:
@@ -307,6 +317,39 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         self.assertEqual({key: row["artifact_sha256"] for key, row in self.revision_rows().items()},
                          {key: row["artifact_sha256"] for key, row in after.items()})
         self.assertEqual(self.home_files_holding(*quotes), [])
+
+    def test_a_reconcile_erases_what_an_earlier_delete_left_and_repeats_safely(self):
+        quotes = ("Coffee is a stimulant.", "Copywriting is persuasive writing.", "stimulant", "persuasive")
+        # A delete finished before the erasure existed: its text is still stored.
+        with patch.object(JournalApplication, "_erase_deleted_text"):
+            deleted = self.import_pair()
+            self.curate("delete", deleted)
+        self.assertNotEqual(self.home_files_holding(*quotes), [])
+        self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(deleted))["title"], "Secret notes")
+        files = self.wiki_files()
+        report = self.app.reconcile_projections(limit=4096)
+        self.assertEqual(report["failed"], 0, report)
+        self.assertEqual(self.home_files_holding(*quotes), [])
+        self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(deleted))["title"], "Withdrawn page")
+        self.assertFalse((self.app.paths.lifeweave_home / "derived" / deleted).exists())
+        self.assertEqual(self.wiki_files(), files)
+        digests = {key: row["artifact_sha256"] for key, row in self.revision_rows().items()}
+        self.assertEqual(self.app.reconcile_projections(limit=4096)["failed"], 0)
+        self.assertEqual({key: row["artifact_sha256"] for key, row in self.revision_rows().items()}, digests)
+        self.assertIn("Coffee is a sedative.", self.app.show_wiki("topic_coffee")["managed"])
+
+    def test_a_failed_erasure_leaves_the_delete_unfinished_for_the_retry(self):
+        deleted = self.import_pair()
+        with patch.object(WikiService, "erase_source", side_effect=OSError("disk")), self.assertRaises(Exception):  # noqa: B017
+            self.curate("delete", deleted)
+        self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"running"})
+        # A reconcile does not touch a delete still under way.
+        self.assertEqual(self.app.reconcile_projections(limit=4096)["failed"], 0)
+        self.assertNotEqual(self.home_files_holding("Coffee is a stimulant."), [])
+        manifests = self.app.catalog.list_source_manifests(deleted)
+        asyncio.run(self.app._delete_confirmed_source(deleted, manifests))
+        self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"completed"})
+        self.assertEqual(self.home_files_holding("Coffee is a stimulant.", "persuasive"), [])
 
     def test_a_delete_rewrites_the_briefs_that_name_the_document(self):
         deleted = self.import_pair()
@@ -402,6 +445,11 @@ class ErasePatchTests(unittest.TestCase):
         self.assertEqual([sentence.text for sentence in erased.summary], ["Ice is cold."])
         self.assertEqual((erased.title, erased.links, erased.expected_revision), (patch.title, patch.links, 0))
         self.assertEqual(erase_patch(patch, "doc_other"), patch)
+        # The document's own page takes the withdrawn title; a shared page keeps its topic.
+        own = WikiPatch.parse(json.dumps({**value, "page_id": source_page_id("doc_gone"), "title": "Secret notes"}))
+        self.assertEqual(erase_patch(own, "doc_gone").title, "Withdrawn page")
+        self.assertEqual(erase_patch(erase_patch(own, "doc_gone"), "doc_gone"), erase_patch(own, "doc_gone"))
+        self.assertEqual(erase_patch(own, "doc_other").title, "Secret notes")
 
 
 if __name__ == "__main__":
