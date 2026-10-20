@@ -1,5 +1,17 @@
 # Unreleased
 
+- Agents on another machine can use LifeContext over SSH through the same
+  `lifecontext` command and skill: `bin/lifecontext-remote` (set
+  `LIFECONTEXT_REMOTE` to an ssh destination; link it as `lifecontext`) talks
+  to `lifecontext agent-gate`, the forced command of a dedicated key. The gate
+  runs only `status`, `doctor`, `retain`, `recall`, `reflect`, `evidence`,
+  `curate`, `relationships`, `documents`, `categories`, `wiki`, `brief`,
+  `operations` and `mcp`, refuses every other command, any server path and a
+  different `--port`, refuses `curate` delete and forget unless the forced
+  command says `--allow-delete`, runs at most `--max-calls` (4) calls at once,
+  keeps an audit log without arguments or content, and stages input files in a
+  private directory it removes afterwards.
+  [docs/agents.md](docs/agents.md#agents-on-another-machine) has the setup.
 - `lifecontext capture --once [--inbox DIR] [--json]` turns settled Markdown
   notes in the vault's `Journal/Inbox` into journal entries through the API: a
   note is taken in when its bytes stopped changing for 15 seconds, once, and

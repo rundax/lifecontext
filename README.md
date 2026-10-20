@@ -343,6 +343,12 @@ and failure codes.
 the same API, read-only unless you add `--allow-writes`; the configuration is
 in [docs/agents.md](docs/agents.md#mcp-server).
 
+**Agents on another machine.** `bin/lifecontext-remote` runs the same
+`lifecontext` command over SSH, against a dedicated key that
+`lifecontext agent-gate` limits to everyday agent commands (no setup, service,
+backup or export); see
+[docs/agents.md](docs/agents.md#agents-on-another-machine).
+
 ## Your own setup: Obsidian, capture and sync
 
 One personal arrangement, described step by step in
@@ -418,7 +424,7 @@ components and models: [NOTICE](NOTICE).
   stored
 - [docs/privacy.md](docs/privacy.md): what leaves the machine
 - [docs/agents.md](docs/agents.md): the agent skill, how agents use the CLI,
-  and the MCP server for Claude Desktop and Cursor
+  the MCP server for Claude Desktop and Cursor, and agents on another machine
 - [docs/development.md](docs/development.md): development checkout, tests, CI,
   and the [compatibility identifiers](docs/development.md#compatibility-identifiers)
   that keep their legacy `lifeweave` names
