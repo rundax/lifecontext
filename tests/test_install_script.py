@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform
 import re
+import select
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+
+try:
+    import pty
+    import termios
+except ImportError:  # no pseudo-terminals on this platform
+    pty = None
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
@@ -18,6 +28,18 @@ INSTALLER = ROOT / "install.sh"
 def _stub(path: Path, body: str) -> None:
     path.write_text("#!/bin/sh\n" + body)
     path.chmod(0o755)
+
+
+def _functions(*names: str) -> str:
+    """The shell text of these functions of install.sh, so they run without the rest of the installer."""
+    text = INSTALLER.read_text()
+    found = []
+    for name in names:
+        match = re.search(rf"^{name}\(\) \{{(?: [^\n]*\}}\n|\n.*?^\}}\n(?=\n|\Z))", text, re.MULTILINE | re.DOTALL)
+        if match is None:
+            raise AssertionError(f"install.sh has no function {name}")
+        found.append(match.group(0))
+    return "\n".join(found)
 
 
 class InstallScriptTests(unittest.TestCase):
@@ -163,6 +185,7 @@ class InstallScriptTests(unittest.TestCase):
         units = self.home / ".config" / "systemd" / "user"
         (units / "default.target.wants").mkdir(parents=True)
         for name in ("lifecontext.service", "lifecontext-maintain.service", "lifecontext-maintain.timer",
+                     "lifecontext-capture.service", "lifecontext-capture.timer",
                      "other.service"):
             (units / name).write_text("[Unit]\n")
         (units / "default.target.wants" / "lifecontext.service").symlink_to(units / "lifecontext.service")
@@ -188,6 +211,181 @@ class InstallScriptTests(unittest.TestCase):
         self.assertTrue(os.path.islink(other_command))
         for path in kept:
             self.assertEqual(path.read_text(), "data", path)
+
+
+class InstallOcrTests(unittest.TestCase):
+    """install_ocr on a system whose only package manager is pacman, with every command stubbed."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-ocr-test.")
+        self.addCleanup(self.temp.cleanup)
+        self.stubs = Path(self.temp.name) / "stubs"
+        self.stubs.mkdir()
+        self.calls = Path(self.temp.name) / "calls.log"
+        # The stubs are the whole PATH, so the host's apt-get and dnf are not found.
+        grep = next(path for path in ("/usr/bin/grep", "/bin/grep") if Path(path).exists())
+        os.symlink(grep, self.stubs / "grep")
+        _stub(self.stubs / "id", 'if [ "$1" = -u ]; then echo 1000; fi\n')
+        # A tesseract that exists once pacman has "installed" it and then lists the three languages.
+        self.installed = Path(self.temp.name) / "installed"
+        _stub(self.stubs / "pacman", f'echo "pacman $*" >> "{self.calls}"\n: > "{self.installed}"\n')
+        _stub(self.stubs / "tesseract", f'[ -e "{self.installed}" ] || exit 1\n'
+              'printf "List of available languages (3):\\neng\\nrus\\nukr\\n"\n')
+
+    def sudo(self, works: bool) -> None:
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n'
+              + ('if [ "$2" = true ]; then exit 0; fi\nshift\nexec "$@"\n' if works else "exit 1\n"))
+
+    def run_install_ocr(self):
+        harness = Path(self.temp.name) / "harness.sh"
+        harness.write_text("set -eu\nos=Linux\n" + _functions(
+            "say", "warn", "as_root", "can_run_as_root", "ocr_ready", "install_ocr")
+            + '\ninstall_ocr\necho "ocr_state=$ocr_state"\n')
+        env = {"PATH": str(self.stubs), "HOME": self.temp.name}
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True, env=env,
+                              stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+    def logged(self) -> list[str]:
+        return self.calls.read_text().splitlines() if self.calls.exists() else []
+
+    def test_pacman_installs_tesseract_with_the_three_language_packs(self) -> None:
+        self.sudo(works=True)
+        result = self.run_install_ocr()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Installing Tesseract with pacman", result.stdout)
+        packages = "tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
+        self.assertEqual(self.logged(), ["sudo -n true", f"sudo -n pacman -S --needed --noconfirm {packages}",
+                                         f"pacman -S --needed --noconfirm {packages}"])
+        self.assertIn("ocr_state=ready", result.stdout)
+
+    def test_without_passwordless_sudo_the_exact_command_is_printed_and_the_install_continues(self) -> None:
+        self.sudo(works=False)
+        result = self.run_install_ocr()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = "sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
+        self.assertIn(f"  {command}\n", result.stdout)
+        self.assertIn("OCR is not available yet", result.stderr)
+        self.assertIn(f"ocr_state=missing: {command}", result.stdout)
+        self.assertEqual(self.logged(), ["sudo -n true"])
+
+    def test_without_sudo_at_all_the_command_is_printed_too(self) -> None:
+        result = self.run_install_ocr()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sudo pacman -S --needed tesseract", result.stdout)
+        self.assertEqual(self.logged(), [])
+
+    def test_an_existing_installation_is_left_alone(self) -> None:
+        self.sudo(works=True)
+        self.installed.touch()
+        result = self.run_install_ocr()
+        self.assertIn("already installed", result.stdout)
+        self.assertEqual(self.logged(), [])
+
+
+@unittest.skipIf(pty is None, "needs pseudo-terminals")
+class InstallEndpointPromptTests(unittest.TestCase):
+    """configure_interactive on a pseudo-terminal, with `lifecontext init` replaced by a recorder."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-prompt-test.")
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.home = root / "home"
+        self.home.mkdir()
+        self.tmp = root / "tmp"
+        self.tmp.mkdir(mode=0o700)
+        self.calls = root / "calls.log"
+        venv_bin = root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        os.symlink(sys.executable, venv_bin / "python")
+        report = json.dumps({"home": "/h/.lifeweave", "config_state": "written", "provider": "p", "model": "m",
+                             "credentials_state": "stored", "vault_root": "/v", "timezone": "UTC", "warnings": []})
+        _stub(venv_bin / "lifecontext",
+              f'echo "$*" >> "{self.calls}"\n'
+              'if [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ]; then\n'
+              f'  echo "key=$(cat "$LIFECONTEXT_API_KEY_FILE") $(ls -l "$LIFECONTEXT_API_KEY_FILE" | cut -c1-10) '
+              f'$(dirname "$LIFECONTEXT_API_KEY_FILE")" >> "{self.calls}"\nfi\n'
+              f"printf '%s' '{report}'\n")
+        self.harness = root / "harness.sh"
+        self.harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
+            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret",
+                         "print_init_report", "configure_interactive")
+            + '\nconfigure_interactive\n')
+
+    def converse(self, answers: list[tuple[str, str]]) -> tuple[int, str]:
+        """Answer each prompt once it appears; the hidden key only after the terminal stopped echoing."""
+        env = {"PATH": os.defpath, "HOME": str(self.home)}
+        pid, descriptor = pty.fork()
+        if pid == 0:  # the child: a shell with this pseudo-terminal as its controlling terminal
+            os.execve("/bin/sh", ["sh", str(self.harness)], env)
+        transcript = b""
+        position = 0
+        deadline = time.monotonic() + 60
+
+        def read_more() -> bool:
+            nonlocal transcript
+            if time.monotonic() > deadline:
+                return False
+            if not select.select([descriptor], [], [], 1)[0]:
+                return True
+            try:
+                data = os.read(descriptor, 4096)
+            except OSError:
+                return False
+            transcript += data
+            return bool(data)
+
+        try:
+            for prompt, reply in answers:
+                while prompt.encode() not in transcript[position:]:
+                    self.assertTrue(read_more(), f"no prompt {prompt!r} in {transcript!r}")
+                position = transcript.index(prompt.encode(), position) + len(prompt)
+                if prompt.startswith("API key"):
+                    while termios.tcgetattr(descriptor)[3] & termios.ECHO:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                os.write(descriptor, (reply + "\n").encode())
+            while read_more():
+                pass
+        finally:
+            os.close(descriptor)
+            _, status = os.waitpid(pid, 0)
+        return os.waitstatus_to_exitcode(status), transcript.decode(errors="replace")
+
+    def test_defaults_are_a_local_openai_compatible_proxy_and_an_empty_key_is_allowed(self) -> None:
+        code, transcript = self.converse([
+            ("Provider (", ""), ("API base URL [http://127.0.0.1:8317/v1]", ""), ("Model ID", "my-model"),
+            ("API key", ""), ("Vault folder", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertIn("[openai_compatible]", transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            (f"init --non-interactive --json --provider openai_compatible --model my-model "
+             f"--vault {self.home}/LifeContext/vault --base-url http://127.0.0.1:8317/v1")])
+
+    def test_the_key_is_hidden_reaches_init_only_through_a_private_file_and_is_removed(self) -> None:
+        key = "sk-typed-secret-0123456789"
+        code, transcript = self.converse([
+            ("Provider (", "openai_compatible"), ("API base URL", "http://127.0.0.1:9999/v1"),
+            ("Model ID", "other-model"), ("API key", key), ("Vault folder", str(self.home / "Notes"))])
+        self.assertEqual(code, 0, transcript)
+        self.assertNotIn(key, transcript)
+        recorded = self.calls.read_text().splitlines()
+        self.assertEqual(recorded[0], f"init --non-interactive --json --provider openai_compatible "
+                                      f"--model other-model --vault {self.home}/Notes "
+                                      f"--base-url http://127.0.0.1:9999/v1")
+        self.assertEqual(recorded[1], f"key={key} -rw------- {self.tmp}")
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_anthropic_needs_no_base_url_and_proposes_a_model(self) -> None:
+        code, transcript = self.converse([
+            ("Provider (", "anthropic"), ("API base URL", ""),
+            ("Model ID (exactly as your endpoint names it) [claude-sonnet-5]", ""),
+            ("API key", ""), ("Vault folder", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            (f"init --non-interactive --json --provider anthropic --model claude-sonnet-5 "
+             f"--vault {self.home}/LifeContext/vault")])
 
 
 if __name__ == "__main__":

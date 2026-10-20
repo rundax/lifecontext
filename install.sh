@@ -54,6 +54,12 @@ Options:
   --uninstall           remove only what this script installed
   -h, --help            show this help
 
+With a terminal, the installer asks for the model endpoint (provider, base
+URL, model, a hidden key that may stay empty for a keyless loopback endpoint)
+and the vault folder; the defaults are an OpenAI-compatible proxy on
+http://127.0.0.1:8317/v1 and ~/LifeContext/vault. Change the endpoint later
+with `lifecontext llm set`.
+
 Unattended setup, used instead of prompts when PROVIDER, MODEL or
 API_KEY_FILE is set (without a terminal and without them, init is skipped):
   LIFECONTEXT_PROVIDER      provider ID (default: anthropic)
@@ -401,6 +407,14 @@ install_ocr() {
 			as_root dnf install -y -q tesseract tesseract-langpack-eng tesseract-langpack-rus \
 				tesseract-langpack-ukr </dev/null || warn "dnf could not install Tesseract"
 		fi
+	elif command -v pacman >/dev/null 2>&1; then
+		ocr_command="sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
+		if can_run_as_root; then
+			say "Installing Tesseract with pacman"
+			# --noconfirm: pacman reads its confirmation from the terminal, and there is none here.
+			as_root pacman -S --needed --noconfirm tesseract tesseract-data-eng tesseract-data-rus \
+				tesseract-data-ukr </dev/null || warn "pacman could not install Tesseract"
+		fi
 	fi
 	if ocr_ready; then
 		say "Tesseract with eng, rus and ukr is installed"
@@ -410,9 +424,89 @@ install_ocr() {
 		say "  $ocr_command"
 		ocr_state="missing: $ocr_command"
 	else
-		warn "no apt-get, dnf or brew found: install Tesseract with the eng, rus and ukr language data yourself"
+		warn "no apt-get, dnf, pacman or brew found: install Tesseract with the eng, rus and ukr language data yourself"
 		ocr_state="missing: install Tesseract with eng, rus and ukr"
 	fi
+}
+
+restore_tty() {
+	[ -z "${tty_state:-}" ] || stty "$tty_state" </dev/tty 2>/dev/null || true
+	tty_state=""
+}
+
+# ask QUESTION DEFAULT: read one line from the terminal into $reply (DEFAULT when empty).
+ask() {
+	if [ -n "$2" ]; then
+		printf '%s [%s]: ' "$1" "$2" >/dev/tty
+	else
+		printf '%s: ' "$1" >/dev/tty
+	fi
+	IFS= read -r reply </dev/tty || reply=""
+	[ -n "$reply" ] || reply=$2
+}
+
+ask_required() {
+	for attempt in 1 2 3; do
+		ask "$1" "$2"
+		[ -z "$reply" ] || return 0
+		warn "an answer is needed here"
+	done
+	die "no answer was given for: $1"
+}
+
+# ask_secret QUESTION: like ask, without echoing what is typed.
+ask_secret() {
+	printf '%s: ' "$1" >/dev/tty
+	tty_state=$(stty -g </dev/tty 2>/dev/null) || tty_state=""
+	[ -z "$tty_state" ] || stty -echo </dev/tty
+	IFS= read -r reply </dev/tty || reply=""
+	restore_tty
+	printf '\n' >/dev/tty
+}
+
+# Ask for the model endpoint, then run init with the answers. The key is read hidden and
+# reaches init through a private file, never through an argument.
+configure_interactive() {
+	say "Which model should LifeContext use? Your notes' text is sent to it to be indexed."
+	say "A local OpenAI-compatible proxy (for example CLIProxyAPI on 127.0.0.1:8317) is the common case;"
+	say "you can change all of this later with: lifecontext llm set"
+	ask "Provider (openai_compatible, anthropic, openai, gemini, volcano)" "${LIFECONTEXT_PROVIDER:-openai_compatible}"
+	provider=$reply
+	base_url=""
+	case "$provider" in
+	openai_compatible | volcano)
+		default_url=${LIFECONTEXT_BASE_URL:-}
+		[ "$provider" != openai_compatible ] || default_url=${LIFECONTEXT_BASE_URL:-http://127.0.0.1:8317/v1}
+		ask_required "API base URL" "$default_url"
+		base_url=$reply
+		;;
+	*)
+		ask "API base URL (empty for the provider's own)" "${LIFECONTEXT_BASE_URL:-}"
+		base_url=$reply
+		;;
+	esac
+	default_model=${LIFECONTEXT_MODEL:-}
+	[ "$provider" != anthropic ] || default_model=${LIFECONTEXT_MODEL:-claude-sonnet-5}
+	ask_required "Model ID (exactly as your endpoint names it)" "$default_model"
+	model=$reply
+	ask_secret "API key (hidden; leave empty if the endpoint needs none, as a local proxy on loopback may)"
+	api_key=$reply
+	ask "Vault folder (the folder you open in Obsidian)" "${LIFECONTEXT_VAULT:-$HOME/LifeContext/vault}"
+	vault=$reply
+
+	set -- init --non-interactive --json --provider "$provider" --model "$model" --vault "$vault"
+	[ -z "$base_url" ] || set -- "$@" --base-url "$base_url"
+	[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
+	if [ -n "$api_key" ]; then
+		key_file="$tmp/api-key"
+		(umask 077 && printf '%s\n' "$api_key" >"$key_file")
+		api_key=""
+		report=$(LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" "$@" </dev/null) || true
+		rm -f "$key_file"
+	else
+		report=$("$lc" "$@" </dev/null) || true
+	fi
+	printf '%s' "$report" | print_init_report || die "setup did not finish; run the installer again with other answers"
 }
 
 print_init_report() {
@@ -445,7 +539,7 @@ configure() {
 	# init reads LIFECONTEXT_PROVIDER, _MODEL, _BASE_URL, _VAULT and the key file
 	# LIFECONTEXT_API_KEY_FILE itself; only the time zone is passed as a flag.
 	if [ -e "$HOME/.lifeweave/config.yaml" ]; then
-		say "Existing settings in ~/.lifeweave kept (change them with lifecontext init --force)"
+		say "Existing settings in ~/.lifeweave kept (change the model or endpoint with lifecontext llm set)"
 		if [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ]; then
 			env_file="$HOME/.lifeweave/.env"
 			before=""
@@ -465,8 +559,7 @@ configure() {
 		report=$("$lc" "$@" </dev/null) || true
 		printf '%s' "$report" | print_init_report || die "setup did not finish; fix the settings and run the installer again"
 	elif [ "$interactive" != no ] && tty_available; then
-		say "Answer a few questions; the API key is read with a hidden prompt."
-		"$lc" init </dev/tty || die "lifecontext init failed; run it again with: lifecontext init"
+		configure_interactive
 	else
 		say "Skipped: no terminal and no LIFECONTEXT_* settings. Run lifecontext init to finish the setup."
 	fi
@@ -573,7 +666,7 @@ link_skills() {
 
 remove_units_directly() {
 	if [ "$(uname -s)" = Darwin ]; then
-		for label in "$LAUNCHD_LABEL.maintain" "$LAUNCHD_LABEL"; do
+		for label in "$LAUNCHD_LABEL.capture" "$LAUNCHD_LABEL.maintain" "$LAUNCHD_LABEL"; do
 			plist="$HOME/Library/LaunchAgents/$label.plist"
 			if [ -e "$plist" ]; then
 				launchctl bootout "gui/$(id -u)/$label" </dev/null >/dev/null 2>&1 || true
@@ -585,7 +678,7 @@ remove_units_directly() {
 	fi
 	units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 	removed=0
-	for unit in lifecontext-maintain.timer lifecontext-maintain.service lifecontext.service; do
+	for unit in lifecontext-capture.timer lifecontext-capture.service lifecontext-maintain.timer lifecontext-maintain.service lifecontext.service; do
 		if [ -e "$units/$unit" ] || [ -L "$units/$unit" ]; then
 			systemctl --user disable --now "$unit" </dev/null >/dev/null 2>&1 || true
 			rm -f "$units/$unit"
@@ -593,7 +686,7 @@ remove_units_directly() {
 			removed=1
 		fi
 	done
-	for wants in "$units/default.target.wants/lifecontext.service" "$units/timers.target.wants/lifecontext-maintain.timer"; do
+	for wants in "$units/default.target.wants/lifecontext.service" "$units/timers.target.wants/lifecontext-maintain.timer" "$units/timers.target.wants/lifecontext-capture.timer"; do
 		if [ -L "$wants" ]; then
 			rm -f "$wants"
 		fi
@@ -726,7 +819,7 @@ main() {
 	detect_platform
 	command -v curl >/dev/null 2>&1 || die "curl is needed to download uv and the release"
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/lifecontext-install.XXXXXX")
-	trap 'rm -rf "$tmp"' EXIT
+	trap 'rm -rf "$tmp"; restore_tty' EXIT
 	trap 'exit 1' HUP INT TERM
 	package_changed=0
 	key_changed=0
