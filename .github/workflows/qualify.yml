@@ -35,7 +35,7 @@ env:
 
 jobs:
   build:
-    if: github.repository == 'Hantok/lifecontext' && inputs.release_tag == ''
+    if: github.repository == 'rundax/lifecontext' && inputs.release_tag == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -610,8 +610,8 @@ jobs:
           $Q record install_sh "$result" --detail "exit $status" --seconds "$seconds"
       - name: Check that the API runs as a launchd agent
         run: |
-          if launchctl print "gui/$(id -u)/io.github.hantok.lifecontext" > /dev/null 2>&1; then
-            $Q record service_running pass --detail "launchd agent io.github.hantok.lifecontext loaded"
+          if launchctl print "gui/$(id -u)/io.github.rundax.lifecontext" > /dev/null 2>&1; then
+            $Q record service_running pass --detail "launchd agent io.github.rundax.lifecontext loaded"
           else
             $Q record service_running skip --detail "no launchd GUI session on this runner; lifecontext serve runs in the background instead"
             nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
@@ -656,7 +656,7 @@ jobs:
   release:
     # A release rehearsal: install from a draft release's assets (checking SHA256SUMS
     # and its signature) and pull and verify the image of that tag.
-    if: github.repository == 'Hantok/lifecontext' && inputs.release_tag != ''
+    if: github.repository == 'rundax/lifecontext' && inputs.release_tag != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -736,7 +736,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           failed=0
-          image="ghcr.io/hantok/lifecontext:${TAG#v}"
+          image="ghcr.io/rundax/lifecontext:${TAG#v}"
           printf '%s\n' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           status=0
           docker pull "$image" || status=$?
@@ -744,11 +744,11 @@ jobs:
           $Q record image_pull "$result" --detail "exit $status, $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo 'no digest')" || failed=1
           status=0
           cosign verify "$image" \
-            --certificate-identity "https://github.com/Hantok/lifecontext/.github/workflows/release.yml@refs/tags/$TAG" \
+            --certificate-identity "https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/$TAG" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null || status=$?
           [ "$status" -eq 0 ] && result=pass || result=fail
           $Q record image_signature "$result" --detail "cosign verify exit $status, identity release.yml@refs/tags/$TAG" || failed=1
-          visibility=$(gh api /users/Hantok/packages/container/lifecontext --jq .visibility 2>/dev/null || echo "not readable with this token")
+          visibility=$(gh api /orgs/rundax/packages/container/lifecontext --jq .visibility 2>/dev/null || echo "not readable with this token")
           $Q metric info package_visibility "$visibility"
           exit "$failed"
       - name: Summarize the evidence
@@ -781,7 +781,7 @@ jobs:
 
   evidence:
     needs: [build, native, docker, macos, release]
-    if: always() && github.repository == 'Hantok/lifecontext'
+    if: always() && github.repository == 'rundax/lifecontext'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

@@ -44,23 +44,23 @@ Free for one person who runs their own copy for their own use, at home or at wor
 
 - Free: your own notes and documents; your work laptop and your employer's documents (the licence does not override your employer's confidentiality rules, including for text sent to your model provider); freelance client work, where the reports you deliver are your work.
 - Commercial licence: your employer installs or manages LifeContext for a team; a shared company instance; a hosted service.
-- Commercial licences: roman@rundax.com. Details and more examples: [LICENSING.md](https://github.com/Hantok/lifecontext/blob/main/LICENSING.md).
+- Commercial licences: roman@rundax.com. Details and more examples: [LICENSING.md](https://github.com/rundax/lifecontext/blob/main/LICENSING.md).
 
 ## Install
 
-- Script: `curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh` (checks SHA256SUMS and, with cosign 3 or later, its signature; installs dependencies from a lock with pinned hashes; runs `init`, `service install`, `skills install` and `doctor`; installs Tesseract through brew, or through apt or dnf only when sudo works without a password, and otherwise prints the command; a re-run stops the service, backs up, upgrades and starts it again)
-- Docker image: `ghcr.io/hantok/lifecontext:1.2.0` (runs as uid 1000; volumes `/data/home` and `/data/vault`; the key as a Compose secret or a file mounted at `/run/secrets/lifecontext_api_key`; `LIFECONTEXT_*` settings on the first start; no published port; use `docker compose exec lifecontext lifecontext ...`; agents on the host use the `bin/lifecontext-docker` wrapper)
-- From source: `git clone https://github.com/Hantok/lifecontext.git`, then `uv pip install -c constraints-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -e .` on Linux (`uv pip install -e .` on macOS), then `lifecontext init`, `lifecontext service install`, `lifecontext skills install`, `lifecontext doctor`
+- Script: `curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh` (checks SHA256SUMS and, with cosign 3 or later, its signature; installs dependencies from a lock with pinned hashes; runs `init`, `service install`, `skills install` and `doctor`; installs Tesseract through brew, or through apt or dnf only when sudo works without a password, and otherwise prints the command; a re-run stops the service, backs up, upgrades and starts it again)
+- Docker image: `ghcr.io/rundax/lifecontext:1.2.0` (runs as uid 1000; volumes `/data/home` and `/data/vault`; the key as a Compose secret or a file mounted at `/run/secrets/lifecontext_api_key`; `LIFECONTEXT_*` settings on the first start; no published port; use `docker compose exec lifecontext lifecontext ...`; agents on the host use the `bin/lifecontext-docker` wrapper)
+- From source: `git clone https://github.com/rundax/lifecontext.git`, then `uv pip install -c constraints-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -e .` on Linux (`uv pip install -e .` on macOS), then `lifecontext init`, `lifecontext service install`, `lifecontext skills install`, `lifecontext doctor`
 - Resources: about 3 GB of disk for the runtime and models (measured in CI on Linux: 2.4 GB installation, 0.6 GB models). Recall reranks on the CPU; expect tens of seconds on a 4-core machine.
 
 ## Links
 
-- [Website (English)](https://hantok.github.io/lifecontext/)
-- [Website (Ukrainian)](https://hantok.github.io/lifecontext/uk/)
-- [Source repository](https://github.com/Hantok/lifecontext)
-- [Documentation](https://github.com/Hantok/lifecontext/tree/main/docs)
-- [Licence](https://github.com/Hantok/lifecontext/blob/main/LICENSE)
-- [Licensing details and examples](https://github.com/Hantok/lifecontext/blob/main/LICENSING.md)
-- [Security policy](https://github.com/Hantok/lifecontext/blob/main/SECURITY.md)
+- [Website (English)](https://rundax.github.io/lifecontext/)
+- [Website (Ukrainian)](https://rundax.github.io/lifecontext/uk/)
+- [Source repository](https://github.com/rundax/lifecontext)
+- [Documentation](https://github.com/rundax/lifecontext/tree/main/docs)
+- [Licence](https://github.com/rundax/lifecontext/blob/main/LICENSE)
+- [Licensing details and examples](https://github.com/rundax/lifecontext/blob/main/LICENSING.md)
+- [Security policy](https://github.com/rundax/lifecontext/blob/main/SECURITY.md)
 - [Hindsight memory engine](https://github.com/vectorize-io/hindsight)
 - [LLM Wiki pattern by Andrej Karpathy, which inspired LifeContext](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)

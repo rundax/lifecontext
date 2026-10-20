@@ -516,8 +516,8 @@ log out unless lingering is on: `loginctl enable-linger "$USER"`. Logs are in
 Hindsight daemon and Postgres it started, since they run in its control group.
 
 On macOS, `install` writes launch agents to `~/Library/LaunchAgents/`:
-`io.github.hantok.lifecontext.plist` (run at load, restarted when it exits with
-an error, `Nice` 5) and, with `--maintenance`, `io.github.hantok.lifecontext.maintain.plist`
+`io.github.rundax.lifecontext.plist` (run at load, restarted when it exits with
+an error, `Nice` 5) and, with `--maintenance`, `io.github.rundax.lifecontext.maintain.plist`
 (daily at 07:00 with `Nice` 10, background process type and low-priority I/O;
 launchd has no memory or CPU caps). It loads changed agents with `launchctl
 bootout` and `bootstrap gui/UID`, and bootstraps an unchanged agent that

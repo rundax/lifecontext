@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install LifeContext for the current user, or remove what this script installed.
 #
-#   curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
 #   sh install.sh --help
 #
 # The installation lives in ~/.local/share/lifecontext (a pinned uv, the Python
@@ -12,7 +12,7 @@
 set -eu
 
 LIFECONTEXT_RELEASE="1.2.0"
-REPOSITORY="Hantok/lifecontext"
+REPOSITORY="rundax/lifecontext"
 UV_VERSION="0.12.24"
 UV_SHA256_LINUX_X86_64="48170bd200a5430298c18f3b264485a1f3a8605f01088277daf6e37633edf0f5"
 UV_SHA256_LINUX_AARCH64="7f9ab4726d743b6a92e310477a7840c8a8a7b3938cb3c4657d541342fca75011"
@@ -25,7 +25,7 @@ RERANKER_MODEL="nreimers/mmarco-mMiniLMv2-L6-H384-v1"
 RERANKER_REVISION="4ceabf2d1e212e16da0d1fb94d5dea66a9a1cca0"
 API_PORT=8765
 HEALTH_WAIT_SECONDS=900
-LAUNCHD_LABEL="io.github.hantok.lifecontext"
+LAUNCHD_LABEL="io.github.rundax.lifecontext"
 
 usage() {
 	cat <<'EOF'

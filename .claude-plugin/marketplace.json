@@ -2,7 +2,7 @@
   "name": "lifecontext",
   "owner": {
     "name": "Roman Slysh",
-    "url": "https://github.com/Hantok"
+    "url": "https://github.com/rundax"
   },
   "description": "LifeContext: a private, durable context layer for AI. Journal entries and documents stay on your machine; agents read and add to them through one CLI, with citations.",
   "plugins": [

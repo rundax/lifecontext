@@ -26,12 +26,12 @@ defaults:
     shell: bash
 
 env:
-  IMAGE: ghcr.io/hantok/lifecontext
+  IMAGE: ghcr.io/rundax/lifecontext
   PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   build:
-    if: github.repository == 'Hantok/lifecontext'
+    if: github.repository == 'rundax/lifecontext'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -55,8 +55,8 @@ jobs:
               echo "::error::tag $GITHUB_REF_NAME, pyproject.toml $project and install.sh $pinned differ"
               exit 1
             fi
-            grep -q "ghcr.io/hantok/lifecontext:$version}" compose.yaml || {
-              echo "::error::compose.yaml does not default to ghcr.io/hantok/lifecontext:$version"
+            grep -q "ghcr.io/rundax/lifecontext:$version}" compose.yaml || {
+              echo "::error::compose.yaml does not default to ghcr.io/rundax/lifecontext:$version"
               exit 1
             }
           else
@@ -114,7 +114,7 @@ jobs:
             sleep 30
           done
           cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-            --certificate-identity "https://github.com/Hantok/lifecontext/.github/workflows/release.yml@$GITHUB_REF" \
+            --certificate-identity "https://github.com/rundax/lifecontext/.github/workflows/release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com release/SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -210,10 +210,10 @@ jobs:
           {
             echo "LifeContext $VERSION, source-available under the Business Source License 1.1."
             echo
-            echo "Install: \`curl -fsSL https://github.com/Hantok/lifecontext/releases/download/$GITHUB_REF_NAME/install.sh | sh\`"
+            echo "Install: \`curl -fsSL https://github.com/rundax/lifecontext/releases/download/$GITHUB_REF_NAME/install.sh | sh\`"
             echo "Docker: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64)."
-            echo "Changes: [CHANGELOG.md](https://github.com/Hantok/lifecontext/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
-            echo "Verify: [docs/install.md](https://github.com/Hantok/lifecontext/blob/$GITHUB_REF_NAME/docs/install.md#verifying-a-release)."
+            echo "Changes: [CHANGELOG.md](https://github.com/rundax/lifecontext/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
+            echo "Verify: [docs/install.md](https://github.com/rundax/lifecontext/blob/$GITHUB_REF_NAME/docs/install.md#verifying-a-release)."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"

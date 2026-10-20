@@ -75,7 +75,7 @@ the packaged skill directory `src/lifecontext/agent_skill/` (manifest in its
 `.claude-plugin/plugin.json`):
 
 ```
-/plugin marketplace add Hantok/lifecontext
+/plugin marketplace add rundax/lifecontext
 /plugin install lifecontext@lifecontext
 ```
 

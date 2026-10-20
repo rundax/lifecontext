@@ -16,7 +16,7 @@ name: lifecontext
 
 services:
   lifecontext:
-    image: ${LIFECONTEXT_IMAGE:-ghcr.io/hantok/lifecontext:1.2.0}
+    image: ${LIFECONTEXT_IMAGE:-ghcr.io/rundax/lifecontext:1.2.0}
     build: .
     container_name: ${LIFECONTEXT_CONTAINER:-lifecontext}
     restart: unless-stopped

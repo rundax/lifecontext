@@ -21,7 +21,7 @@ ARG LIFECONTEXT_GID=1000
 
 LABEL org.opencontainers.image.title="LifeContext" \
       org.opencontainers.image.description="Your private, durable context layer for AI" \
-      org.opencontainers.image.source="https://github.com/Hantok/lifecontext" \
+      org.opencontainers.image.source="https://github.com/rundax/lifecontext" \
       org.opencontainers.image.licenses="BUSL-1.1"
 
 ENV PYTHONUNBUFFERED=1 \

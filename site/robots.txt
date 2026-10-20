@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://hantok.github.io/lifecontext/sitemap.xml
+Sitemap: https://rundax.github.io/lifecontext/sitemap.xml

@@ -27,7 +27,7 @@ CLI=lifecontext
 
 If `status` fails, the API or one of its dependencies is down: report the failed
 dependency and stop. The owner restarts it; see
-[operations](https://github.com/Hantok/lifecontext/blob/main/docs/operations.md).
+[operations](https://github.com/rundax/lifecontext/blob/main/docs/operations.md).
 Commands never start the API implicitly.
 
 ## Operator boundaries

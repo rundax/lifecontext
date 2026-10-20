@@ -4,10 +4,10 @@
   "description": "Operate a local LifeContext journal and document wiki: capture, verify, cite evidence and build summaries. Needs the lifecontext command installed and its service running.",
   "author": {
     "name": "Roman Slysh",
-    "url": "https://github.com/Hantok"
+    "url": "https://github.com/rundax"
   },
-  "homepage": "https://hantok.github.io/lifecontext/",
-  "repository": "https://github.com/Hantok/lifecontext",
+  "homepage": "https://rundax.github.io/lifecontext/",
+  "repository": "https://github.com/rundax/lifecontext",
   "license": "BUSL-1.1",
   "keywords": ["journal", "wiki", "documents", "memory", "citations", "obsidian"],
   "skills": "./"

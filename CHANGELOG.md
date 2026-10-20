@@ -84,7 +84,7 @@
   `uv pip` with the PyTorch CPU index; the README, CI, `install.sh` and the
   Docker image install with it.
 - Make the repository a Claude Code plugin marketplace:
-  `/plugin marketplace add Hantok/lifecontext`, then
+  `/plugin marketplace add rundax/lifecontext`, then
   `/plugin install lifecontext@lifecontext` adds the journal skill.
 - `init` now names `service install`, `skills install` and `doctor` in its next
   steps.

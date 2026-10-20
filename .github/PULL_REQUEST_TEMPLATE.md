@@ -8,7 +8,7 @@
 
 ## Checklist
 
-- [ ] I signed the [CLA](https://github.com/Hantok/lifecontext/blob/main/CLA.md) in a comment on this or an earlier pull request.
+- [ ] I signed the [CLA](https://github.com/rundax/lifecontext/blob/main/CLA.md) in a comment on this or an earlier pull request.
 - [ ] Tests cover the change, and the affected tests pass locally.
 - [ ] `ruff check` reports no new findings in the files I changed.
 - [ ] `README.md` / `docs/` and a `CHANGELOG.md` bullet under `# Unreleased` are updated if behaviour changed.

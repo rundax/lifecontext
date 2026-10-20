@@ -23,8 +23,8 @@ from lifecontext.paths import LifeContextPaths, atomic_write
 SERVICE_UNIT = "lifecontext.service"
 MAINTAIN_SERVICE = "lifecontext-maintain.service"
 MAINTAIN_TIMER = "lifecontext-maintain.timer"
-LAUNCHD_LABEL = "io.github.hantok.lifecontext"
-LAUNCHD_MAINTAIN_LABEL = "io.github.hantok.lifecontext.maintain"
+LAUNCHD_LABEL = "io.github.rundax.lifecontext"
+LAUNCHD_MAINTAIN_LABEL = "io.github.rundax.lifecontext.maintain"
 MAINTENANCE_HOUR = 7
 # The maintenance run is an HTTP client of the service; these bound the client process.
 MAINTAIN_LIMITS = {"MemoryMax": "512M", "CPUQuota": "50%", "Nice": "10"}
@@ -32,7 +32,7 @@ MAINTAIN_LIMITS = {"MemoryMax": "512M", "CPUQuota": "50%", "Nice": "10"}
 # MemoryHigh the kernel reclaims and throttles instead of starving the desktop, and a
 # mild Nice keeps interactive work first. No hard cap: recall needs its models in memory.
 SERVE_LIMITS = {"MemoryHigh": "4G", "Nice": "5"}
-_DOCS = "https://github.com/Hantok/lifecontext/blob/main/docs/operations.md"
+_DOCS = "https://github.com/rundax/lifecontext/blob/main/docs/operations.md"
 
 Runner = Callable[..., Any]
 

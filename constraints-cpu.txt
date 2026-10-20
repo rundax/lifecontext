@@ -8,10 +8,10 @@
 #
 #   pip install -c constraints-cpu.txt \
 #     --extra-index-url https://download.pytorch.org/whl/cpu \
-#     https://github.com/Hantok/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
+#     https://github.com/rundax/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
 #   uv pip install -c constraints-cpu.txt \
 #     --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
-#     https://github.com/Hantok/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
+#     https://github.com/rundax/lifecontext/releases/download/v1.2.0/lifecontext-1.2.0-py3-none-any.whl
 #
 # uv needs --index-strategy unsafe-best-match: by default it takes each package
 # only from the first index that has it, and the PyTorch index also carries old

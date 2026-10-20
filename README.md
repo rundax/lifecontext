@@ -35,7 +35,7 @@ Tesseract into your home directory, then runs `init`, `service install
 --maintenance`, `skills install` and `doctor` (steps 2 and 3 below):
 
 ```bash
-curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
 ```
 
 Until then, run it from a checkout with a wheel built from the tree:
@@ -65,7 +65,7 @@ the environment and models. Tesseract OCR is optional but needed to read scans
 and images.
 
 ```bash
-git clone https://github.com/Hantok/lifecontext.git
+git clone https://github.com/rundax/lifecontext.git
 cd lifecontext
 python3 -m venv .venv
 # constraints-cpu.txt pins CPU-only PyTorch on Linux: about 2.4 GB instead of
@@ -93,7 +93,7 @@ uv pip install --python .venv/bin/python -c constraints-cpu.txt \
 
 LifeContext is not published on PyPI, so never install the bare name
 `lifecontext` from there; use a checkout (`.`) or a wheel from a
-[GitHub release](https://github.com/Hantok/lifecontext/releases).
+[GitHub release](https://github.com/rundax/lifecontext/releases).
 
 ### 2. Configure
 
@@ -152,7 +152,7 @@ the service for the backup and starts it again
 In Claude Code you can also add the skill as a plugin:
 
 ```
-/plugin marketplace add Hantok/lifecontext
+/plugin marketplace add rundax/lifecontext
 /plugin install lifecontext@lifecontext
 ```
 

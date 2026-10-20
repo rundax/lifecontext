@@ -15,7 +15,7 @@ leaves your machine is in [privacy.md](privacy.md).
 ## install.sh
 
 ```bash
-curl -fsSL https://github.com/Hantok/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
 ```
 
 This command works once the repository is public and v1.2.0 is published with
@@ -24,7 +24,7 @@ built from the tree and the lock for your platform (`linux-x86_64`,
 `linux-aarch64` or `macos-arm64`):
 
 ```bash
-git clone https://github.com/Hantok/lifecontext.git
+git clone https://github.com/rundax/lifecontext.git
 cd lifecontext
 python3 -m venv /tmp/lifecontext-build
 /tmp/lifecontext-build/bin/pip install build==1.6.1
@@ -167,7 +167,7 @@ starts with `HF_HUB_OFFLINE=1` and downloads no models. It runs as the unprivile
 is published; you reach it with `docker exec` or the
 [`lifecontext-docker`](#agents-and-the-lifecontext-docker-wrapper) wrapper.
 
-Once v1.2.0 is published the image is `ghcr.io/hantok/lifecontext:1.2.0`.
+Once v1.2.0 is published the image is `ghcr.io/rundax/lifecontext:1.2.0`.
 Until then, build it from a checkout: `docker compose build` (or
 `docker build -t lifecontext .`).
 
@@ -204,7 +204,7 @@ container waits until you run
 |---|---|
 | `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL`, `LIFECONTEXT_BASE_URL`, `LIFECONTEXT_TIMEZONE` | `init` settings for the first start |
 | `LIFECONTEXT_API_KEY_FILE` | Host path of the key file (default `./secrets/lifecontext_api_key`); it must be readable by uid 1000 |
-| `LIFECONTEXT_IMAGE` | Image to run (default `ghcr.io/hantok/lifecontext:1.2.0`) |
+| `LIFECONTEXT_IMAGE` | Image to run (default `ghcr.io/rundax/lifecontext:1.2.0`) |
 | `LIFECONTEXT_CONTAINER` | Container name (default `lifecontext`) |
 | `LIFECONTEXT_MEMORY_LIMIT` | Memory limit (default `4g`) |
 
@@ -302,7 +302,7 @@ later (2.x cannot read this bundle format):
 
 ```bash
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity https://github.com/Hantok/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
+  --certificate-identity https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 ```
@@ -310,7 +310,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 The image is signed the same way:
 
 ```bash
-cosign verify ghcr.io/hantok/lifecontext:1.2.0 \
-  --certificate-identity https://github.com/Hantok/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
+cosign verify ghcr.io/rundax/lifecontext:1.2.0 \
+  --certificate-identity https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
