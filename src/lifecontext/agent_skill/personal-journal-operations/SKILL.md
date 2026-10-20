@@ -70,6 +70,10 @@ You operate this system through the CLI; you do not maintain it.
 - Use `curate correct` for journal changes and its expected-version gate. Forget/delete
   use CLI preparation and confirmation gates; read `curate --help` first.
   Repair managed Markdown with `reconcile`, never by editing files directly.
+- When `lifecontext` runs on another machine through the agent gate, forget, delete,
+  `reconcile` and other owner commands answer `{"error":"command_not_allowed"}` by
+  design. Do not retry or look for another way; tell the owner what you wanted to
+  do and why.
 - On authorization, provenance or conflict errors, stop the affected mutation
   and report it. For transient provider failures, use the bounded recovery in
   the document reference; never claim a failed stage succeeded. Do not bypass failures through Hermes tools, direct Hindsight calls,

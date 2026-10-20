@@ -200,7 +200,8 @@ revisions; this does not generate new wiki content. After forgetting or
 deleting a document, run reconcile so every wiki page and history file drops its
 text (pages left with nothing show as withdrawn). Never edit managed
 Markdown, ownership markers, or user sections to force an update. Preserve
-user edits and report projection conflicts.
+user edits and report projection conflicts. Through the agent gate `reconcile` is refused; report the projection failure
+to the owner instead.
 
 Classification may propose categories; it cannot approve them automatically.
 Inspect `categories list` and `categories proposals --json`. User-requested
