@@ -22,6 +22,7 @@ from lifecontext.capture import (
     MAX_BYTES,
     SETTLE_SECONDS,
     CaptureError,
+    Rejected,
     default_inbox,
     render,
     run_once,
@@ -39,9 +40,13 @@ class FakeApi:
         self.calls: list[tuple] = []
         self.sources: dict[str, list[str]] = {}
         self.completed: dict[str, bool] = {}
-        self.refuse = False
+        self.refuse = False  # the API is unreachable or failing: not done yet
+        self.reject: str | None = None  # the API refuses the note for good, with this error code
+        self.corrupt = False  # the evidence does not match what was sent
 
     def _apply(self, key: str, source_id: str, raw: bytes, expected: int) -> bool:
+        if self.reject:
+            raise Rejected(self.reject)
         if self.refuse:
             return False
         if key not in self.completed:
@@ -64,7 +69,8 @@ class FakeApi:
         versions = self.sources.get(source_id, [])
         if not 1 <= version <= len(versions):
             return None
-        return {"source_id": source_id, "source_version": version, "sha256": versions[version - 1]}
+        return {"source_id": source_id, "source_version": version,
+                "sha256": "0" * 64 if self.corrupt else versions[version - 1]}
 
 
 @contextmanager
@@ -199,6 +205,77 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in state_directory(self.paths).iterdir()),
                          ["lock", "state.json"])
 
+    def test_a_refusal_for_good_is_reported_not_retried_and_cleared_by_a_change(self) -> None:
+        note = self.write("2026/Lake.md")
+        self.scan()
+        self.clock.advance(SETTLE_SECONDS + 1)
+        self.api.reject = "source_conflict"
+        refused = self.scan()
+        self.assertEqual((refused["captured"], refused["pending"], refused["failed"]), (0, 0, 1))
+        self.assertEqual(refused["failures"], [{"note": "2026/Lake.md", "code": "source_conflict"}])
+        text = render(refused)
+        self.assertIn("failed 1", text)
+        self.assertIn(f"Refused: {self.inbox / '2026' / 'Lake.md'} (source_conflict)", text)
+        calls = len(self.api.calls)
+        # No snapshot of the note is kept, and later runs report the refusal without sending again.
+        self.assertEqual(sorted(path.name for path in state_directory(self.paths).iterdir()), ["lock", "state.json"])
+        for _ in range(3):
+            self.clock.advance(30)
+            again = self.scan()
+            self.assertEqual((again["pending"], again["failed"]), (0, 1))
+            self.assertEqual(again["failures"], refused["failures"])
+        self.assertEqual(len(self.api.calls), calls)
+        # A changed note is tried again, with a new key, and a success clears the refusal.
+        self.api.reject = None
+        note.write_text(NOTE + "More.\n", encoding="utf-8")
+        self.clock.advance(30)
+        self.scan()
+        self.clock.advance(SETTLE_SECONDS + 1)
+        retried = self.scan()
+        self.assertEqual((retried["captured"], retried["failed"], retried["failures"]), (1, 0, []))
+        self.assertEqual(self.api.calls[-1][0], "retain")
+        self.assertNotEqual(self.api.calls[-1][2], self.api.calls[0][2])
+        self.clock.advance(30)
+        self.assertEqual(self.scan()["failed"], 0)
+
+    def test_a_refusal_survives_the_note_being_deleted_in_the_same_run(self) -> None:
+        note = self.write("Lake.md")
+        self.scan()
+        self.clock.advance(SETTLE_SECONDS + 1)
+        self.api.refuse = True
+        self.scan()
+        note.unlink()
+        self.api.refuse = False
+        self.api.reject = "conflict"
+        refused = self.scan()
+        self.assertEqual((refused["pending"], refused["failures"]), (0, [{"note": "Lake.md", "code": "conflict"}]))
+        self.clock.advance(30)
+        self.assertEqual(self.scan()["failed"], 0)  # the note is gone: nothing left to report
+
+    def test_evidence_that_does_not_match_what_was_sent_is_a_refusal(self) -> None:
+        self.write("Lake.md")
+        self.scan()
+        self.clock.advance(SETTLE_SECONDS + 1)
+        self.api.corrupt = True
+        report = self.scan()
+        self.assertEqual(report["failures"], [{"note": "Lake.md", "code": "evidence_mismatch"}])
+
+    def test_note_text_left_in_the_state_folder_by_an_interrupted_run_is_removed(self) -> None:
+        self.write("Lake.md")
+        self.scan()
+        directory = state_directory(self.paths)
+        (directory / ("f" * 32 + ".md")).write_text(NOTE)
+        (directory / ".state.json.partial").write_text("{")
+        self.clock.advance(SETTLE_SECONDS + 1)
+        self.api.refuse = True
+        self.scan()  # now one submission is pending: its snapshot must stay
+        self.assertEqual(len(list(directory.glob("*.md"))), 1)
+        (directory / ("e" * 32 + ".md")).write_text(NOTE)
+        self.api.refuse = False
+        self.clock.advance(30)
+        self.assertEqual(self.scan()["captured"], 1)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["lock", "state.json"])
+
     def test_a_pending_submission_finishes_after_the_note_was_deleted(self) -> None:
         note = self.write("Lake.md")
         self.scan()
@@ -294,16 +371,19 @@ class CaptureApiTests(unittest.TestCase):
         self.assertEqual(correct[3]["Idempotency-Key"], "obsidian:k2")
         self.assertEqual(evidence[:2], ("GET", "/v1/evidence/obsidian_a?version=2&include_content=false"))
 
-    def test_an_unavailable_or_refusing_api_counts_as_not_completed(self) -> None:
+    def test_an_unreachable_or_failing_api_means_try_again_later(self) -> None:
         api = cli._CaptureApi(cli._build_parser().parse_args(["capture", "--once"]))
+        for error in (cli.CLIError("api_unavailable"), cli.CLIError("token_unavailable"),
+                      cli.CLIError("unauthorized"), cli.CLIError("provider_unavailable", 503),
+                      cli.CLIError("retain_failed", 503), cli.CLIError("catalog_busy", 503),
+                      cli.CLIError("internal_error", 500)):
+            def down(*args, error=error, **kwargs):
+                raise error
 
-        def down(*args, **kwargs):
-            raise cli.CLIError("api_unavailable")
-
-        with patch.object(cli, "_http_request", down):
-            self.assertFalse(api.retain("obsidian_a", b"note", "k"))
-            self.assertFalse(api.correct("obsidian_a", 1, b"note", "k"))
-            self.assertIsNone(api.evidence("obsidian_a", 1))
+            with self.subTest(code=error.code), patch.object(cli, "_http_request", down):
+                self.assertFalse(api.retain("obsidian_a", b"note", "k"))
+                self.assertFalse(api.correct("obsidian_a", 1, b"note", "k"))
+                self.assertIsNone(api.evidence("obsidian_a", 1))
 
         def running(args, method, target, **kwargs):
             return ({"operation_id": _Http.OPERATION, "state": "running"} if target.startswith("/v1/operations/")
@@ -311,6 +391,41 @@ class CaptureApiTests(unittest.TestCase):
 
         with patch.object(cli, "_http_request", running):
             self.assertFalse(api.retain("obsidian_a", b"note", "k"))
+
+    def test_any_other_refusal_is_reported_with_its_code(self) -> None:
+        api = cli._CaptureApi(cli._build_parser().parse_args(["capture", "--once"]))
+        for error in (cli.CLIError("source_conflict", 409), cli.CLIError("conflict", 409),
+                      cli.CLIError("invalid_source_text", 422), cli.CLIError("body_too_large", 413),
+                      cli.CLIError("body_too_large"), cli.CLIError("evidence_unavailable", 404)):
+            def refusing(*args, error=error, **kwargs):
+                raise error
+
+            with self.subTest(code=error.code), patch.object(cli, "_http_request", refusing):
+                with self.assertRaises(Rejected) as caught:
+                    api.retain("obsidian_a", b"note", "k")
+                self.assertEqual(caught.exception.code, error.code)
+                with self.assertRaises(Rejected):
+                    api.correct("obsidian_a", 1, b"note", "k")
+                with self.assertRaises(Rejected):
+                    api.evidence("obsidian_a", 1)
+
+        for state in ("permanent_failed", "cancelled"):
+            def finished(args, method, target, state=state, **kwargs):
+                return ({"operation_id": _Http.OPERATION, "state": state} if target.startswith("/v1/operations/")
+                        else {}), _Http.OPERATION
+
+            with self.subTest(state=state), patch.object(cli, "_http_request", finished):
+                with self.assertRaises(Rejected) as caught:
+                    api.retain("obsidian_a", b"note", "k")
+                self.assertEqual(caught.exception.code, f"operation_{state}")
+
+    def test_the_http_layer_keeps_the_status_of_an_api_error(self) -> None:
+        args = cli._build_parser().parse_args(["capture", "--once"])
+        body = json.dumps({"request_id": "a" * 16, "error_code": "source_conflict", "retryable": False}).encode()
+        with patch.object(cli, "_http_exchange", return_value=(409, {}, body)), \
+                self.assertRaises(cli.CLIError) as caught:
+            cli._http_request(args, "GET", "/v1/status")
+        self.assertEqual((caught.exception.code, caught.exception.status), ("source_conflict", 409))
 
 
 class CaptureCommandTests(unittest.TestCase):
@@ -330,7 +445,8 @@ class CaptureCommandTests(unittest.TestCase):
                 code, out, _ = self.run_command(home, "--once", "--inbox", str(inbox), "--json")
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out), {"inbox": str(inbox), "inbox_found": True, "busy": False,
-                                               "captured": 0, "pending": 0, "skipped": 0})
+                                               "captured": 0, "pending": 0, "skipped": 0, "failed": 0,
+                                               "failures": []})
             with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()):
                 cli.main(["capture"])
             self.assertEqual(caught.exception.code, 2)

@@ -4,8 +4,11 @@ A note is captured only after its bytes stopped changing for ``SETTLE_SECONDS``.
 keeps one source ID derived from its path: the first capture retains version 1, a later
 edit corrects it to the next version. A submission is written to the state directory first
 and sent with a fixed idempotency key, so a run that stops half way finishes it on the next
-run without a duplicate. The note is never changed or removed. Capture talks to the running
-API through ``CaptureApi``; it never opens the catalog.
+run without a duplicate. When the API cannot be reached or fails (5xx), the submission stays
+pending and is sent again. When the API refuses the note for good, the refusal is recorded
+against the note's bytes: it is reported on every run but not sent again until the note
+changes. The note is never changed or removed. Capture talks to the running API through
+``CaptureApi``; it never opens the catalog.
 """
 
 from __future__ import annotations
@@ -35,8 +38,21 @@ class CaptureError(RuntimeError):
         self.code = code
 
 
+class Rejected(RuntimeError):
+    """The API refused this submission for good, as opposed to being unreachable or failing."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 class CaptureApi(Protocol):
-    """The three API calls capture needs; each returns whether the mutation completed."""
+    """The API calls capture needs.
+
+    ``retain`` and ``correct`` return True when the mutation completed and False when it is not
+    done yet (the API is unreachable or failing: try again later); ``evidence`` returns None then.
+    Each raises ``Rejected`` with the API's error code when the API refused the note.
+    """
 
     def retain(self, source_id: str, raw: bytes, key: str) -> bool: ...
 
@@ -103,43 +119,74 @@ class Capture:
             self.data = {}
         except (OSError, ValueError):
             raise CaptureError("unsafe_state") from None
+        # Notes the API refused, by path inside the inbox, as of this run.
+        self.failures: dict[str, str] = {}
 
     def save(self) -> None:
         atomic_write(self.path, json.dumps(self.data, sort_keys=True).encode())
 
-    def submit(self, item: dict[str, Any]) -> bool:
+    def sweep(self) -> None:
+        """Remove what no pending submission needs: note text left by a run that stopped between steps."""
+        keep = {"state.json", "lock", *(item["pending"]["snapshot"] for item in self.data.values()
+                                        if "pending" in item)}
+        for entry in self.directory.iterdir():
+            if entry.name not in keep and entry.is_file():
+                entry.unlink(missing_ok=True)
+
+    def reject(self, relative: str, item: dict[str, Any], code: str) -> str:
+        """Record that the API refused these bytes: no more sends until the note changes."""
+        pending = item.pop("pending")
+        item["rejected"] = {"hash": pending["hash"], "code": code}
+        self.failures[relative] = code
+        self.save()
+        (self.directory / pending["snapshot"]).unlink(missing_ok=True)
+        return "failed"
+
+    def submit(self, relative: str, item: dict[str, Any]) -> str:
+        """Send the pending submission: ``captured``, ``pending`` (try again later) or ``failed`` (refused)."""
         pending = item["pending"]
         snapshot = self.directory / pending["snapshot"]
         raw = read_note(snapshot)
         if digest(raw) != pending["hash"]:
             raise ValueError("snapshot_mismatch")
-        if pending["version"] == 1:
-            done = self.api.retain(item["source"], raw, pending["key"])
-        else:
-            done = self.api.correct(item["source"], pending["version"] - 1, raw, pending["key"])
-        if not done:
-            return False
-        evidence = self.api.evidence(item["source"], pending["version"])
-        if not evidence or any(evidence.get(field) != expected for field, expected in (
+        try:
+            if pending["version"] == 1:
+                done = self.api.retain(item["source"], raw, pending["key"])
+            else:
+                done = self.api.correct(item["source"], pending["version"] - 1, raw, pending["key"])
+            evidence = self.api.evidence(item["source"], pending["version"]) if done else None
+        except Rejected as exc:
+            return self.reject(relative, item, exc.code)
+        if not evidence:
+            return "pending"
+        if any(evidence.get(field) != expected for field, expected in (
                 ("source_id", item["source"]), ("source_version", pending["version"]), ("sha256", pending["hash"]))):
-            return False
+            return self.reject(relative, item, "evidence_mismatch")
         item.update(version=pending["version"], imported_hash=pending["hash"])
+        item.pop("rejected", None)
         del item["pending"]
         self.save()
         snapshot.unlink(missing_ok=True)
-        return True
+        return "captured"
 
-    def scan(self) -> dict[str, int]:
+    def scan(self) -> dict[str, Any]:
         counts = {"captured": 0, "pending": 0, "skipped": 0}
+        self.sweep()
         # Finish submissions that stopped half way, even when the note was deleted since.
-        for item in self.data.values():
+        for relative, item in self.data.items():
             if "pending" in item:
                 try:
-                    counts["captured" if self.submit(item) else "pending"] += 1
+                    outcome = self.submit(relative, item)
                 except (OSError, ValueError):
-                    counts["pending"] += 1
-        if not self.inbox.is_dir() or self.inbox.is_symlink():
-            return counts
+                    outcome = "pending"
+                if outcome != "failed":
+                    counts[outcome] += 1
+        if self.inbox.is_dir() and not self.inbox.is_symlink():
+            self.scan_inbox(counts)
+        failures = [{"note": note, "code": code} for note, code in sorted(self.failures.items())]
+        return {**counts, "failed": len(failures), "failures": failures}
+
+    def scan_inbox(self, counts: dict[str, int]) -> None:
         for folder, directories, files in os.walk(self.inbox, followlinks=False):
             if Path(folder).is_symlink():
                 directories[:] = []
@@ -161,6 +208,10 @@ class Capture:
                         item.update(observed_hash=checksum, observed_at=self.now())
                         self.save()
                         continue
+                    rejected = item.get("rejected")
+                    if rejected and rejected["hash"] == checksum:
+                        self.failures[relative] = rejected["code"]
+                        continue
                     if "pending" in item or checksum == item.get("imported_hash") \
                             or self.now() - item["observed_at"] < self.settle:
                         continue
@@ -169,10 +220,11 @@ class Capture:
                     item["pending"] = {"hash": checksum, "version": item["version"] + 1,
                                        "snapshot": snapshot, "key": "obsidian:" + uuid.uuid4().hex}
                     self.save()
-                    counts["captured" if self.submit(item) else "pending"] += 1
+                    outcome = self.submit(relative, item)
+                    if outcome != "failed":
+                        counts[outcome] += 1
                 except (OSError, ValueError):
                     counts["skipped"] += 1
-        return counts
 
 
 def run_once(inbox: Path, paths: LifeContextPaths, api: CaptureApi, *,
@@ -189,8 +241,8 @@ def run_once(inbox: Path, paths: LifeContextPaths, api: CaptureApi, *,
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return {"inbox": str(inbox), "inbox_found": inbox.is_dir(), "busy": True,
-                    "captured": 0, "pending": 0, "skipped": 0}
+            return {"inbox": str(inbox), "inbox_found": inbox.is_dir(), "busy": True, "captured": 0,
+                    "pending": 0, "skipped": 0, "failed": 0, "failures": []}
         try:
             counts = Capture(inbox, directory, api, now=now, settle=settle).scan()
         except OSError:
@@ -201,10 +253,13 @@ def run_once(inbox: Path, paths: LifeContextPaths, api: CaptureApi, *,
 def render(report: Mapping[str, Any]) -> str:
     if report["busy"]:
         return "Another capture run is in progress; nothing to do."
-    lines = [f"Captured {report['captured']}, still pending {report['pending']}, skipped {report['skipped']}."]
+    lines = [(f"Captured {report['captured']}, still pending {report['pending']}, "
+              f"failed {report['failed']}, skipped {report['skipped']}.")]
+    lines += [(f"Refused: {Path(report['inbox']) / failure['note']} ({failure['code']}); "
+               "it is sent again when the note changes.") for failure in report["failures"]]
     if not report["inbox_found"]:
         lines.append(f"The inbox folder does not exist yet: {report['inbox']} (create it in Obsidian, "
                      "or pass --inbox DIR).")
     if report["pending"]:
-        lines.append("Pending notes are sent again on the next run; they wait for the API to be running.")
+        lines.append("Pending notes are sent again on the next run; the API was unreachable or failing.")
     return "\n".join(lines)

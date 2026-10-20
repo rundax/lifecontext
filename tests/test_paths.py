@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from lifecontext.paths import LifeContextPaths
+from lifecontext.paths import LifeContextPaths, atomic_write
 from local_paths import scratch_root
 
 
@@ -22,6 +22,34 @@ def _temporary_home():
         home = Path(temporary).resolve(strict=True)
         with patch.dict(os.environ, {"HOME": str(home)}):
             yield home
+
+
+class AtomicWriteTests(unittest.TestCase):
+    def test_the_directory_is_synced_after_the_rename_and_a_failure_to_do_so_is_ignored(self) -> None:
+        with _temporary_home() as home:
+            target = home / "state.json"
+            synced = []
+            real_fsync = os.fsync
+
+            def record(descriptor):
+                synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+                real_fsync(descriptor)
+
+            with patch("lifecontext.paths.os.fsync", record):
+                atomic_write(target, b"one")
+            self.assertEqual(synced, [False, True])  # the file, then its directory
+            self.assertEqual(target.read_bytes(), b"one")
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+
+            def refuse_directory(descriptor):
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError("not supported")
+                real_fsync(descriptor)
+
+            with patch("lifecontext.paths.os.fsync", refuse_directory):
+                atomic_write(target, b"two")
+            self.assertEqual(target.read_bytes(), b"two")
+            self.assertEqual(os.listdir(home), ["state.json"])
 
 
 class LifeContextPathTests(unittest.TestCase):

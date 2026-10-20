@@ -73,12 +73,20 @@ changes or deletes the note. The rules:
   changed does nothing. A renamed or moved note is a new note and becomes a
   new entry.
 - **Size and kind.** Only `.md` files of 1 MiB or less, valid UTF-8, not
-  empty. Anything else, hidden files and folders, and symbolic links are
-  skipped (counted under `skipped`).
+  empty. A `.md` file that is empty, larger, not UTF-8 or a link to a file is
+  skipped and counted under `skipped`; other files, hidden files and folders,
+  and links to folders are ignored without a count.
 - **Safe to interrupt.** A submission is written to the state folder first and
   sent with a fixed idempotency key, so a run that stops half way is finished
-  by the next one without a duplicate. If the service is not running, notes wait
-  and are counted under `pending`.
+  by the next one without a duplicate. If the service is not running or the API
+  fails (a 5xx answer, or the model provider is unreachable), notes wait and are
+  counted under `pending`.
+- **Refusals are reported, not retried.** If the API refuses a note for good
+  (for example `source_conflict` after the entry was forgotten or deleted,
+  `conflict` because the version moved on, or `body_too_large`), the run counts
+  it under `failed` and lists the note and the error code (`failures` in
+  `--json`, a `Refused:` line otherwise). It is reported on every run but not
+  sent again until you change the note, which tries it once more.
 - **Where it keeps state.** `~/.lifeweave/capture` (mode `0700`, files `0600`):
   what it has seen and sent. `lifecontext backup` includes it. Only one capture
   run goes at a time.

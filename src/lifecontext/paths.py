@@ -25,6 +25,17 @@ def atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
         except OSError:
             pass
         raise
+    # Make the rename itself durable; a filesystem that cannot sync a directory still has the file.
+    try:
+        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True)

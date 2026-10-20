@@ -56,9 +56,11 @@ _API_ERROR_CODES = frozenset({
 class CLIError(RuntimeError):
     """Stable command failure that never includes paths or remote response text."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, status: int | None = None):
         super().__init__(code)
         self.code = code
+        # The HTTP status when the API itself answered with an error.
+        self.status = status
 
 
 def _positive_int(value: str) -> int:
@@ -621,7 +623,7 @@ def _http_request(
         max_response_bytes=max_response_bytes,
     )
     if not 200 <= status < 300:
-        raise CLIError(_typed_api_error(raw))
+        raise CLIError(_typed_api_error(raw), status)
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError):
@@ -1358,23 +1360,44 @@ def _service(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     return report, service.render(report), 0
 
 
+# Failures that say nothing about the note: the API is unreachable, or the model provider is.
+_TRANSIENT_API_ERRORS = frozenset({"api_unavailable", "token_unavailable", "unauthorized", "provider_unavailable"})
+
+
 class _CaptureApi:
-    """Capture's API calls; one the API refuses or cannot answer counts as not completed and is retried."""
+    """Capture's API calls.
+
+    ``False`` or ``None`` mean "not done yet, try again": the API is unreachable or answered 5xx.
+    Any other refusal of the note raises ``capture.Rejected`` with the API's error code.
+    """
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
 
+    @staticmethod
+    def _transient(exc: CLIError) -> bool:
+        from lifecontext.capture import Rejected
+
+        if exc.code in _TRANSIENT_API_ERRORS or (exc.status or 0) >= 500:
+            return False
+        raise Rejected(exc.code) from None
+
     def _completed(self, args: argparse.Namespace, receipt: dict[str, object]) -> bool:
+        from lifecontext.capture import Rejected
+
         operation = _get(args, "/v1/operations/" + quote(str(receipt["operation_id"]), safe=""))
-        return operation.get("state") == "completed"
+        state = operation.get("state")
+        if state in {"permanent_failed", "cancelled"}:
+            raise Rejected(f"operation_{state}")
+        return state == "completed"
 
     def retain(self, source_id: str, raw: bytes, key: str) -> bool:
         args = argparse.Namespace(**{**vars(self.args), "source_id": source_id, "source_version": 1,
                                      "idempotency_key": key})
         try:
             return self._completed(args, _retain(args, raw, None))
-        except CLIError:
-            return False
+        except CLIError as exc:
+            return self._transient(exc)
 
     def correct(self, source_id: str, expected_version: int, raw: bytes, key: str) -> bool:
         args = argparse.Namespace(**{**vars(self.args), "idempotency_key": key})
@@ -1383,14 +1406,15 @@ class _CaptureApi:
                 "action": "correct", "source_id": source_id, "expected_version": expected_version,
                 "content": raw.decode("utf-8")})
             return self._completed(args, receipt)
-        except CLIError:
-            return False
+        except CLIError as exc:
+            return self._transient(exc)
 
     def evidence(self, source_id: str, version: int) -> dict[str, object] | None:
         try:
             return _get(self.args, f"/v1/evidence/{quote(source_id, safe='')}?" + urlencode({
                 "version": version, "include_content": "false"}))
-        except CLIError:
+        except CLIError as exc:
+            self._transient(exc)
             return None
 
 
