@@ -46,11 +46,42 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-# The CouchDB URL must be this machine or HTTPS: the admin password goes over it.
-case "$url" in
-http://127.0.0.1:* | http://localhost:* | https://*) ;;
-*) die "COUCHDB_URL must be http://127.0.0.1:PORT, http://localhost:PORT or https://..." ;;
-esac
+# The admin password goes to this URL, so it must name this machine in plain http (127.0.0.1,
+# localhost or [::1] with a numeric port) or any host over https. Anything after the host must
+# start with a slash, and no URL may carry a user name (an "@" would make the real host the
+# part after it).
+valid_url() {
+	case "$1" in
+	*@*) return 1 ;;
+	http://* | https://*) ;;
+	*) return 1 ;;
+	esac
+	scheme=${1%%://*}
+	rest=${1#*://}
+	authority=${rest%%/*}
+	case "$scheme" in
+	http)
+		case "$authority" in
+		127.0.0.1:* | localhost:* | '[::1]:'*) ;;
+		*) return 1 ;;
+		esac
+		port=${authority##*:}
+		case "$port" in "" | *[!0-9]*) return 1 ;; esac
+		;;
+	https)
+		host=${authority%%:*}
+		case "$host" in "" | *[!A-Za-z0-9.-]*) return 1 ;; esac
+		case "$authority" in
+		*:*)
+			port=${authority#*:}
+			case "$port" in "" | *[!0-9]*) return 1 ;; esac
+			;;
+		esac
+		;;
+	esac
+}
+valid_url "$url" || die "COUCHDB_URL must be http://127.0.0.1:PORT, http://localhost:PORT, http://[::1]:PORT or https://HOST[:PORT], without a user name"
+url=${url%/}
 case "$database" in
 [a-z]*) ;;
 *) die "the database name must start with a lowercase letter" ;;

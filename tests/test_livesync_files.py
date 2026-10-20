@@ -6,6 +6,7 @@ import base64
 import configparser
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -220,6 +221,59 @@ class InitScriptTests(unittest.TestCase):
                 result = self.run_script(*arguments, url=url)
                 self.assertEqual(result.returncode, 1)
         self.assertFalse(self.argv.exists())
+
+    def test_the_url_must_really_name_this_machine_before_the_admin_password_is_sent(self) -> None:
+        port = self.server.server_address[1]
+        for url in (
+            f"http://127.0.0.1:{port}@evil.example",  # the real host is after the "@"
+            f"http://127.0.0.1:{port}@evil.example/",
+            f"http://localhost:{port}@127.0.0.1:{port}",
+            f"http://user:secret@127.0.0.1:{port}",
+            f"http://127.0.0.1:{port}.evil.example",
+            f"http://127.0.0.1.evil.example:{port}",
+            f"http://localhost.evil.example:{port}",
+            f"http://127.0.0.1:{port}#@evil.example",
+            f"http://127.0.0.1:{port}?@evil.example",
+            f"http://127.0.0.1:{port}\\@evil.example",
+            f"http://127.0.0.1:{port}:evil",
+            "http://127.0.0.1",
+            "http://127.0.0.1:/",
+            "http://[::1]:abc",
+            "http://example.invalid:5984",
+            "ftp://127.0.0.1:5984",
+            "https://secure@evil.example/",
+            "https://evil.example:12x",
+            "https://:5984",
+            "127.0.0.1:5984",
+        ):
+            with self.subTest(url=url):
+                result = self.run_script(url=url)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("COUCHDB_URL must be", result.stderr)
+        self.assertFalse(self.argv.exists())
+
+    def test_loopback_and_https_urls_are_accepted_with_or_without_a_trailing_slash(self) -> None:
+        for url in (self.url, self.url + "/"):
+            with self.subTest(url=url):
+                self.assertEqual(self.run_script(url=url).returncode, 0)
+
+    def test_the_url_check_accepts_the_forms_it_documents(self) -> None:
+        text = (LIVESYNC / "init-couchdb.sh").read_text()
+        function = re.search(r"^valid_url\(\) \{\n.*?^\}\n", text, re.MULTILINE | re.DOTALL).group(0)
+        harness = self.root / "valid_url.sh"
+        harness.write_text(function + '\nvalid_url "$1"\n')
+        for url, valid in (
+            ("http://127.0.0.1:5984", True), ("http://127.0.0.1:5984/", True), ("http://localhost:5984", True),
+            ("http://[::1]:5984", True), ("http://127.0.0.1:5984/couch", True),
+            ("https://hub.example.org", True), ("https://hub.example.org:8443/", True),
+            ("http://[::1]:5984@evil.example", False), ("https://hub.example.org@evil.example", False),
+            ("http://hub.example.org:5984", False), ("http://[::2]:5984", False),
+        ):
+            with self.subTest(url=url):
+                result = subprocess.run(["sh", str(harness), url], capture_output=True, timeout=30, check=False)
+                self.assertEqual(result.returncode == 0, valid)
+
+    def test_a_bad_env_file_is_refused_before_anything_is_sent(self) -> None:
         self.env_file.write_text('COUCHDB_USER=admin\nCOUCHDB_PASSWORD=has"quote\n')
         self.assertEqual(self.run_script().returncode, 1)
         self.assertFalse(self.argv.exists())
