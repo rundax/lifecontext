@@ -50,8 +50,8 @@ class CaptureApi(Protocol):
     """The API calls capture needs.
 
     ``retain`` and ``correct`` return True when the mutation completed and False when it is not
-    done yet (the API is unreachable or failing: try again later); ``evidence`` returns None then.
-    Each raises ``Rejected`` with the API's error code when the API refused the note.
+    done yet (the API is unreachable or failing: try again later), and raise ``Rejected`` with the
+    API's error code when the API refused the note. ``evidence`` returns None when it cannot answer.
     """
 
     def retain(self, source_id: str, raw: bytes, key: str) -> bool: ...
@@ -143,12 +143,23 @@ class Capture:
         return "failed"
 
     def submit(self, relative: str, item: dict[str, Any]) -> str:
-        """Send the pending submission: ``captured``, ``pending`` (try again later) or ``failed`` (refused)."""
+        """Send the pending submission.
+
+        Returns ``captured``; ``pending`` (try again later); ``failed`` (the API refused it); or
+        ``dropped`` (its snapshot is gone or damaged, so the submission is forgotten and the note,
+        if it still exists, is snapshotted again).
+        """
         pending = item["pending"]
         snapshot = self.directory / pending["snapshot"]
-        raw = read_note(snapshot)
-        if digest(raw) != pending["hash"]:
-            raise ValueError("snapshot_mismatch")
+        try:
+            raw = read_note(snapshot)
+            if digest(raw) != pending["hash"]:
+                raise ValueError("snapshot_mismatch")
+        except (FileNotFoundError, ValueError):
+            del item["pending"]
+            self.save()
+            snapshot.unlink(missing_ok=True)
+            return "dropped"
         try:
             if pending["version"] == 1:
                 done = self.api.retain(item["source"], raw, pending["key"])
@@ -161,6 +172,8 @@ class Capture:
             return "pending"
         if any(evidence.get(field) != expected for field, expected in (
                 ("source_id", item["source"]), ("source_version", pending["version"]), ("sha256", pending["hash"]))):
+            # The mutation did complete, so the source is at this version now; a later edit corrects from it.
+            item["version"] = pending["version"]
             return self.reject(relative, item, "evidence_mismatch")
         item.update(version=pending["version"], imported_hash=pending["hash"])
         item.pop("rejected", None)
@@ -179,7 +192,7 @@ class Capture:
                     outcome = self.submit(relative, item)
                 except (OSError, ValueError):
                     outcome = "pending"
-                if outcome != "failed":
+                if outcome in counts:
                     counts[outcome] += 1
         if self.inbox.is_dir() and not self.inbox.is_symlink():
             self.scan_inbox(counts)
@@ -221,7 +234,7 @@ class Capture:
                                        "snapshot": snapshot, "key": "obsidian:" + uuid.uuid4().hex}
                     self.save()
                     outcome = self.submit(relative, item)
-                    if outcome != "failed":
+                    if outcome in counts:
                         counts[outcome] += 1
                 except (OSError, ValueError):
                     counts["skipped"] += 1

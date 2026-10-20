@@ -259,6 +259,44 @@ class CaptureTests(unittest.TestCase):
         self.api.corrupt = True
         report = self.scan()
         self.assertEqual(report["failures"], [{"note": "Lake.md", "code": "evidence_mismatch"}])
+        # The source did reach version 1, so the next edit corrects it instead of retaining it again.
+        self.api.corrupt = False
+        note = self.inbox / "Lake.md"
+        note.write_text(NOTE + "More.\n", encoding="utf-8")
+        self.clock.advance(30)
+        self.scan()
+        self.clock.advance(SETTLE_SECONDS + 1)
+        fixed = self.scan()
+        self.assertEqual((fixed["captured"], fixed["failed"]), (1, 0))
+        self.assertEqual(self.api.calls[-1][0], "correct")
+        self.assertEqual(self.api.calls[-1][2], 1)
+
+    def test_a_pending_submission_whose_snapshot_is_gone_or_damaged_is_dropped_and_redone(self) -> None:
+        for damage in ("missing", "changed"):
+            with self.subTest(damage=damage):
+                name = f"{damage}.md"
+                self.write(name)
+                self.scan()
+                self.clock.advance(SETTLE_SECONDS + 1)
+                self.api.refuse = True
+                self.assertEqual(self.scan()["pending"], 1)
+                first_key = self.api.calls[-1][2]
+                directory = state_directory(self.paths)
+                snapshot = next(path for path in directory.glob("*.md"))
+                if damage == "missing":
+                    snapshot.unlink()
+                else:
+                    snapshot.write_text("not what was snapshotted", encoding="utf-8")
+                self.api.refuse = False
+                self.clock.advance(30)
+                recovered = self.scan()
+                self.assertEqual((recovered["captured"], recovered["pending"], recovered["failed"]), (1, 0, 0))
+                self.assertNotEqual(self.api.calls[-1][2], first_key)
+                source_id = "obsidian_" + hashlib.sha256(name.encode()).hexdigest()
+                self.assertEqual(self.api.sources[source_id], [hashlib.sha256(NOTE.encode()).hexdigest()])
+                self.assertEqual(sorted(path.name for path in directory.iterdir()), ["lock", "state.json"])
+                self.clock.advance(30)
+                self.assertEqual(self.scan()["captured"], 0)
 
     def test_note_text_left_in_the_state_folder_by_an_interrupted_run_is_removed(self) -> None:
         self.write("Lake.md")
@@ -376,7 +414,10 @@ class CaptureApiTests(unittest.TestCase):
         for error in (cli.CLIError("api_unavailable"), cli.CLIError("token_unavailable"),
                       cli.CLIError("unauthorized"), cli.CLIError("provider_unavailable", 503),
                       cli.CLIError("retain_failed", 503), cli.CLIError("catalog_busy", 503),
-                      cli.CLIError("internal_error", 500)):
+                      cli.CLIError("internal_error", 500), cli.CLIError("api_error", 400),
+                      cli.CLIError("invalid_api_response"), cli.CLIError("host_not_allowed", 403),
+                      cli.CLIError("origin_not_allowed", 403), cli.CLIError("unsafe_path", 403),
+                      cli.CLIError("unsafe_permissions", 403)):
             def down(*args, error=error, **kwargs):
                 raise error
 
@@ -396,7 +437,7 @@ class CaptureApiTests(unittest.TestCase):
         api = cli._CaptureApi(cli._build_parser().parse_args(["capture", "--once"]))
         for error in (cli.CLIError("source_conflict", 409), cli.CLIError("conflict", 409),
                       cli.CLIError("invalid_source_text", 422), cli.CLIError("body_too_large", 413),
-                      cli.CLIError("body_too_large"), cli.CLIError("evidence_unavailable", 404)):
+                      cli.CLIError("body_too_large"), cli.CLIError("invalid_request", 422)):
             def refusing(*args, error=error, **kwargs):
                 raise error
 
@@ -406,8 +447,8 @@ class CaptureApiTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, error.code)
                 with self.assertRaises(Rejected):
                     api.correct("obsidian_a", 1, b"note", "k")
-                with self.assertRaises(Rejected):
-                    api.evidence("obsidian_a", 1)
+                # The mutation already completed by then, so the evidence check never refuses the note.
+                self.assertIsNone(api.evidence("obsidian_a", 1))
 
         for state in ("permanent_failed", "cancelled"):
             def finished(args, method, target, state=state, **kwargs):

@@ -1360,15 +1360,21 @@ def _service(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     return report, service.render(report), 0
 
 
-# Failures that say nothing about the note: the API is unreachable, or the model provider is.
-_TRANSIENT_API_ERRORS = frozenset({"api_unavailable", "token_unavailable", "unauthorized", "provider_unavailable"})
+# Failures that say nothing about the note and may differ on the next run: the API or the model provider
+# is unreachable, the answer was not understood, or the environment refused (host, origin, paths,
+# permissions). Every other API error, such as invalid_request or a conflict, refuses the note itself.
+_TRANSIENT_API_ERRORS = frozenset({
+    "api_unavailable", "token_unavailable", "unauthorized", "provider_unavailable", "api_error",
+    "invalid_api_response", "host_not_allowed", "origin_not_allowed", "unsafe_path", "unsafe_permissions",
+})
 
 
 class _CaptureApi:
     """Capture's API calls.
 
     ``False`` or ``None`` mean "not done yet, try again": the API is unreachable or answered 5xx.
-    Any other refusal of the note raises ``capture.Rejected`` with the API's error code.
+    Any other refusal of a retain or correct raises ``capture.Rejected`` with the API's error code;
+    the evidence check never does.
     """
 
     def __init__(self, args: argparse.Namespace):
@@ -1413,8 +1419,9 @@ class _CaptureApi:
         try:
             return _get(self.args, f"/v1/evidence/{quote(source_id, safe='')}?" + urlencode({
                 "version": version, "include_content": "false"}))
-        except CLIError as exc:
-            self._transient(exc)
+        except CLIError:
+            # The mutation completed, so whatever went wrong here is for a later run to settle: repeating
+            # the mutation with the same key replays its result.
             return None
 
 
