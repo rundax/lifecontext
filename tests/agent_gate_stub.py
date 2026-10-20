@@ -1,7 +1,8 @@
 """A stand-in for lifecontext.cli.main behind lifecontext.agent_gate, for the gate and remote tests.
 
 Run as a script it is the forced command: `python agent_gate_stub.py` reads
-SSH_ORIGINAL_COMMAND like `lifecontext agent-gate`, but runs `stub_main`.
+SSH_ORIGINAL_COMMAND like `lifecontext agent-gate`, but runs `stub_main`. Options of
+the forced command come from the JSON in GATE_OPTIONS.
 """
 
 from __future__ import annotations
@@ -55,4 +56,5 @@ def stub_main(argv) -> int:
 if __name__ == "__main__":
     from lifecontext import agent_gate
 
-    sys.exit(agent_gate.run(main=stub_main))
+    # GATE_OPTIONS stands for the options on the forced command: {"allow_delete": true, "max_calls": 2}
+    sys.exit(agent_gate.run(main=stub_main, **json.loads(os.environ.get("GATE_OPTIONS", "{}"))))

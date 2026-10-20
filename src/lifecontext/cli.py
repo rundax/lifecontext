@@ -283,7 +283,12 @@ def _build_parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="start the API on loopback")
     _shared_options(serve)
 
-    commands.add_parser("agent-gate", help="SSH forced command that runs only everyday agent commands")
+    agent_gate = commands.add_parser("agent-gate", help="SSH forced command that runs only everyday agent commands")
+    agent_gate.add_argument("--port", type=_port, default=argparse.SUPPRESS, help="loopback API port (default: 8765)")
+    agent_gate.add_argument("--allow-delete", action="store_true",
+                            help="also allow curate prepare_delete, delete, prepare_forget and forget")
+    agent_gate.add_argument("--max-calls", type=_positive_int, default=4,
+                            help="calls that may run at once (default: 4); more get busy")
 
     status = commands.add_parser("status", help="show API and dependency readiness")
     _shared_options(status)
@@ -1597,7 +1602,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "agent-gate":
         from lifecontext.agent_gate import run as run_agent_gate
 
-        return run_agent_gate()
+        return run_agent_gate(allow_delete=args.allow_delete, max_calls=args.max_calls, port=args.port)
     if args.command == "preflight":
         return _preflight(args)
     if args.command == "serve":

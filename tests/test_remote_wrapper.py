@@ -6,6 +6,7 @@ runs the gate locally, as sshd would for a forced command, with the stand-in CLI
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -291,6 +292,18 @@ class DownloadTests(RemoteTestCase):
                 self.assertEqual((result.returncode, result.stdout), (1, b'{"error":"output_unavailable"}\n'))
                 self.assertEqual(self.leftovers(), [])
 
+    def test_without_random_bytes_a_private_directory_is_used(self) -> None:
+        (self.tools / "od").write_text("#!/bin/sh\nexit 1\n")
+        (self.tools / "od").chmod(0o755)
+        result = self.download(frame(self.ORIGINAL, b"ok\n"), "out.bin", "--json")
+        self.assertEqual((result.returncode, result.stdout), (0, b"ok\n"), result.stderr)
+        self.assertEqual((self.work / "out.bin").read_bytes(), self.ORIGINAL)
+        self.assertEqual(self.leftovers(), ["out.bin"])
+        for canned, status in ((b'{"error":"api_unavailable"}\n', 1), (b"damaged", 0)):
+            result = self.download(canned, "other.bin", "--json", status=status)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(self.leftovers(), ["out.bin"])
+
     def test_an_interrupt_removes_the_partial_files(self) -> None:
         process = subprocess.Popen([str(self.tools / "lifecontext"), "documents", "download", "src_a", "out.bin"],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.work, start_new_session=True,
@@ -313,6 +326,9 @@ class EndToEndTests(RemoteTestCase):
         self.env["FAKE_SSH_GATE"] = "1"
         self.stage_root = self.remote_home / ".local" / "state" / "lifecontext" / "agent-stage"
 
+    def stage_dirs(self) -> list[str]:
+        return sorted(name for name in os.listdir(self.stage_root) if name.startswith("stage-"))
+
     def run_ok(self, *args: str, stdin: bytes = b"") -> bytes:
         result = self.run_wrapper(*args, stdin=stdin)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -329,19 +345,38 @@ class EndToEndTests(RemoteTestCase):
         output = json.loads(self.run_ok("documents", "import", str(document), "--mime", "application/pdf"))
         (staged_path, staged), = output["files"].items()
         self.assertEqual((output["args"][:2], Path(staged_path).name, staged["size"]), (["documents", "import"], "Звіт, кв. 3.pdf", 7))
-        self.assertEqual(os.listdir(self.stage_root), [])
+        self.assertEqual(self.stage_dirs(), [])
 
     def test_a_download_is_written_on_the_host(self) -> None:
         result = self.run_ok("documents", "download", "src_a", "Копія.bin", "--json")
         self.assertEqual(json.loads(result), {"source_id": "src_a", "size_bytes": len(agent_gate_stub.ORIGINAL)})
         self.assertEqual((self.work / "Копія.bin").read_bytes(), agent_gate_stub.ORIGINAL)
-        self.assertEqual(os.listdir(self.stage_root), [])
+        self.assertEqual(self.stage_dirs(), [])
         failed = self.run_wrapper("documents", "download", "fail_download", "other.bin", "--json")
         self.assertEqual((failed.returncode, failed.stdout), (1, b'{"error":"api_unavailable"}\n'))
         missing = self.run_wrapper("documents", "download", "no_file", "other.bin", "--json")
         self.assertEqual((missing.returncode, missing.stdout), (1, b'{"error":"output_unavailable"}\n'))
         self.assertEqual(self.leftovers(), ["Копія.bin"])
-        self.assertEqual(os.listdir(self.stage_root), [])
+        self.assertEqual(self.stage_dirs(), [])
+
+    def test_deleting_needs_the_forced_command_to_allow_it(self) -> None:
+        for action in ("prepare_delete", "delete", "prepare_forget", "forget"):
+            with self.subTest(action=action):
+                result = self.run_wrapper("curate", action, "src_a", "--json")
+                self.assertEqual((result.returncode, result.stdout), (1, NOT_ALLOWED))
+        allowed = {"GATE_OPTIONS": json.dumps({"allow_delete": True})}
+        result = self.run_wrapper("curate", "delete", "src_a", "--json", env=allowed)
+        self.assertEqual((result.returncode, json.loads(result.stdout)["args"]), (0, ["curate", "delete", "src_a", "--json"]))
+
+    def test_a_busy_gate_answers_busy(self) -> None:
+        result = self.run_wrapper("status", "--json", env={"GATE_OPTIONS": json.dumps({"max_calls": 1})})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.stage_root.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(self.stage_root / "slot-0", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = self.run_wrapper("status", "--json", env={"GATE_OPTIONS": json.dumps({"max_calls": 1})})
+        self.assertEqual((result.returncode, result.stdout), (1, b'{"error":"busy"}\n'))
 
     def test_commands_outside_the_allowlist_are_refused(self) -> None:
         for args in (["init"], ["export", "bundle.out"], ["backup", "--json"], ["--json", "service", "status"]):

@@ -6,8 +6,11 @@
   to `lifecontext agent-gate`, the forced command of a dedicated key. The gate
   runs only `status`, `doctor`, `retain`, `recall`, `reflect`, `evidence`,
   `curate`, `relationships`, `documents`, `categories`, `wiki`, `brief`,
-  `operations` and `mcp`, refuses every other command and any server path, and
-  stages input files in a private directory it removes afterwards.
+  `operations` and `mcp`, refuses every other command, any server path and a
+  different `--port`, refuses `curate` delete and forget unless the forced
+  command says `--allow-delete`, runs at most `--max-calls` (4) calls at once,
+  keeps an audit log without arguments or content, and stages input files in a
+  private directory it removes afterwards.
   [docs/agents.md](docs/agents.md#agents-on-another-machine) has the setup.
 - `lifecontext capture --once [--inbox DIR] [--json]` turns settled Markdown
   notes in the vault's `Journal/Inbox` into journal entries through the API: a

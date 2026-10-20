@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -28,7 +30,7 @@ REFUSED = (
 )
 ALLOWED = (
     "status", "doctor", "retain src_a 1", "recall --query q", "reflect --query q", "evidence src_a --version 1",
-    "curate delete src_a", "relationships list", "documents list", "categories list", "wiki list", "brief",
+    "curate reindex src_a", "relationships list", "documents list", "categories list", "wiki list", "brief",
     f"operations get {OP_ID}", "mcp",
 )
 NOT_ALLOWED = '{"error":"command_not_allowed"}\n'
@@ -53,21 +55,29 @@ class GateTestCase(unittest.TestCase):
         agent_gate_stub.CALLS.clear()
 
     def leftovers(self) -> list[str]:
-        return sorted(os.listdir(self.stage_root)) if self.stage_root.exists() else []
+        """Staging directories still there (the slot files stay)."""
+        if not self.stage_root.exists():
+            return []
+        return sorted(name for name in os.listdir(self.stage_root) if not name.startswith("slot-"))
 
-    def gate(self, command: str | None, stdin: bytes = b"") -> tuple[int, bytes]:
-        """Run the gate in this process with the stand-in CLI."""
+    def gate(self, command: str | None, stdin: bytes | io.BufferedReader = b"", **options) -> tuple[int, bytes]:
+        """Run the gate in this process with the stand-in CLI; options are those of the forced command."""
         output = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", write_through=True)
+        stream = io.BytesIO(stdin) if isinstance(stdin, bytes) else stdin
         with (
             mock.patch.dict(os.environ, {"HOME": str(self.home)}),
-            mock.patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8")),
+            mock.patch.object(sys, "stdin", io.TextIOWrapper(stream, encoding="utf-8")),
             mock.patch.object(sys, "stdout", output),
         ):
             os.environ.pop("SSH_ORIGINAL_COMMAND", None)
             if command is not None:
                 os.environ["SSH_ORIGINAL_COMMAND"] = command
-            code = agent_gate.run(main=agent_gate_stub.stub_main)
+            code = agent_gate.run(main=agent_gate_stub.stub_main, **options)
         return code, output.buffer.getvalue()
+
+    def audit_log(self) -> list[str]:
+        path = self.home / ".local" / "state" / "lifecontext" / "agent-gate.log"
+        return path.read_text().splitlines() if path.exists() else []
 
     def report(self, command: str, stdin: bytes = b"") -> dict:
         code, output = self.gate(command, stdin)
@@ -93,8 +103,8 @@ class AllowlistTests(GateTestCase):
         self.assertEqual(agent_gate_stub.CALLS, [])
 
     def test_root_options_before_the_command_are_fine(self) -> None:
-        self.assertEqual(self.gate("lifecontext --json --port 9000 status")[0], 0)
-        self.assertEqual(agent_gate_stub.CALLS, [["--json", "--port", "9000", "status"]])
+        self.assertEqual(self.gate("lifecontext --json --port 8765 status")[0], 0)
+        self.assertEqual(agent_gate_stub.CALLS, [["--json", "--port", "8765", "status"]])
 
     def test_help_is_allowed(self) -> None:
         for command in ("lifecontext --help", "lifecontext retain --help", "lifecontext documents import --help"):
@@ -309,6 +319,203 @@ class DownloadTests(GateTestCase):
                              b"lifecontext-file 1 4 0\ndata")
 
 
+class DeleteTests(GateTestCase):
+    def test_deleting_and_forgetting_are_refused_by_default(self) -> None:
+        for action in sorted(agent_gate.DELETING_ACTIONS):
+            for command in (f"lifecontext curate {action} src_a", f"lifecontext --json curate {action} src_a --expected-version 1"):
+                with self.subTest(command=command):
+                    self.assertEqual(self.gate(command), (1, NOT_ALLOWED.encode()))
+        self.assertEqual(agent_gate_stub.CALLS, [])
+
+    def test_the_other_curate_actions_still_run(self) -> None:
+        for action in ("correct", "reindex"):
+            self.assertEqual(self.gate(f"lifecontext curate {action} src_a")[0], 0)
+        self.assertEqual(agent_gate_stub.CALLS, [["curate", "correct", "src_a"], ["curate", "reindex", "src_a"]])
+
+    def test_the_forced_command_can_allow_them(self) -> None:
+        for action in sorted(agent_gate.DELETING_ACTIONS):
+            with self.subTest(action=action):
+                agent_gate_stub.CALLS.clear()
+                self.assertEqual(self.gate(f"lifecontext curate {action} src_a", allow_delete=True)[0], 0)
+                self.assertEqual(agent_gate_stub.CALLS, [["curate", action, "src_a"]])
+
+    def test_the_actions_listed_are_the_ones_the_cli_has(self) -> None:
+        actions = next(a for a in cli._build_parser()._subparsers._group_actions[0].choices["curate"]._actions
+                       if a.dest == "action").choices
+        self.assertEqual(set(actions) - agent_gate.DELETING_ACTIONS, {"correct", "reindex"})
+        self.assertLessEqual(agent_gate.DELETING_ACTIONS, set(actions))
+
+
+class PortTests(GateTestCase):
+    def test_the_port_is_the_gates_own(self) -> None:
+        for command in ("--port 9000 status", "status --port 9000", "mcp --port 9000", "--port=9000 status",
+                        "--port 8765 --port 9000 status", "recall --query q --port 9001"):
+            with self.subTest(command=command):
+                self.assertEqual(self.gate(f"lifecontext {command}"), (1, NOT_ALLOWED.encode()))
+        self.assertEqual(agent_gate_stub.CALLS, [])
+        for command in ("--port 8765 status", "status --port 8765", "mcp --port 8765"):
+            with self.subTest(command=command):
+                self.assertEqual(self.gate(f"lifecontext {command}")[0], 0)
+
+    def test_a_gate_with_another_port_runs_every_command_against_it(self) -> None:
+        self.assertEqual(self.gate("lifecontext status", port=9000)[0], 0)
+        self.assertEqual(self.gate("lifecontext --port 9000 status", port=9000)[0], 0)
+        self.assertEqual(self.gate("lifecontext mcp --port 9000", port=9000)[0], 0)
+        self.assertEqual(agent_gate_stub.CALLS, [
+            ["--port", "9000", "status"], ["--port", "9000", "--port", "9000", "status"],
+            ["--port", "9000", "mcp", "--port", "9000"],
+        ])
+        agent_gate_stub.CALLS.clear()
+        for command in ("status --port 8765", "--port 8765 status", "status --port 9001", "--port 9001 mcp"):
+            with self.subTest(command=command):
+                self.assertEqual(self.gate(f"lifecontext {command}", port=9000), (1, NOT_ALLOWED.encode()))
+        self.assertEqual(agent_gate_stub.CALLS, [])
+
+
+class LoadTests(GateTestCase):
+    def hold(self, *numbers: int) -> None:
+        """Hold these slots, as other running calls would."""
+        self.stage_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for number in numbers:
+            descriptor = os.open(self.stage_root / f"slot-{number}", os.O_RDWR | os.O_CREAT, 0o600)
+            self.addCleanup(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_the_default_is_four_calls_at_a_time(self) -> None:
+        self.hold(0, 1, 2)
+        self.assertEqual(self.gate("lifecontext status")[0], 0)
+        self.hold(3)
+        self.assertEqual(self.gate("lifecontext status"), (1, b'{"error":"busy"}\n'))
+        self.assertEqual(len(agent_gate_stub.CALLS), 1)
+
+    def test_every_kind_of_call_needs_a_slot(self) -> None:
+        self.hold(0, 1)
+        for command in ("status", "mcp", "retain src_a 1 --input @stdin:a.txt", "documents download src_a @stdout"):
+            with self.subTest(command=command):
+                self.assertEqual(self.gate(f"lifecontext {command}", b"x", max_calls=2), (1, b'{"error":"busy"}\n'))
+        self.assertEqual(agent_gate_stub.CALLS, [])
+        self.assertEqual(self.leftovers(), [])
+
+    def test_help_and_refusals_need_no_slot(self) -> None:
+        self.hold(0)
+        self.assertEqual(self.gate("lifecontext --help", max_calls=1)[0], 0)
+        self.assertEqual(self.gate("lifecontext init", max_calls=1), (1, NOT_ALLOWED.encode()))
+
+    def test_a_finished_call_gives_its_slot_back(self) -> None:
+        for _ in range(6):
+            self.assertEqual(self.gate("lifecontext status", max_calls=1)[0], 0)
+        with (
+            mock.patch.object(agent_gate_stub, "stub_main", side_effect=RuntimeError("boom")),
+            contextlib.suppress(RuntimeError),
+        ):
+            self.gate("lifecontext status", max_calls=1)
+        self.assertEqual(self.gate("lifecontext status", max_calls=1)[0], 0)
+
+    def test_an_mcp_session_holds_its_slot_while_it_lasts(self) -> None:
+        held = []
+
+        def session(argv):
+            for number in (0, 1):
+                descriptor = os.open(self.stage_root / f"slot-{number}", os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held.append(False)
+                except BlockingIOError:
+                    held.append(True)
+                finally:
+                    os.close(descriptor)
+            return 0
+
+        with mock.patch.object(agent_gate_stub, "stub_main", session):
+            self.assertEqual(self.gate("lifecontext mcp", max_calls=2)[0], 0)
+        self.assertEqual(held, [True, False])  # slot-0 was in use; slot-1 never was
+        self.assertEqual(self.gate("lifecontext status", max_calls=1)[0], 0)
+
+    def test_a_stalled_input_times_out_and_is_cleaned_up(self) -> None:
+        read, write = os.pipe()
+        self.addCleanup(os.close, write)
+        stalled = os.fdopen(read, "rb")
+        self.addCleanup(stalled.close)
+        started = time.monotonic()
+        with mock.patch.object(agent_gate, "INPUT_DEADLINE_SECONDS", 1):
+            result = self.gate("lifecontext retain src_a 1 --input @stdin:a.txt", stalled)
+        self.assertEqual(result, (1, b'{"error":"input_timeout"}\n'))
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual((agent_gate_stub.CALLS, self.leftovers()), ([], []))
+        self.assertEqual(signal.getsignal(signal.SIGALRM), signal.SIG_DFL)
+        self.assertEqual(signal.alarm(0), 0)
+
+    def test_input_that_arrives_in_time_is_taken(self) -> None:
+        with mock.patch.object(agent_gate, "INPUT_DEADLINE_SECONDS", 30):
+            self.assertEqual(self.gate("lifecontext retain src_a 1 --input @stdin:a.txt", b"x")[0], 0)
+        self.assertEqual(signal.alarm(0), 0)
+
+
+class AuditLogTests(GateTestCase):
+    LINE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00 command=(\S+) action=(\S+) refused=(\S+) status=(\d+)")
+
+    def entries(self) -> list[tuple[str, ...]]:
+        return [self.LINE.fullmatch(line).groups() for line in self.audit_log()]
+
+    def test_only_the_command_the_action_the_refusal_and_the_status_are_logged(self) -> None:
+        secrets = ("SECRET-QUERY", "secret_src", "SECRET-NAME", "SECRET-WORD", "SECRET BODY", "secret-key", "secret.pdf")
+        self.gate("lifecontext retain secret_src 1 --input - --idempotency-key secret-key --json", b"SECRET BODY")
+        self.gate("lifecontext recall --query SECRET-QUERY")
+        self.gate("lifecontext retain secret_src 1 --input @stdin:SECRET-NAME.txt", b"SECRET BODY")
+        self.gate("lifecontext documents import @stdin:secret.pdf --filename secret.pdf", b"SECRET BODY")
+        self.gate("lifecontext curate delete secret_src --expected-version 3")
+        self.gate("lifecontext curate correct secret_src --input @stdin:secret.pdf", b"SECRET BODY")
+        self.gate("lifecontext documents download secret_src @stdout")
+        self.gate("lifecontext init --vault /home/SECRET-WORD")
+        self.gate("lifecontext SECRET-WORD --query SECRET-QUERY")
+        self.gate("lifecontext retain secret_src 1 --input /etc/SECRET-WORD")
+        self.gate("lifecontext retain secret_src 1 --input '@stdin:.SECRET-NAME'", b"SECRET BODY")
+        self.gate("SECRET-WORD status")
+        self.gate("lifecontext recall --query 'SECRET-QUERY")
+        self.gate(None)
+        text = "\n".join(self.audit_log())
+        for secret in secrets:
+            self.assertNotIn(secret, text)
+        self.assertEqual(self.entries(), [
+            ("retain", "-", "-", "0"), ("recall", "-", "-", "0"), ("retain", "-", "-", "0"), ("documents", "-", "-", "0"),
+            ("curate", "delete", "command_not_allowed", "1"), ("curate", "correct", "-", "0"), ("documents", "-", "-", "0"),
+            ("init", "-", "command_not_allowed", "1"), ("other", "-", "command_not_allowed", "1"),
+            ("retain", "-", "path_not_allowed", "1"), ("retain", "-", "invalid_request", "1"),
+            ("-", "-", "command_not_allowed", "1"), ("-", "-", "invalid_request", "1"), ("-", "-", "command_not_allowed", "1"),
+        ])
+
+    def test_the_status_and_busy_are_logged(self) -> None:
+        with mock.patch.object(agent_gate_stub, "stub_main", return_value=3):
+            self.gate("lifecontext wiki lint --fail-on error")
+        descriptor = os.open(self.stage_root / "slot-0", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.gate("lifecontext status", max_calls=1)
+        self.assertEqual(self.entries(), [("wiki", "-", "-", "3"), ("status", "-", "busy", "1")])
+
+    def test_the_file_is_private_and_rotates(self) -> None:
+        path = self.home / ".local" / "state" / "lifecontext" / "agent-gate.log"
+        with mock.patch.object(agent_gate, "LOG_LIMIT_BYTES", 300):
+            for _ in range(12):
+                self.gate("lifecontext init")
+        rotated = path.with_name("agent-gate.log.1")
+        self.assertTrue(rotated.exists())
+        self.assertLess(path.stat().st_size, 600)
+        for logged in (path, rotated):
+            self.assertEqual(oct(logged.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(path.parent.stat().st_mode & 0o777), "0o700")
+        self.assertTrue(0 < len(self.entries()) + len(rotated.read_text().splitlines()) <= 12)
+
+    def test_a_log_that_cannot_be_written_does_not_stop_the_call(self) -> None:
+        path = self.home / ".local" / "state" / "lifecontext" / "agent-gate.log"
+        path.mkdir(parents=True)
+        self.assertEqual(self.gate("lifecontext status")[0], 0)
+
+    def test_every_command_the_log_names_is_one_the_cli_has(self) -> None:
+        choices = cli._build_parser()._subparsers._group_actions[0].choices
+        self.assertEqual(set(choices), agent_gate.KNOWN_COMMANDS)
+
+
 class ProcessTests(unittest.TestCase):
     """The gate as a real process: stdin through a pipe, signals and the CLI wiring."""
 
@@ -332,6 +539,15 @@ class ProcessTests(unittest.TestCase):
         return subprocess.Popen([sys.executable, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=env)
 
+    def stage_dirs(self) -> list[str]:
+        return sorted(name for name in os.listdir(self.stage_root) if name.startswith("stage-"))
+
+    def wait_for(self, path: Path) -> None:
+        deadline = time.monotonic() + 120
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(path.exists())
+
     def test_binary_stdin_through_a_pipe(self) -> None:
         data = bytes(range(256)) * 1500
         process = self.command("lifecontext documents import @stdin:blob.bin", str(STUB))
@@ -339,7 +555,25 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
         (staged,) = json.loads(stdout)["files"].values()
         self.assertEqual(staged["size"], len(data))
-        self.assertEqual(os.listdir(self.stage_root), [])
+        self.assertEqual(self.stage_dirs(), [])
+
+    def test_a_killed_call_frees_its_slot(self) -> None:
+        options = {"GATE_OPTIONS": json.dumps({"max_calls": 1})}
+        ready = Path(self.temp.name) / "ready-busy"
+        holder = self.command("lifecontext mcp", str(STUB), STUB_READY=str(ready), **options)
+        self.addCleanup(holder.kill)
+        self.wait_for(ready)
+        busy = self.command("lifecontext status", str(STUB), **options)
+        stdout, stderr = busy.communicate(timeout=120)
+        self.assertEqual((busy.returncode, stdout), (1, b'{"error":"busy"}\n'), stderr)
+        holder.kill()
+        holder.wait(timeout=30)
+        for stream in (holder.stdin, holder.stdout, holder.stderr):
+            stream.close()
+        free = self.command("lifecontext status", str(STUB), **options)
+        stdout, stderr = free.communicate(timeout=120)
+        self.assertEqual(free.returncode, 0, stderr)
+        self.assertEqual(json.loads(stdout)["args"], ["status"])
 
     def test_signals_remove_the_directory(self) -> None:
         for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
@@ -354,23 +588,24 @@ class ProcessTests(unittest.TestCase):
                 while not ready.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(ready.exists())
-                self.assertEqual(len(os.listdir(self.stage_root)), 1)
+                self.assertEqual(len(self.stage_dirs()), 1)
                 process.send_signal(number)
                 process.wait(timeout=30)
                 with process.stdout, process.stderr:
                     stdout, stderr = process.stdout.read(), process.stderr.read()
                 self.assertEqual(process.returncode, 128 + number, stderr)
-                self.assertEqual((stdout, os.listdir(self.stage_root)), (b"", []))
+                self.assertEqual((stdout, self.stage_dirs()), (b"", []))
 
     def test_the_cli_runs_the_gate(self) -> None:
-        for ssh_command, status, expected in (
-            (None, 1, NOT_ALLOWED),
-            ("lifecontext init", 1, NOT_ALLOWED),
-            ("lifecontext agent-gate", 1, NOT_ALLOWED),
-            ("lifecontext --version", 0, None),
+        for ssh_command, options, status, expected in (
+            (None, [], 1, NOT_ALLOWED),
+            ("lifecontext init", [], 1, NOT_ALLOWED),
+            ("lifecontext init", ["--allow-delete", "--max-calls", "2", "--port", "9000"], 1, NOT_ALLOWED),
+            ("lifecontext agent-gate", [], 1, NOT_ALLOWED),
+            ("lifecontext --version", [], 0, None),
         ):
-            with self.subTest(command=ssh_command):
-                process = self.command(ssh_command, "-m", "lifecontext.cli", "agent-gate")
+            with self.subTest(command=ssh_command, options=options):
+                process = self.command(ssh_command, "-m", "lifecontext.cli", "agent-gate", *options)
                 stdout, stderr = process.communicate(timeout=120)
                 self.assertEqual((process.returncode, stderr), (status, b""), stdout)
                 if expected is not None:
@@ -378,6 +613,12 @@ class ProcessTests(unittest.TestCase):
                 else:
                     self.assertTrue(stdout.startswith(b"lifecontext "))
         self.assertFalse(self.stage_root.exists())
+
+    def test_the_options_of_the_gate_are_checked(self) -> None:
+        process = self.command(None, "-m", "lifecontext.cli", "agent-gate", "--max-calls", "0")
+        stdout, stderr = process.communicate(timeout=120)
+        self.assertEqual((process.returncode, stdout), (2, b""))
+        self.assertIn(b"--max-calls", stderr)
 
 
 if __name__ == "__main__":

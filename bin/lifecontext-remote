@@ -152,14 +152,26 @@ if [ -e "$out_host" ] || [ -L "$out_host" ]; then
 	fail destination_exists
 fi
 umask 077
-raw="$out_host.lifecontext-remote.${nonce:-$$}.raw"
-partial="$out_host.lifecontext-remote.${nonce:-$$}"
+raw=""
+partial=""
+work=""
 # shellcheck disable=SC2317 # called from the traps
 cleanup() {
-	rm -f "$raw" "$partial"
+	[ -z "$raw" ] || rm -f "$raw"
+	[ -z "$partial" ] || rm -f "$partial"
+	[ -z "$work" ] || rmdir "$work" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+if [ -n "$nonce" ]; then
+	raw="$out_host.lifecontext-remote.$nonce.raw"
+	partial="$out_host.lifecontext-remote.$nonce"
+else
+	# No random bytes from od: let mktemp pick a private directory next to DEST.
+	work=$(mktemp -d "$out_host.lifecontext-remote.XXXXXX") || fail output_unavailable
+	raw="$work/raw"
+	partial="$work/partial"
+fi
 
 status=0
 (set -C && "$ssh" -T -o BatchMode=yes "$remote" "$remote_cmd" </dev/null >"$raw") || status=$?

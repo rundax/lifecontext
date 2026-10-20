@@ -239,17 +239,33 @@ ssh-keygen -t ed25519 -N '' -C lifecontext-agent -f ~/.ssh/lifecontext_agent
 **2. Authorize it**, on the LifeContext machine, as one line in the
 `~/.ssh/authorized_keys` of the user that runs LifeContext. Use the absolute
 path of that user's `lifecontext` command (`install.sh` links
-`~/.local/bin/lifecontext`) and the contents of `lifecontext_agent.pub`:
+`~/.local/bin/lifecontext`), the address the agent machine connects from, and
+the contents of `lifecontext_agent.pub`:
 
 ```text
-restrict,command="/home/USER/.local/bin/lifecontext agent-gate" ssh-ed25519 AAAA... lifecontext-agent
+restrict,from="AGENT_MACHINE_ADDRESS",command="/home/USER/.local/bin/lifecontext agent-gate" ssh-ed25519 AAAA... lifecontext-agent
 ```
 
 `restrict` turns off port, agent and X11 forwarding, terminals and
-`~/.ssh/rc`. `command=` makes every login with this key run the gate, whatever
-the client asks for; the gate reads what was asked from `SSH_ORIGINAL_COMMAND`,
-splits it like a shell would but never runs a shell, and runs it only if it is
-allowed (below). The LifeContext service must be running as usual.
+`~/.ssh/rc`. `from=` makes the server accept this key only from that address
+(a comma-separated list of addresses or patterns is fine), which matters
+because the key has no passphrase: a copy of the file is useless elsewhere.
+`command=` makes every login with this key run the gate, whatever the client
+asks for; the gate reads what was asked from `SSH_ORIGINAL_COMMAND`, splits it
+like a shell would but never runs a shell, and runs it only if it is allowed
+(below). The LifeContext service must be running as usual.
+
+The gate takes options after `agent-gate` in the `command=` string:
+`--allow-delete` (see below), `--max-calls N` (how many calls may run at once;
+default 4, the next one gets `{"error":"busy"}`; an `mcp` session counts as one
+for as long as it lasts) and `--port N` (the API port to use when it is not
+8765; a client cannot choose another).
+
+**The agent's account must hold no other key that the LifeContext machine
+accepts.** An agent that has a shell can run `ssh -i other_key ...` and walk
+around the gate, which only limits the key it is the forced command of. Keep
+that key the only one the account can use there, or, for real isolation, run the
+agent under its own account on the agent machine.
 
 **3. Name the machine**, in `~/.ssh/config` on the agent machine. `HostName`
 is a LAN or tailnet name or an address; `IdentitiesOnly` stops ssh from
@@ -302,10 +318,38 @@ repair and moving the whole journal in or out belong to you. For the same
 reason a path on the LifeContext machine is refused with
 `{"error":"path_not_allowed"}`: `--input /some/path`, `documents download ID
 /some/path` and `mcp --import-dir`, so the key cannot read or write other files
-there. The key can still do what the allowed commands do, including reading
-everything with `recall` and removing a source with `curate delete`; the
-[trust model](#operator-boundaries) is unchanged. The gate logs nothing, so no
-note text or secret reaches a log; `sshd` records only the login.
+there. A `--port` other than the gate's own is refused too.
+
+**Deleting is off by default.** `curate` with the action `prepare_delete`,
+`delete`, `prepare_forget` or `forget` is refused with
+`{"error":"command_not_allowed"}`, because an agent that reads text it does not
+control (a web page, a document, a note) can be talked into wiping your memory,
+and a deletion cannot be undone. `correct` and `reindex` still work. If you want
+agents to remove sources, opt in on the LifeContext machine by adding
+`--allow-delete` to the forced command:
+
+```text
+command="/home/USER/.local/bin/lifecontext agent-gate --allow-delete"
+```
+
+The key can still do what the other allowed commands do, including reading
+everything with `recall`; the [trust model](#operator-boundaries) is unchanged.
+
+**Limits and the audit log.** Reading a staged input is given 120 seconds
+(`{"error":"input_timeout"}`), and at most `--max-calls` calls run at once. The
+gate keeps a short audit log in `~/.local/state/lifecontext/agent-gate.log`
+(`0600`, rotated at 256 KiB to `agent-gate.log.1`), one line per call with the
+time, the command (`retain`, `curate`, ...; any word it does not know is
+`other`), the `curate` action, the refusal code and the exit status. It never
+records arguments, file names or content, so no note text or secret reaches it;
+`sshd` records the login. The log also shows what a stuck or refused agent was
+trying to do.
+
+**Shell startup files on the LifeContext machine** must print nothing. The
+forced command runs through the user's login shell, and anything `.bashrc`,
+`.profile` or similar writes to standard output arrives before the command's own
+output and corrupts a `documents download` reply; the client then fails with
+`output_unavailable`. Keep such output behind a test for an interactive shell.
 
 **MCP over SSH.** `lifecontext-remote mcp` is an MCP server command that runs
 `lifecontext mcp` on the LifeContext machine, with `--allow-writes` if you add
