@@ -221,3 +221,113 @@ that request has finished.
 
 The same [trust model](#operator-boundaries) applies as for the CLI: what the
 tools return goes to the app's model provider.
+
+## Agents on another machine
+
+An agent on one machine can use the LifeContext on another over SSH, through
+the same `lifecontext` command and the same skill. The data stays on the
+LifeContext machine. The agent machine holds a key that can run only everyday
+agent commands, because `lifecontext agent-gate` is that key's forced command.
+
+**1. Make a key for the agent**, on the agent machine. It has no passphrase,
+since an unattended agent cannot type one; the limits are on the server side:
+
+```bash
+ssh-keygen -t ed25519 -N '' -C lifecontext-agent -f ~/.ssh/lifecontext_agent
+```
+
+**2. Authorize it**, on the LifeContext machine, as one line in the
+`~/.ssh/authorized_keys` of the user that runs LifeContext. Use the absolute
+path of that user's `lifecontext` command (`install.sh` links
+`~/.local/bin/lifecontext`) and the contents of `lifecontext_agent.pub`:
+
+```text
+restrict,command="/home/USER/.local/bin/lifecontext agent-gate" ssh-ed25519 AAAA... lifecontext-agent
+```
+
+`restrict` turns off port, agent and X11 forwarding, terminals and
+`~/.ssh/rc`. `command=` makes every login with this key run the gate, whatever
+the client asks for; the gate reads what was asked from `SSH_ORIGINAL_COMMAND`,
+splits it like a shell would but never runs a shell, and runs it only if it is
+allowed (below). The LifeContext service must be running as usual.
+
+**3. Name the machine**, in `~/.ssh/config` on the agent machine. `HostName`
+is a LAN or tailnet name or an address; `IdentitiesOnly` stops ssh from
+offering any other key, which might open a normal shell; `ServerAliveInterval`
+keeps a long `recall` from being dropped as idle:
+
+```text
+Host lifecontext-agent
+    HostName lifecontext-host.example
+    User USER
+    IdentityFile ~/.ssh/lifecontext_agent
+    IdentitiesOnly yes
+    ServerAliveInterval 30
+```
+
+**4. Point the agent at it.** Set `LIFECONTEXT_REMOTE=lifecontext-agent` in the
+agent's environment (`LIFECONTEXT_SSH` names another ssh command; the default is
+`ssh`) and link the wrapper as `lifecontext`, so the skill and the agent run
+unchanged:
+
+```bash
+ln -s "$PWD/bin/lifecontext-remote" ~/.local/bin/lifecontext
+LIFECONTEXT_REMOTE=lifecontext-agent lifecontext status --json
+```
+
+The wrapper runs `ssh -T -o BatchMode=yes HOST "lifecontext ..."` with every
+argument quoted, passes stdin and stdout through, and exits with the command's
+status. It never asks for a password: if the key is not accepted, ssh fails
+with status 255.
+
+**Files.** Your own paths stay on your machine. `retain --input FILE`,
+`curate --input FILE`, `categories propose --input FILE` and `documents import
+FILE` send the file over the connection; the gate saves it under its name in a
+fresh private directory below `~/.local/state/lifecontext/agent-stage/` (`0700`,
+file `0600`), runs the command and removes the directory afterwards, also after
+an error or `SIGTERM`, `SIGHUP` or `SIGINT`. A file name has no slash, no
+leading dot and at most 200 bytes; the size limits are the CLI's (1 MiB of text,
+32 MiB for a document). `documents download ID DEST` writes `DEST` on the agent
+machine and never overwrites it. `--input -` and `mcp` use stdin as usual.
+
+**What is refused, and why.** These commands are allowed: `status`, `doctor`,
+`retain`, `recall`, `reflect`, `evidence`, `curate`, `relationships`,
+`documents`, `categories`, `wiki`, `brief`, `operations` and `mcp`, with
+`--help`. Everything else (`init`, `llm`, `service`, `backup`, `restore`,
+`hindsight`, `skills`, `maintain`, `reconcile`, `preflight`, `serve`, `export`,
+`import`, `capture` and `agent-gate`) prints `{"error":"command_not_allowed"}`
+and exits 1. Agents are operators, not admins (see [Operator
+boundaries](#operator-boundaries)): setup, configuration, service control,
+repair and moving the whole journal in or out belong to you. For the same
+reason a path on the LifeContext machine is refused with
+`{"error":"path_not_allowed"}`: `--input /some/path`, `documents download ID
+/some/path` and `mcp --import-dir`, so the key cannot read or write other files
+there. The key can still do what the allowed commands do, including reading
+everything with `recall` and removing a source with `curate delete`; the
+[trust model](#operator-boundaries) is unchanged. The gate logs nothing, so no
+note text or secret reaches a log; `sshd` records only the login.
+
+**MCP over SSH.** `lifecontext-remote mcp` is an MCP server command that runs
+`lifecontext mcp` on the LifeContext machine, with `--allow-writes` if you add
+it (`--import-dir` is refused). In Claude Desktop or Cursor:
+
+```json
+{
+  "mcpServers": {
+    "lifecontext": {
+      "command": "/home/you/lifecontext/bin/lifecontext-remote",
+      "args": ["mcp"],
+      "env": { "LIFECONTEXT_REMOTE": "lifecontext-agent" }
+    }
+  }
+}
+```
+
+**The protocol**, for other clients: the command line is `lifecontext ARGS...`
+in one ssh command, quoted for POSIX `shlex`; stdin, stdout and the exit status
+are the command's. In place of an input file send `@stdin:NAME` and the file's
+bytes on stdin (one per call). For `documents download ID`, send `@stdout`
+as the destination: on success stdout is `lifecontext-file 1 FILE_BYTES
+RESULT_BYTES`, a newline, the original, then the command's own output (usually
+its JSON); on failure stdout is the command's error output with its non-zero
+status and no such header, so file bytes and JSON never mix.

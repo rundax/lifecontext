@@ -1,0 +1,193 @@
+#!/bin/sh
+# Run the lifecontext command on another machine over SSH, as an agent.
+#
+#   LIFECONTEXT_REMOTE=lifecontext-agent bin/lifecontext-remote status --json
+#   ln -s "$PWD/bin/lifecontext-remote" ~/.local/bin/lifecontext   # agents then use it as is
+#
+# The other machine runs `lifecontext agent-gate` as the forced command of a
+# dedicated SSH key (docs/agents.md), which allows only everyday agent commands.
+# stdin and stdout pass through, so `retain ... --input -` and `mcp` work, and
+# the exit status is the command's. Host files named by `retain --input FILE`,
+# `curate --input FILE`, `categories propose --input FILE` and `documents import
+# FILE` are sent over the connection as `@stdin:NAME`; `documents download ID
+# DEST` writes DEST here and never overwrites it. Other commands (backup,
+# export, import, init, ...) are refused by the gate.
+# LIFECONTEXT_REMOTE is the ssh destination (a Host alias) and LIFECONTEXT_SSH
+# the ssh command (default: ssh).
+
+set -eu
+
+remote=${LIFECONTEXT_REMOTE:-}
+ssh=${LIFECONTEXT_SSH:-ssh}
+nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || nonce=""
+
+cmd=""
+sub=""
+count=0
+pending=""
+json=0
+in_host=""
+in_name=""
+out_host=""
+bad_input=0
+remote_cmd="lifecontext"
+
+# A readable regular host file goes through stdin as @stdin:NAME.
+map_input() {
+	[ "$1" != - ] || return 0
+	if [ -n "$in_host" ] || [ -L "$1" ] || [ ! -f "$1" ] || [ ! -r "$1" ]; then
+		bad_input=1
+		return 0
+	fi
+	in_host=$1
+	in_name=$(basename -- "$1")
+	mapped="@stdin:$in_name"
+}
+
+input_option() {
+	case "$cmd/$sub" in
+	retain/* | curate/* | categories/propose) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# Set q to the argument in single quotes, as POSIX shlex reads it.
+quote() {
+	sq="'"
+	rest=$1
+	q=""
+	while :; do
+		case $rest in
+		*"$sq"*)
+			q="$q${rest%%"$sq"*}$sq\\$sq$sq"
+			rest=${rest#*"$sq"}
+			;;
+		*) break ;;
+		esac
+	done
+	q="$sq$q$rest$sq"
+}
+
+fail() {
+	if [ "$json" -eq 1 ]; then
+		printf '{"error":"%s"}\n' "$1"
+	else
+		printf 'LifeContext request failed: %s.\n' "$(printf '%s' "$1" | tr _ ' ')" >&2
+		[ "$1" != remote_not_configured ] || echo 'Set LIFECONTEXT_REMOTE to the ssh destination of the LifeContext machine.' >&2
+	fi
+	exit 1
+}
+
+# Build the remote command line argument by argument, replacing host paths.
+while [ "$#" -gt 0 ]; do
+	arg=$1
+	shift
+	mapped=$arg
+	if [ -n "$pending" ]; then
+		if [ "$pending" = --input ] && input_option; then
+			map_input "$arg"
+		fi
+		pending=""
+	else
+		case "$arg" in
+		--input=*)
+			if input_option; then
+				map_input "${arg#--input=}"
+				[ "$mapped" = "$arg" ] || mapped="--input=$mapped"
+			fi
+			;;
+		--json) json=1 ;;
+		--version)
+			# A flag before the command, a value after it (evidence, documents show).
+			[ -z "$cmd" ] || pending=$arg
+			;;
+		--port | --idempotency-key | --input | --query | --max-results | --max-tokens | --budget | \
+			--expected-version | --prepared-operation-id | --edge-id | --source-id | --source-version | \
+			--status | --expected-revision | --limit | --filename | --mime | --provenance | --state | \
+			--category-id | --name | --description | --alias | --target-category-id | \
+			--expected-source-revision | --expected-target-revision | --page | --note | --revision | \
+			--fail-on | --date | --since | --retry-wiki | --rebuild-stale | --provider | --model | \
+			--base-url | --vault | --timezone | --agent | --import-dir)
+			pending=$arg
+			;;
+		-?*) ;;
+		*)
+			count=$((count + 1))
+			case "$count" in
+			1) cmd=$arg ;;
+			2) sub=$arg ;;
+			3) [ "$cmd/$sub" != documents/import ] || map_input "$arg" ;;
+			4)
+				if [ "$cmd/$sub" = documents/download ]; then
+					out_host=$arg
+					mapped="@stdout"
+				fi
+				;;
+			esac
+			;;
+		esac
+	fi
+	quote "$mapped"
+	remote_cmd="$remote_cmd $q"
+done
+
+case "$remote" in
+'' | -*) fail remote_not_configured ;;
+esac
+[ "$bad_input" -eq 0 ] || fail input_unavailable
+
+if [ -z "$out_host" ]; then
+	if [ -n "$in_host" ]; then
+		exec "$ssh" -T -o BatchMode=yes "$remote" "$remote_cmd" <"$in_host"
+	fi
+	exec "$ssh" -T -o BatchMode=yes "$remote" "$remote_cmd"
+fi
+
+# documents download: the gate answers with one frame, "lifecontext-file 1 FILE
+# RESULT", a newline, FILE bytes of the original and RESULT bytes of command
+# output. The frame is saved next to DEST, the original is cut out of it and
+# linked into place (never over an existing file), and the output is printed.
+# On failure the gate sends only the command's error output.
+if [ -e "$out_host" ] || [ -L "$out_host" ]; then
+	fail destination_exists
+fi
+umask 077
+raw="$out_host.lifecontext-remote.${nonce:-$$}.raw"
+partial="$out_host.lifecontext-remote.${nonce:-$$}"
+# shellcheck disable=SC2317 # called from the traps
+cleanup() {
+	rm -f "$raw" "$partial"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+status=0
+(set -C && "$ssh" -T -o BatchMode=yes "$remote" "$remote_cmd" </dev/null >"$raw") || status=$?
+if [ "$status" -ne 0 ]; then
+	cat -- "$raw" 2>/dev/null || true
+	exit "$status"
+fi
+
+header=$(head -n 1 "$raw")
+marker="lifecontext-file 1 "
+case $header in
+"$marker"*) ;;
+*) fail output_unavailable ;;
+esac
+# shellcheck disable=SC2086 # two numbers
+set -f
+set -- ${header#"$marker"}
+set +f
+[ "$#" -eq 2 ] || fail output_unavailable
+file_len=$1
+result_len=$2
+case "$file_len$result_len" in
+*[!0-9]*) fail output_unavailable ;;
+esac
+head_len=$((${#header} + 1))
+total=$(wc -c <"$raw")
+[ "$((total))" -eq $((head_len + file_len + result_len)) ] || fail output_unavailable
+tail -c +$((head_len + 1)) "$raw" | head -c "$file_len" >"$partial"
+[ "$(($(wc -c <"$partial")))" -eq "$file_len" ] || fail output_unavailable
+ln "$partial" "$out_host" 2>/dev/null || fail destination_exists
+tail -c +$((head_len + file_len + 1)) "$raw"

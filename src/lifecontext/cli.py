@@ -283,6 +283,8 @@ def _build_parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="start the API on loopback")
     _shared_options(serve)
 
+    commands.add_parser("agent-gate", help="SSH forced command that runs only everyday agent commands")
+
     status = commands.add_parser("status", help="show API and dependency readiness")
     _shared_options(status)
 
@@ -1592,6 +1594,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command in _LOCAL_COMMANDS:
         return _run_local(args)
+    if args.command == "agent-gate":
+        from lifecontext.agent_gate import run as run_agent_gate
+
+        return run_agent_gate()
     if args.command == "preflight":
         return _preflight(args)
     if args.command == "serve":
