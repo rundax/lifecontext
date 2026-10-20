@@ -125,6 +125,7 @@ printf 'COUCHDB_USER=admin\nCOUCHDB_PASSWORD=%s\n' \
   "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)" > couchdb.env
 docker compose up -d
 sh init-couchdb.sh
+docker compose restart    # once, so every setting is in effect
 ```
 
 `couchdb.env` is the admin account; keep it private (the folder's
@@ -140,6 +141,23 @@ database and sets the user's password to the one in the file. `--database`,
 Checked against the pinned CouchDB image: requests without an account are
 refused, the sync user can open its database but cannot list databases, and the
 settings and accounts survive `docker compose down` and `up`.
+
+CouchDB keeps its settings and the admin account in the `couchdb-config`
+volume, so editing `couchdb.env` later does not change the admin password. To
+change it, set the new password in CouchDB first, then in `couchdb.env`:
+
+```bash
+umask 077
+printf 'user = "admin:%s"\n' "$(sed -n 's/^COUCHDB_PASSWORD=//p' couchdb.env)" > .admin.curlrc
+printf '"%s"' "NEW-PASSWORD" > .new-password.json   # replace NEW-PASSWORD, letters and digits only
+curl -s --config .admin.curlrc -X PUT --data-binary @.new-password.json \
+  http://127.0.0.1:5984/_node/_local/_config/admins/admin
+rm -f .admin.curlrc .new-password.json
+```
+
+Then write the same password into `couchdb.env`. Removing the volumes
+(`docker compose down -v`) starts the hub empty, with the account from
+`couchdb.env`.
 
 ## 4. Reach the hub only over Tailscale
 
@@ -193,8 +211,11 @@ account from the files of step 3, without passing any secret as an argument:
 ```bash
 umask 077
 mkdir -p ~/.config/livesync ~/.local/state/livesync
-node src/apps/cli/dist/index.cjs init-settings ~/.config/livesync/settings.json
-LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > ~/.config/livesync/e2ee.passphrase
+# Both only the first time: a new passphrase would no longer read the hub.
+[ -s ~/.config/livesync/settings.json ] ||
+  node src/apps/cli/dist/index.cjs init-settings ~/.config/livesync/settings.json
+[ -s ~/.config/livesync/e2ee.passphrase ] ||
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > ~/.config/livesync/e2ee.passphrase
 HUB_FILES=/path/to/lifecontext/docker/livesync python3 - <<'PY'
 import json, os
 home, hub = os.path.expanduser("~"), os.environ["HUB_FILES"]
@@ -270,12 +291,12 @@ LiveSync". In its setup choose CouchDB and enter:
 - Username `livesync`, and the password from `sync-user.password` (move it to
   the device with a password manager, not through chat or email).
 - Database name `obsidian-livesync`.
-- If the server's client encrypts (step 5), turn on end-to-end encryption with
-  the passphrase from `~/.config/livesync/e2ee.passphrase`.
+- End-to-end encryption on, with the passphrase from
+  `~/.config/livesync/e2ee.passphrase` on the server (step 5).
 
-Choose the continuous "LiveSync" mode. Optionally turn on end-to-end
-encryption: then CouchDB holds only encrypted data, and every client,
-including the one in step 5, must use the same passphrase. Losing it makes the
+Choose the continuous "LiveSync" mode. Turn on end-to-end encryption with the
+passphrase of step 5: CouchDB holds only encrypted data, and every client,
+including the one on the server, must use the same passphrase. Losing it makes the
 hub unreadable, but not the vault on the server.
 
 The server's client (step 5) fills the hub from the server's vault, which
@@ -309,8 +330,8 @@ returns to every device. `lifecontext capture --once --json` shows the counts,
 
 - The hub holds a copy of everything in the vault that the client syncs:
   your notes, LifeContext's entries and wiki pages, and the copies of imported
-  originals. Encrypt it end to end if the hub's disk
-  is not trusted.
+  originals. Step 5 encrypts it end to end, so the hub's disk holds no
+  readable notes.
 - Notes and entries reach every device you set up. Nothing leaves your tailnet,
   except what LifeContext sends to the model you configured
   ([privacy](privacy.md)).
