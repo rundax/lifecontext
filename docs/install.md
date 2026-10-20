@@ -67,13 +67,20 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    Face cache (about 0.6 GB), unless the cache already has them, so the
    service's first start makes no Hugging Face calls.
 6. Installs Tesseract with English, Russian and Ukrainian through Homebrew on
-   macOS, or through `apt-get` or `dnf` when `sudo` works without a password
-   prompt; it never asks for a password. Otherwise it prints the exact command
+   macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux) when `sudo`
+   works without a password prompt; it never asks for a password. Otherwise it prints the exact command
    and goes on; scans and images stay unread (listed as unresolved) and
    `doctor` reports OCR as missing until you run it.
-7. Runs `lifecontext init`: it asks its questions in your terminal (this works
-   under `curl | sh` too), or takes the [variables below](#unattended-install).
-   Existing settings in `~/.lifeweave` are kept.
+7. Sets up `~/.lifeweave` and the vault. In a terminal (this works under
+   `curl | sh` too) it asks for the model endpoint: the provider (default
+   `openai_compatible`), the API base URL (default `http://127.0.0.1:8317/v1`,
+   where a local CLIProxyAPI usually listens), the model ID, the API key with a
+   hidden prompt (leave it empty for an endpoint on this machine that needs
+   none) and the vault folder. The key reaches `lifecontext init` through a
+   private temporary file, never as an argument. Without a terminal it takes
+   the [variables below](#unattended-install). Existing settings in
+   `~/.lifeweave` are kept; change them later with
+   [`lifecontext llm set`](#change-the-model-or-endpoint-later).
 8. When the setup is complete and a systemd user session (Linux) or launchd
    (macOS) is available, runs `lifecontext service install --maintenance` and
    waits for the API to answer. Otherwise it tells you to run
@@ -124,6 +131,22 @@ The key is read from the file into `~/.lifeweave/.env` (mode `0600`); it is
 never passed on a command line. Without a terminal and without these
 variables the script installs everything but skips `init`, the service and
 the skill links and tells you to run `lifecontext init`.
+
+### Change the model or endpoint later
+
+```bash
+lifecontext llm show                       # provider, model, base URL, whether a key is stored
+lifecontext llm set --model MODEL          # change only what you name
+lifecontext llm set --base-url http://127.0.0.1:8317/v1 --provider openai_compatible --model MODEL
+lifecontext llm set --api-key-stdin < ~/new-key.txt
+```
+
+`llm show` never prints the key. `llm set` validates like `init`, keeps every
+other setting, replaces the key only when you give one (on stdin, or from the
+file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
+runs; without a usable service manager it prints the command to run. Changing
+the provider needs `--model` as well, and `openai_compatible` needs
+`--base-url`.
 
 ### Upgrade
 

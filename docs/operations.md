@@ -453,6 +453,17 @@ The retained record stays in custody until you forget or delete it with
 
 ## Applying changed model settings
 
+`lifecontext llm show` prints the provider, model and base URL and whether a key
+is stored, never the key. `lifecontext llm set [--provider P] [--model M]
+[--base-url URL] [--api-key-stdin]` changes only those fields (the key from
+stdin, or from the file named by `LIFECONTEXT_API_KEY_FILE`), validates as
+`init` does and restarts the user service if it runs
+(`systemctl --user restart lifecontext.service`, or `launchctl kickstart -k`);
+when no service manager is available it prints that command instead. Error
+codes are `init`'s plus `config_missing` (run `init` first) and
+`nothing_to_change`. If you run `lifecontext serve` in a terminal, make the
+change with `llm set`, then follow the steps below.
+
 The `lifeweave` profile keeps the model settings it started with. After you
 change the `llm` block or the key, stop the API, then stop only the
 `lifeweave` profile, so the next start regenerates its private environment, and
@@ -485,9 +496,11 @@ HTTP health alone does not prove the model route works: `lifecontext preflight
 ```bash
 lifecontext service install --maintenance --dry-run   # print the files and commands
 lifecontext service install --maintenance             # write, enable and start
+lifecontext service install --maintenance --capture   # also take in notes from Journal/Inbox every 30 s
 lifecontext service install --no-start                # write and enable for the next login only
 lifecontext service status                            # units and the last maintenance run
 lifecontext service uninstall --maintenance           # remove only the maintenance timer
+lifecontext service uninstall --capture               # remove only the capture timer
 lifecontext service uninstall                         # remove everything it installed
 ```
 
@@ -508,6 +521,12 @@ for the data, the units carry `Environment=HOME=` with that directory. With
 (daily at 07:00 local time, `Persistent=true`, so a missed run happens at the
 next boot). It then runs `systemctl --user daemon-reload`, `try-restart` when
 the service unit changed, and `enable --now` for the service (and the timer).
+With `--capture` it adds `lifecontext-capture.service` (`lifecontext capture
+--once --json`, a oneshot with the same limits as maintenance, after the API
+unit) and `lifecontext-capture.timer` (`OnActiveSec=30s`, `OnUnitActiveSec=30s`,
+`AccuracySec=1s`, so runs are not merged into one per minute); on macOS the agent
+`io.github.hantok.lifecontext.capture.plist` has `StartInterval` 30. What
+`capture` does is in [sync](sync.md#2-capture-notes-from-the-inbox).
 Re-running with the same options changes nothing. `--no-start` writes the units
 and runs `daemon-reload` and `enable` without `--now`: nothing starts or
 restarts until the next login (on macOS the agents load at the next login). A user service stops when you
@@ -777,7 +796,8 @@ to old wiki paths may need manual updates; bare wiki-ID links use aliases.
 ## Document OCR and standalone wiki refresh
 
 OCR requires the native `tesseract-ocr` executable (on Debian/Ubuntu,
-`sudo apt-get install tesseract-ocr`). The Python dependencies already include
+`sudo apt-get install tesseract-ocr`; on Arch Linux, `sudo pacman -S --needed
+tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr`). The Python dependencies already include
 image and PDF rendering support. Check `tesseract --version` and
 `tesseract --list-langs`; the current extraction command uses Tesseract's
 installed English/Russian/Ukrainian language data (`tesseract-ocr-rus` and

@@ -1,0 +1,3 @@
+# The admin account and the sync user's password never belong in version control.
+couchdb.env
+*.password

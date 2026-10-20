@@ -130,7 +130,9 @@ What this does not protect against:
 - **Your vault.** LifeContext writes Markdown notes, wiki pages and a copy of
   each imported original (as an attachment) into the vault you configure. If
   you sync that vault (Obsidian Sync, LiveSync, Git, a cloud folder), those
-  files go wherever your sync sends them.
+  files go wherever your sync sends them. [sync.md](sync.md) describes a
+  Self-hosted LiveSync hub that listens on the server's loopback only and is
+  published to your tailnet alone.
 - **Your agents.** An agent that runs the LifeContext CLI (Claude Code, Codex,
   Gemini CLI and others) or connects through `lifecontext mcp` (Claude Desktop,
   Cursor) sends what it reads, such as recall results and wiki
