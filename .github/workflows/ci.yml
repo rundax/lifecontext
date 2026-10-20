@@ -36,8 +36,8 @@ jobs:
        github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # Not blocking yet: 191 known findings with ruff 0.16.10 and the rule set
-    # in pyproject.toml ([tool.ruff.lint]) on 2026-10-17. Remove
+    # Not blocking yet: 192 known findings with ruff 0.16.10 and the rule set
+    # in pyproject.toml ([tool.ruff.lint]) on 2026-10-20. Remove
     # continue-on-error once the lint cleanup lands, so new findings fail CI.
     continue-on-error: true
     steps:
