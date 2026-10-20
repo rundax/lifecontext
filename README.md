@@ -75,8 +75,11 @@ python3 -m venv .venv
 export PATH="$PWD/.venv/bin:$PATH"
 lifecontext --version
 
-# Optional OCR (Debian/Ubuntu): English, Russian and Ukrainian
+# Optional OCR: English, Russian and Ukrainian
+# Debian/Ubuntu
 sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr
+# Arch Linux
+sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr
 ```
 
 With [uv](https://github.com/astral-sh/uv) instead of pip, add
@@ -132,6 +135,7 @@ the files `init` writes can also be edited by hand.
 ```bash
 lifecontext preflight                        # checks config and key, starts the local memory engine
 lifecontext service install --maintenance    # run it as a user service, plus a daily 07:00 upkeep
+                                             # add --capture to take in notes from Journal/Inbox every 30 s
 lifecontext skills install                   # give Claude Code, Codex, Gemini CLI, Hermes the skill
 lifecontext doctor                           # check everything; exit 1 only if something is broken
 ```
@@ -196,6 +200,23 @@ LifeContext supports one selected provider, one model, at most one custom URL,
 and one key at a time. There is no provider fallback or provider-specific key
 lookup. Unknown provider IDs and unknown `llm` fields are rejected. Do not add
 credentials to YAML.
+
+### Change the model or endpoint later
+
+```bash
+lifecontext llm show                       # provider, model, base URL, whether a key is stored
+lifecontext llm set --model MODEL          # change only what you name
+lifecontext llm set --provider openai_compatible --base-url http://127.0.0.1:8317/v1 --model MODEL
+lifecontext llm set --api-key-stdin < ~/new-key.txt   # replace the key (or set LIFECONTEXT_API_KEY_FILE)
+```
+
+`llm show` never prints the key. `llm set` changes only the fields you give,
+checks them the way `init` does, leaves every other setting alone and, when the
+user service runs, restarts it so the new settings take effect; where no
+service manager is available it prints the exact restart command. A new
+provider needs `--model` too, and `openai_compatible` needs `--base-url`. A
+local proxy such as CLIProxyAPI on `http://127.0.0.1:8317/v1` is a common
+`openai_compatible` endpoint and needs no key.
 
 ### Reasoning effort
 
@@ -321,6 +342,30 @@ and failure codes.
 the same API, read-only unless you add `--allow-writes`; the configuration is
 in [docs/agents.md](docs/agents.md#mcp-server).
 
+## Your own setup: Obsidian, capture and sync
+
+One personal arrangement, described step by step in
+[docs/sync.md](docs/sync.md); every step after the first is optional.
+
+- **The vault in Obsidian.** Open the vault folder (`~/LifeContext/vault` by
+  default) as an Obsidian vault. Entries, wiki pages and notes are Markdown
+  files there.
+- **Capture.** Write a note into `Journal/Inbox` (create the folder) and
+  `lifecontext capture --once` turns every settled Markdown note there into a
+  journal entry through the API; `lifecontext service install --capture` runs
+  it every 30 seconds. Notes still being edited, files over 1 MiB and anything
+  that is not UTF-8 Markdown are skipped, and a note is captured once and
+  again only when you change it.
+- **Several devices.** The Self-hosted LiveSync Obsidian plugin syncs the
+  vault through a CouchDB hub. `docker/livesync/` ships one: pinned by digest,
+  on `127.0.0.1` only, with an init script that creates the database and a
+  restricted sync user. `tailscale serve` publishes it as HTTPS to your tailnet
+  alone, and a headless LiveSync client on the server mirrors the hub into the
+  vault folder. Docker and Tailscale need `sudo` once to install; the sync is
+  not needed to use LifeContext.
+- **Agents.** On the server, agents use the CLI, the skill
+  (`lifecontext skills install`) or MCP on the same data.
+
 ## Privacy
 
 - Originals, the catalog, the index and the vault stay on your machine.
@@ -364,6 +409,8 @@ components and models: [NOTICE](NOTICE).
 
 - [docs/install.md](docs/install.md): `install.sh` (options, unattended
   install, upgrade, uninstall), Docker and Compose, verifying a release
+- [docs/sync.md](docs/sync.md): Obsidian, `lifecontext capture` and sync
+  between devices with Self-hosted LiveSync, CouchDB and Tailscale
 - [docs/operations.md](docs/operations.md): configuration, startup checks,
   recovery, documents, OCR, vision, wiki rebuilds, file names
 - [docs/architecture.md](docs/architecture.md): how data flows and where it is

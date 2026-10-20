@@ -1,5 +1,23 @@
 # Unreleased
 
+- `lifecontext capture --once [--inbox DIR] [--json]` turns settled Markdown
+  notes in the vault's `Journal/Inbox` into journal entries through the API: a
+  note is taken in when its bytes stopped changing for 15 seconds, once, and
+  again as a new version only when it changes; notes over 1 MiB or not UTF-8
+  are skipped. State lives in `~/.lifeweave/capture` (`0700`). `service install
+  --capture` adds a 30-second systemd user timer or launchd agent; `service
+  uninstall` and `status` include it (`uninstall --capture` removes only it).
+- `lifecontext llm show` and `llm set [--provider] [--model] [--base-url]
+  [--api-key-stdin]` print and change the model endpoint without touching other
+  settings or printing the key, and restart the user service when it runs.
+  `install.sh` asks for the endpoint in a terminal (default
+  `openai_compatible` at `http://127.0.0.1:8317/v1`, hidden key that may stay
+  empty) and installs Tesseract with `pacman` on Arch Linux.
+- `docker/livesync/` ships a CouchDB hub for Obsidian Self-hosted LiveSync
+  (image pinned by digest, `127.0.0.1` only, `require_valid_user`) and
+  `init-couchdb.sh`; [docs/sync.md](docs/sync.md) describes the setup with
+  capture, Tailscale and a headless LiveSync client.
+
 - Security: other accounts on the same computer can no longer read or change
   your memory. The `lifeweave` Hindsight daemon used to answer anyone on
   `127.0.0.1:9855`, the same port in every HOME, and its PostgreSQL listened on

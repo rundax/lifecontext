@@ -23,6 +23,9 @@ from lifecontext import cli
 from lifecontext.api.security import local_token
 from lifecontext.paths import LifeContextPaths
 from lifecontext.service import (
+    CAPTURE_SERVICE,
+    CAPTURE_TIMER,
+    LAUNCHD_CAPTURE_LABEL,
     LAUNCHD_LABEL,
     LAUNCHD_MAINTAIN_LABEL,
     MAINTAIN_SERVICE,
@@ -33,6 +36,7 @@ from lifecontext.service import (
     install,
     launchd_agents,
     render,
+    restart_if_running,
     start_again,
     status,
     stop_units,
@@ -279,6 +283,100 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(report["units"][SERVICE_UNIT], {"installed": False, "active": "active", "enabled": "enabled"})
             self.assertTrue(report["last_maintenance"]["ok"])
             self.assertIn("Last maintenance: 2026-10-17T05:00:03Z (ok)", render(report))
+
+
+    def test_capture_units_run_every_thirty_seconds_without_merging_runs(self) -> None:
+        units = systemd_units(EXECUTABLE, 8765, False, capture=True)
+        self.assertEqual(set(units), {SERVICE_UNIT, CAPTURE_SERVICE, CAPTURE_TIMER})
+        self.assertIn(f"ExecStart={EXECUTABLE} capture --once --json --port 8765\n", units[CAPTURE_SERVICE])
+        for line in ("Type=oneshot", f"After={SERVICE_UNIT}", "MemoryMax=512M", "Nice=10"):
+            self.assertIn(line + "\n", units[CAPTURE_SERVICE])
+        # The default accuracy of a minute would run 30-second timers only once a minute.
+        for line in ("OnActiveSec=30s", "OnUnitActiveSec=30s", "AccuracySec=1s", f"Unit={CAPTURE_SERVICE}",
+                     "WantedBy=timers.target"):
+            self.assertIn(line + "\n", units[CAPTURE_TIMER])
+        self.assertNotIn(CAPTURE_TIMER, systemd_units(EXECUTABLE, 8765, True))
+        moved = systemd_units(EXECUTABLE, 8765, False, data_home=Path("/srv/life context"), capture=True)
+        self.assertIn('Environment="HOME=/srv/life context"\n', moved[CAPTURE_SERVICE])
+        with _home() as home:
+            agents = launchd_agents(home, EXECUTABLE, 8765, False, capture=True)
+            capture = plistlib.loads(agents[f"{LAUNCHD_CAPTURE_LABEL}.plist"])
+            self.assertEqual(capture["ProgramArguments"], [EXECUTABLE, "capture", "--once", "--json", "--port", "8765"])
+            self.assertEqual((capture["StartInterval"], capture["Nice"], capture["ProcessType"]),
+                             (30, 10, "Background"))
+            self.assertNotIn(f"{LAUNCHD_CAPTURE_LABEL}.plist", launchd_agents(home, EXECUTABLE, 8765, True))
+
+    def test_install_status_and_uninstall_include_the_capture_timer(self) -> None:
+        with _home() as home:
+            environ = {"XDG_CONFIG_HOME": str(home / "config")}
+            units = home / "config" / "systemd" / "user"
+            manager = _Manager()
+            planned = install("Linux", home, executable=EXECUTABLE, port=8765, maintenance=False, capture=True,
+                              dry_run=True, runner=manager, environ=environ)
+            self.assertTrue(planned["capture"])
+            self.assertEqual(manager.commands, [])
+            self.assertFalse(units.exists())
+            install("Linux", home, executable=EXECUTABLE, port=8765, maintenance=True, capture=True, dry_run=False,
+                    runner=manager, environ=environ)
+            self.assertEqual(manager.commands[-2:], [["systemctl", "--user", "enable", "--now", MAINTAIN_TIMER],
+                                                      ["systemctl", "--user", "enable", "--now", CAPTURE_TIMER]])
+            self.assertEqual(sorted(path.name for path in units.iterdir()),
+                             sorted([SERVICE_UNIT, MAINTAIN_SERVICE, MAINTAIN_TIMER, CAPTURE_SERVICE, CAPTURE_TIMER]))
+            report = status("Linux", home, runner=manager, environ=environ)
+            self.assertTrue(report["units"][CAPTURE_TIMER]["installed"])
+            self.assertIn(f"{CAPTURE_TIMER}: installed", render(report))
+
+            manager.commands.clear()
+            only_capture = uninstall("Linux", home, maintenance_only=False, capture_only=True, dry_run=False,
+                                     runner=manager, environ=environ)
+            self.assertEqual([item["path"] for item in only_capture["files"]],
+                             [str(units / CAPTURE_SERVICE), str(units / CAPTURE_TIMER)])
+            self.assertEqual(manager.commands, [["systemctl", "--user", "disable", "--now", CAPTURE_TIMER],
+                                                ["systemctl", "--user", "daemon-reload"]])
+            self.assertEqual(sorted(path.name for path in units.iterdir()),
+                             sorted([SERVICE_UNIT, MAINTAIN_SERVICE, MAINTAIN_TIMER]))
+            install("Linux", home, executable=EXECUTABLE, port=8765, maintenance=False, capture=True, dry_run=False,
+                    runner=manager, environ=environ)
+            uninstall("Linux", home, maintenance_only=False, dry_run=False, runner=manager, environ=environ)
+            self.assertEqual(list(units.iterdir()), [])
+
+    def test_launchd_capture_agent_is_installed_and_removed(self) -> None:
+        with _home() as home:
+            manager = _Manager({("launchctl", "print", f"gui/501/{LAUNCHD_CAPTURE_LABEL}"): ("", 113)})
+            install("Darwin", home, executable=EXECUTABLE, port=8765, maintenance=False, capture=True,
+                    dry_run=False, runner=manager, uid=501)
+            plist = home / "Library" / "LaunchAgents" / f"{LAUNCHD_CAPTURE_LABEL}.plist"
+            self.assertIn(["launchctl", "bootstrap", "gui/501", str(plist)], manager.commands)
+            removed = uninstall("Darwin", home, maintenance_only=False, capture_only=True, dry_run=False,
+                                runner=manager, uid=501)
+            self.assertEqual([item["path"] for item in removed["files"]], [str(plist)])
+            self.assertFalse(plist.exists())
+            self.assertTrue((home / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist").exists())
+
+    def test_restart_if_running_restarts_only_a_running_service(self) -> None:
+        restart = ["systemctl", "--user", "restart", SERVICE_UNIT]
+        probe = ("systemctl", "--user", "is-active", SERVICE_UNIT)
+        manager = _Manager({probe: ("active\n", 0)})
+        self.assertEqual(restart_if_running("Linux", runner=manager), {"state": "restarted", "command": restart})
+        self.assertEqual(manager.commands, [list(probe), restart])
+        manager = _Manager({probe: ("inactive\n", 3)})
+        self.assertEqual(restart_if_running("Linux", runner=manager), {"state": "not_running", "command": restart})
+        self.assertEqual(manager.commands, [list(probe)])
+        # No user session bus: systemctl prints nothing on stdout.
+        self.assertEqual(restart_if_running("Linux", runner=_Manager({probe: ("", 1)}))["state"], "no_manager")
+        manager = _Manager({probe: ("active\n", 0), tuple(restart): ("", 1)})
+        self.assertEqual(restart_if_running("Linux", runner=manager), {"state": "restart_failed", "command": restart})
+
+        def missing(command, **kwargs):
+            raise FileNotFoundError(command[0])
+
+        self.assertEqual(restart_if_running("Linux", runner=missing), {"state": "no_manager", "command": restart})
+        self.assertEqual(restart_if_running("Windows"), {"state": "no_manager", "command": None})
+        kick = ["launchctl", "kickstart", "-k", f"gui/501/{LAUNCHD_LABEL}"]
+        loaded = _Manager({("launchctl", "print", f"gui/501/{LAUNCHD_LABEL}"): ("", 0)})
+        self.assertEqual(restart_if_running("Darwin", runner=loaded, uid=501), {"state": "restarted", "command": kick})
+        unloaded = _Manager({("launchctl", "print", f"gui/501/{LAUNCHD_LABEL}"): ("", 113)})
+        self.assertEqual(restart_if_running("Darwin", runner=unloaded, uid=501)["state"], "not_running")
 
 
 class _Api(BaseHTTPRequestHandler):

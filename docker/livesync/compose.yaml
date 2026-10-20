@@ -1,0 +1,41 @@
+# A CouchDB hub for the Obsidian "Self-hosted LiveSync" plugin. See docs/sync.md.
+#
+# CouchDB listens on 127.0.0.1:5984 of this machine only. Devices reach it
+# through `tailscale serve` (tailnet-only HTTPS), never through a published port.
+#
+#   cd docker/livesync
+#   umask 077
+#   printf 'COUCHDB_USER=admin\nCOUCHDB_PASSWORD=%s\n' \
+#     "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)" > couchdb.env
+#   docker compose up -d
+#   sh init-couchdb.sh
+#
+# couchdb.env holds the admin account (no quotes around values). Keep it out of
+# version control and readable by you alone; COUCHDB_ENV_FILE names another path.
+name: lifecontext-livesync
+
+services:
+  couchdb:
+    # Pinned by digest: a tag can move, a digest cannot.
+    image: couchdb@sha256:ccea1e8035bf7afd68336e24056a1ca9c1c46d7abe42da686322c0ac7218e5c2
+    restart: unless-stopped
+    env_file:
+      - ${COUCHDB_ENV_FILE:-./couchdb.env}
+    ports:
+      - "127.0.0.1:5984:5984"
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+      - ./livesync.ini:/opt/couchdb/etc/local.d/livesync.ini:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # With require_valid_user, /_up answers 401 until you sign in; any answer
+      # from CouchDB means it is running.
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5984/_up | grep -qE '^(200|401)$$'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  couchdb-data:
