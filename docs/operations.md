@@ -904,7 +904,29 @@ claims and the index, and at once rewrites every vault page and history file
 that ever cited the document, without new revisions; user sections keep their
 bytes and move with a renamed file, and a file whose managed text was edited by
 hand is left alone as a projection conflict (an edited history file does not
-keep its page from being rewritten). A forgotten or deleted document
+keep its page from being rewritten). A delete also erases the document's
+text from storage: its extracted text (`~/.lifeweave/derived/<source_id>`) is
+removed, and in every stored revision of every page that cited it
+(`~/.lifeweave/wiki_revisions`, history of shared pages included) its
+citations keep their place and passage but quote `[erased]`, and a claim
+whose text only it held reads `[erased]` too, with the summary sentences that
+rested on such a claim; contradiction reviews are rewritten the same way. A
+changed revision gets a new artifact under its new checksum and the catalog
+points to it, with the same parents and dependencies; the old file is removed.
+The document's own wiki page takes the title "Withdrawn page" in the catalog
+and in its artifacts (its page ID stays). Nothing else is touched, and what the
+vault shows does not change; the document's title and file name stay in the
+catalog's document record and in operation receipts. The step runs before the
+delete counts as complete, so a failure leaves `custody_delete` running for the
+retry, and it can be repeated safely. A stored revision file that is missing is
+logged and skipped, and one that fails its checksum or is not a revision is
+logged and removed, so neither holds a delete back; any other failure to read
+one leaves the delete unfinished for the retry. The step
+ends by giving the document's own page the withdrawn title; `reconcile` (the
+daily `maintain` runs it) does the step again for every deleted document whose
+page has not that title yet or whose extracted text is still there, which also
+cleans up documents deleted by an earlier version, and leaves the others alone.
+A forget changes none of this: it hides and keeps. A forgotten or deleted document
 takes no new version: importing a replacement fails with `invalid_request`;
 import the file as a new document instead. A forgotten document is not indexed
 again either: `curate reindex` fails with `conflict`, and recall never cites a

@@ -1272,6 +1272,8 @@ class LifeContextCatalog:
             self._connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.execute("PRAGMA synchronous=FULL")
+            # Freed row content is zeroed, so an erasure leaves no old text in the database file.
+            self._connection.execute("PRAGMA secure_delete=ON")
             if self._connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
                 raise CatalogError("catalog constraints unavailable")
             self._verify_open_database()
@@ -3381,6 +3383,24 @@ class LifeContextCatalog:
             connection.execute("UPDATE wiki_pages SET current_revision=?,state='current' WHERE page_id=? AND current_revision=?", (revision, page_id, expected_revision))
         return self.get_wiki_revision(page_id, revision)
 
+    def replace_wiki_artifact(self, page_id: str, revision: int, old_sha256: str, *, artifact_path: str, artifact_sha256: str) -> None:
+        """Point a revision at the artifact that replaces its stored one after an erasure; ancestry and dependencies stay."""
+        _validate_identity(page_id, revision)
+        if _validate_projection_path(artifact_path) is None or _validate_hash(artifact_sha256) is None or _validate_hash(old_sha256) is None:
+            raise CatalogError("wiki artifact required")
+        with self.transaction() as connection:
+            if connection.execute("UPDATE wiki_revisions SET artifact_path=?,artifact_sha256=? WHERE page_id=? AND revision=? AND artifact_sha256=?",
+                                  (artifact_path, artifact_sha256, page_id, revision, old_sha256)).rowcount != 1:
+                raise CatalogConflict("wiki artifact conflict")
+
+    def retitle_wiki_page(self, page_id: str, title: str) -> None:
+        """Give a page the withdrawn title after its document was deleted; a page's ID and revisions stay."""
+        _validate_identity(page_id, 1)
+        _document_text(title, 1024)
+        with self.transaction() as connection:
+            if connection.execute("UPDATE wiki_pages SET title=? WHERE page_id=?", (title, page_id)).rowcount != 1:
+                raise CatalogConflict("wiki page identity conflict")
+
     def get_wiki_revision(self, page_id: str, revision: int) -> dict[str, Any] | None:
         _validate_identity(page_id, revision)
         self._ensure_open()
@@ -3497,6 +3517,15 @@ class LifeContextCatalog:
             if code in {"manual_edit", "content_conflict"}:
                 connection.execute("UPDATE wiki_pages SET state='conflict' WHERE page_id=? AND current_revision=?", (page_id, revision))
         return next(item for item in self.list_wiki_reviews(page_id) if item["review_id"] == review_id)
+
+    def replace_wiki_review_sources(self, review_id: str, sources: dict[str, Any]) -> None:
+        """Replace the quoted sides of a contradiction review after an erasure; nothing else about it changes."""
+        _validate_identity(review_id, 1)
+        serialized = json.dumps({"sources": _validate_wiki_contradiction(sources)}, sort_keys=True, separators=(",", ":"))
+        _utf8_size(serialized, 65536)
+        with self.transaction() as connection:
+            if connection.execute("UPDATE wiki_reviews SET details_json=? WHERE review_id=? AND code='contradiction'", (serialized, review_id)).rowcount != 1:
+                raise CatalogConflict("wiki review conflict")
 
     def list_wiki_reviews(self, page_id: str) -> list[dict[str, Any]]:
         _validate_identity(page_id, 1)

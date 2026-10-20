@@ -302,6 +302,35 @@ class DerivedStore:
             )
             return payload
 
+    def remove_source(self, source_id: str) -> None:
+        """Remove every extraction artifact of a deleted source; nothing left is fine, so a retry repeats it.
+
+        Only version directories holding plain files are removed; anything else fails closed."""
+        _identity(source_id, 1, 1)
+        if not os.path.lexists(self.paths.lifeweave_home / "derived" / source_id):
+            return
+        with self._directories(("derived",), create=False) as descriptors:
+            derived = descriptors[-1]
+            source_fd = _open_child_dir(derived, source_id, create=False)
+            try:
+                versions = os.listdir(source_fd)
+                if any(re.fullmatch(r"v[1-9][0-9]{0,9}", name) is None for name in versions):
+                    raise DerivedError("unexpected derived entry")
+                for version_name in versions:
+                    version_fd = _open_child_dir(source_fd, version_name, create=False)
+                    try:
+                        for filename in os.listdir(version_fd):
+                            os.unlink(filename, dir_fd=version_fd)
+                        os.fsync(version_fd)
+                    finally:
+                        os.close(version_fd)
+                    os.rmdir(version_name, dir_fd=source_fd)
+                os.fsync(source_fd)
+            finally:
+                os.close(source_fd)
+            os.rmdir(source_id, dir_fd=derived)
+            os.fsync(derived)
+
     def list_inventory(self, *, limit: int = 4096) -> list[tuple[str, int, int]]:
         """Return verified extraction identities; unexpected entries fail closed."""
         if type(limit) is not int or not 1 <= limit <= 4096:
