@@ -918,10 +918,13 @@ and in its artifacts (its page ID stays). Nothing else is touched, and what the
 vault shows does not change; the document's title and file name stay in the
 catalog's document record and in operation receipts. The step runs before the
 delete counts as complete, so a failure leaves `custody_delete` running for the
-retry, and it can be repeated safely. `reconcile` (the daily `maintain` runs it)
-does the same again for every deleted document, which also cleans up documents
-deleted by an earlier version; a repeat changes nothing. A forget changes none
-of this: it hides and keeps. A forgotten or deleted document
+retry, and it can be repeated safely. A stored revision file that is missing or
+cannot be read is logged and skipped, so it never holds a delete back. The step
+ends by giving the document's own page the withdrawn title; `reconcile` (the
+daily `maintain` runs it) does the step again for every deleted document whose
+page has not that title yet or whose extracted text is still there, which also
+cleans up documents deleted by an earlier version, and leaves the others alone.
+A forget changes none of this: it hides and keeps. A forgotten or deleted document
 takes no new version: importing a replacement fails with `invalid_request`;
 import the file as a new document instead. A forgotten document is not indexed
 again either: `curate reindex` fails with `conflict`, and recall never cites a

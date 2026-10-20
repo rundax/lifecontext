@@ -790,26 +790,28 @@ class WikiService:
 
         Text of forgotten or deleted documents is never shown, in current or earlier
         revisions; a page that cites nothing else shows a fixed line under a neutral
-        title (``title``), and ``withdrawn`` says why a page shows no claims.
+        title (``title``; ``title_withdrawn`` says it is the neutral one, whatever the
+        catalog holds), and ``withdrawn`` says why a page shows no claims.
         """
         page = self.catalog.get_wiki_page(page_id)
         if page is None:
             return None
         revision = page["current_revision"] if revision is None else revision
         row = self.catalog.get_wiki_revision(page_id, revision) if revision else None
-        managed, title, withdrawn = "", page["title"], None
+        managed, title, withdrawn, neutral = "", page["title"], None, False
         cache: dict = {}
         if row:
             patch = self.store.read(page_id, revision, row["artifact_sha256"])
             visible, withdrawn = self._visible(patch, current=revision == page["current_revision"], cache=cache)
             if withdrawn == "forgotten" and page_id != INDEX_PAGE and self.forgotten(page_id, revision, cache=cache):
-                title = WITHDRAWN_TITLE
+                title, neutral = WITHDRAWN_TITLE, True
                 visible = replace(visible, title=title)
             # Page titles never change, so naming linked pages keeps a revision's text stable;
             # links to withdrawn pages are gone already.
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
             managed = render_managed(visible, titles=titles, withdrawn=withdrawn, **render)
         return {"page": {**page, "title": title}, "revision": row, "managed": managed, "title": title,
+                "title_withdrawn": neutral,
                 "withdrawn": withdrawn, "reviews": [review for review in self.catalog.list_wiki_reviews(page_id)
                                                     if not self.review_withdrawn(review, cache)]}
 
@@ -827,7 +829,12 @@ class WikiService:
             for row in self.catalog.list_wiki_revisions(page_id):
                 if not any(dependency["source_id"] == source_id for dependency in row["dependencies"]):
                     continue
-                patch = self.store.read(page_id, row["revision"], row["artifact_sha256"])
+                try:
+                    patch = self.store.read(page_id, row["revision"], row["artifact_sha256"])
+                except (ValueError, OSError):
+                    # Nothing can be read, so nothing can be erased; it must not hold the delete back.
+                    logging.getLogger(__name__).warning("Wiki revision %s r%s unreadable; not erased", page_id, row["revision"])
+                    continue
                 erased, checksum = erase_patch(patch, source_id), row["artifact_sha256"]
                 if erased != patch:
                     stored = self.store.write(erased)
@@ -836,9 +843,6 @@ class WikiService:
                         page_id, row["revision"], row["artifact_sha256"],
                         artifact_path=str(stored.path.relative_to(self.paths.lifeweave_home)), artifact_sha256=checksum)
                 self.store.retire(page_id, row["revision"], checksum)
-        own = self.catalog.get_wiki_page(source_page_id(source_id))
-        if own is not None and own["title"] != WITHDRAWN_TITLE:
-            self.catalog.retitle_wiki_page(own["page_id"], WITHDRAWN_TITLE)
         reviews, total = self.catalog.find_wiki_reviews(limit=4096)
         if total > len(reviews):
             reviews, _ = self.catalog.find_wiki_reviews(limit=total)
@@ -849,6 +853,10 @@ class WikiService:
                 contradiction = Contradiction.parse(review["details"]["sources"])
                 if (erased := erase_contradiction(contradiction, source_id)) != contradiction:
                     self.catalog.replace_wiki_review_sources(review["review_id"], asdict(erased))
+        # Last: a page with the withdrawn title is the mark that the rest is done.
+        own = self.catalog.get_wiki_page(source_page_id(source_id))
+        if own is not None and own["title"] != WITHDRAWN_TITLE:
+            self.catalog.retitle_wiki_page(own["page_id"], WITHDRAWN_TITLE)
 
     def mark_dependent_stale(self, source_id: str, version: int) -> int:
         return self.catalog.mark_dependent_wiki_stale(source_id, version)

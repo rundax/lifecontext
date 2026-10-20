@@ -179,8 +179,8 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         # The edited history file keeps its name, so the page names that revision without a link.
         self.assertIn("\nHistory: r1\n", page)
 
-    def interrupt_the_page_write(self, error):
-        """Forget, failing once where the withdrawn page is written after its history files moved."""
+    def interrupt_the_page_write(self, error, action="forget"):
+        """Forget or delete, failing once where the withdrawn page is written after its history files moved."""
         withdrawn = self.import_pair()
         write, armed = ManagedVault.safe_write_bytes, [True]
 
@@ -191,7 +191,7 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
             return write(vault, path, data, **kwargs)
 
         with patch.object(ManagedVault, "safe_write_bytes", fail_once):
-            self.curate("forget", withdrawn)
+            self.curate(action, withdrawn)
         self.assertFalse(armed[0])
         self.assertTrue((self.journal / "wiki" / "Secret notes.md").exists())
         for _ in range(2):
@@ -207,6 +207,13 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
 
     def test_a_process_stopped_after_the_history_moved_is_repaired_by_reconcile(self):
         self.interrupt_the_page_write(RuntimeError("process stopped"))
+
+    def test_a_delete_whose_page_write_failed_is_repaired_after_the_title_was_withdrawn(self):
+        # The erasure had already given the page the withdrawn title when the file, still
+        # naming the document, is written again: not a hand edit, and the text goes.
+        self.interrupt_the_page_write(VaultError("vault_unavailable"), action="delete")
+        self.assertEqual(sum(page["title"] == "Withdrawn page" for page in self.app.catalog.list_wiki_pages()
+                             if page["page_id"].startswith("source_")), 1)
 
     def test_a_forgotten_document_is_never_indexed_again(self):
         withdrawn = self.import_text("Secret notes.txt", "Coffee is a stimulant.", "x")
@@ -334,9 +341,27 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         self.assertFalse((self.app.paths.lifeweave_home / "derived" / deleted).exists())
         self.assertEqual(self.wiki_files(), files)
         digests = {key: row["artifact_sha256"] for key, row in self.revision_rows().items()}
-        self.assertEqual(self.app.reconcile_projections(limit=4096)["failed"], 0)
+        # A document that was erased is not scanned again.
+        with patch.object(WikiService, "erase_source") as erase:
+            self.assertEqual(self.app.reconcile_projections(limit=4096)["failed"], 0)
+        erase.assert_not_called()
         self.assertEqual({key: row["artifact_sha256"] for key, row in self.revision_rows().items()}, digests)
         self.assertIn("Coffee is a sedative.", self.app.show_wiki("topic_coffee")["managed"])
+
+    def test_a_missing_or_corrupt_revision_file_does_not_hold_a_delete_back(self):
+        deleted = self.import_pair()
+        directory = self.app.paths.lifeweave_home / "wiki_revisions" / "topic_coffee"
+        files = sorted(directory.glob("r*.json"))
+        self.assertEqual(len(files), 2)
+        files[0].unlink()
+        files[1].write_text("not a revision")
+        with self.assertLogs("lifecontext.wiki", "WARNING"):
+            self.curate("delete", deleted)
+        self.assertEqual({item["progress"]["custody_delete"] for item in self.app.catalog.list_tombstones(deleted)}, {"completed"})
+        self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(deleted))["title"], "Withdrawn page")
+        # The files that cannot be read stay as they are; every other stored revision is erased.
+        held = self.home_files_holding("Coffee is a stimulant.", "persuasive")
+        self.assertEqual([path for path in held if "wiki_revisions" in path and "topic_coffee" not in path], [])
 
     def test_a_failed_erasure_leaves_the_delete_unfinished_for_the_retry(self):
         deleted = self.import_pair()

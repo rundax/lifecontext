@@ -498,6 +498,16 @@ class DocumentProjectionService:
             fields["state"] = state
         return "---\n" + yaml.safe_dump(fields, allow_unicode=True, sort_keys=True) + "---\n\n"
 
+    @staticmethod
+    def _file_title(text):
+        """The title in the front matter of a projected file, or None."""
+        head = text.split("\n---\n", 1)[0] if text.startswith("---\n") else ""
+        try:
+            fields = yaml.safe_load(head)
+        except yaml.YAMLError:
+            return None
+        return fields.get("title") if isinstance(fields, dict) and isinstance(fields.get("title"), str) else None
+
     def _managed_base(self, text, page_id, titles, revision):
         """The generated start of a projected page, if this service wrote it for ``revision``.
 
@@ -617,7 +627,7 @@ class DocumentProjectionService:
         # A page that cites only forgotten documents shows a neutral title instead of
         # theirs, and its files take a neutral name.
         title = current.get("title", page["title"])
-        withdrawn = title != page["title"]
+        withdrawn = current.get("title_withdrawn", title != page["title"])
         for receipt in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id):
             self._recover_publication(page_id, receipt["revision"], layer="wiki")
         self._recover_publication(page_id, revision, layer="wiki")
@@ -640,7 +650,10 @@ class DocumentProjectionService:
             if old is None:
                 return {"state": "conflict", "error": "unmanaged_file"}
             text = existing.decode("utf-8")
-            base = self._managed_base(text, page_id, dict.fromkeys((page["title"], title, WITHDRAWN_TITLE)), old["revision"])
+            # A withdrawn page is rewritten under the neutral title whatever its file names now;
+            # a delete may have taken the catalog's title before the file was written again.
+            titles = (page["title"], title, WITHDRAWN_TITLE, *([self._file_title(text)] if withdrawn else []))
+            base = self._managed_base(text, page_id, dict.fromkeys(titles), old["revision"])
             proof = self.catalog.get_artifact_publication(self._publication_id("wiki", page_id), old["revision"])
             if base is None and existing_path == f"wiki/{page_id}.md" and (
                 proof is None or proof["desired_hash"] != old["last_projected_hash"] and _hash(existing) == old["last_projected_hash"]

@@ -61,7 +61,7 @@ from lifecontext.journal_names import (
 from lifecontext.paths import LifeContextPaths
 from lifecontext.relationships import RelationshipError, RelationshipStore
 from lifecontext.vault import ManagedVault, VaultError
-from lifecontext.wiki import WikiError, WikiService
+from lifecontext.wiki import WITHDRAWN_TITLE, WikiError, WikiService, source_page_id
 
 _MAX_QUERY_TOKENS = 8_192
 _QUERY_BUDGETS = {"low", "mid", "high"}
@@ -2519,11 +2519,16 @@ class JournalApplication:
 
     def _sweep_deleted_text(self, source_id: str) -> None:
         """Erase again for a document deleted before the erasure existed, or whose erasure was lost;
-        a delete still under way does its own, and nothing is left to do on a repeat."""
+        a delete still under way does its own. The erasure ends by giving the document's own page
+        the withdrawn title, so a page with that title and no extracted text left mean it is done."""
         source, tombstones = self.catalog.get_source(source_id), self.catalog.list_tombstones(source_id)
-        if source is not None and source["layer"] == "document" and tombstones and all(
-                item["tombstone_type"] == "deleted" and item["progress"]["custody_delete"] == "completed"
+        if source is None or source["layer"] != "document" or not tombstones or any(
+                item["tombstone_type"] != "deleted" or item["progress"]["custody_delete"] != "completed"
                 for item in tombstones):
+            return
+        own = self.catalog.get_wiki_page(source_page_id(source_id))
+        if (own is not None and own["title"] != WITHDRAWN_TITLE
+                or os.path.lexists(self.paths.lifeweave_home / "derived" / source_id)):
             self._erase_deleted_text(source_id)
 
     def _rewrite_briefs_naming(self, source_id: str) -> None:
