@@ -1,9 +1,10 @@
 name: Pages
 
 # Deploy the landing page in site/ from main, by hand only. The page shows
-# install commands that work only once the release assets exist, so it is not
-# deployed on push. The release workflow starts this one after it has
-# published the assets:
+# install commands that work only once a final release is published
+# (releases/latest skips pre-releases) and its container image is public, so
+# nothing deploys it on push and no other workflow starts it. On release day,
+# after both, the release checklist (docs/development.md, "Releasing") runs:
 #   gh workflow run pages.yml --ref main
 on:
   workflow_dispatch:
