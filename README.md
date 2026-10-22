@@ -39,7 +39,8 @@ editor works too.
 lifecontext documents import ~/Documents/lease.pdf
 ```
 
-Indexing and compiling call your model and can take a few minutes; the page
+(If the shell does not find `lifecontext`, add `~/.local/bin` to your `PATH`
+as the installer says, or open a new terminal.) Indexing and compiling call your model and can take a few minutes; the page
 then appears under `Journal/wiki/` in the vault. Ask Claude Code, Codex or
 Gemini CLI: *"What does my lease say about the deposit?"* The agent answers
 from LifeContext's evidence: the quote, the page and the version of the lease
@@ -47,7 +48,7 @@ it came from.
 
 ## What you get
 
-- **A page for each document**, in your vault, with numbered claims. Each claim
+- **A wiki page for each document**, in your vault, with numbered claims. Each claim
   is a literal quote, checked against the extracted text before the page is
   written, and cited to the source, its version and the passage or page. A
   short summary above the claims is labelled as written by the model.
@@ -65,8 +66,10 @@ it came from.
 
 ## Status
 
-This tree is the 1.2.0 development version (1.2.0.dev0); 1.2.0 will be the
-first public release.
+This tree is the 1.2.0 development version (1.2.0.dev0). 1.2.0, the first
+public release, is planned for 2026-11-01; until then the install command
+above and the Docker image are not available, and you can install from a
+checkout ([docs/install.md](docs/install.md#installsh)).
 
 - Each release candidate is installed on clean GitHub-hosted machines and put
   through one scenario against a real model: on Ubuntu 24.04 (x86_64) with
@@ -144,7 +147,7 @@ Then set it up and start it:
 
 ```bash
 lifecontext init                             # provider, model, key (hidden), vault, time zone
-lifecontext preflight --model-probe          # one short call to check the provider, key and model
+lifecontext preflight --model-probe          # a short check of the provider, key and model
 lifecontext service install --maintenance    # run it as a user service, plus a daily 07:00 upkeep
                                              # add --capture to take in notes from Journal/Inbox every 30 s
 lifecontext skills install                   # give Claude Code, Codex, Gemini CLI, Hermes the skill
@@ -157,7 +160,8 @@ and `Journal/Inbox` inside (mode `0700`). It never starts anything; running it
 again changes nothing unless you pass `--force` or `--replace-key`.
 `lifecontext preflight` without `--model-probe` checks the configuration and
 that a key is stored, then starts the local memory engine and checks that it
-answers; it does not call the model. `service install` writes a
+answers; it does not check the model (starting the engine sends it one tiny
+test request and only logs the result). `service install` writes a
 `systemd --user` unit on Linux or a launchd agent on macOS (`--dry-run` shows
 the files first); to run in a terminal instead, use `lifecontext serve`. The
 first start downloads the local embedding and reranking models into
@@ -187,8 +191,9 @@ provider, field and rule, the API key and the optional vision model are in
 
 ## Daily use
 
-The service must be running (`lifecontext service status`, or `lifecontext
-serve` in a terminal). Add `--json` for stable machine-readable output; reuse
+The service must be running: the installer and `lifecontext service install`
+start it, `lifecontext service status` shows it, and `lifecontext serve` runs
+it in a terminal instead. Add `--json` for stable machine-readable output; reuse
 an idempotency key only to retry the same request.
 
 **Import a document.** PDF, DOCX, XLSX, PPTX, PNG, JPEG, TIFF, plain text and

@@ -54,7 +54,7 @@ lifecontext llm set --model MODEL          # change only what you name
 lifecontext llm set --provider openai --model MODEL --api-key-stdin < ~/openai-key.txt
 lifecontext llm set --provider openai_compatible --base-url https://HOST/v1 --model MODEL
 lifecontext llm set --api-key-stdin < ~/new-key.txt   # replace the key (or set LIFECONTEXT_API_KEY_FILE)
-lifecontext preflight --model-probe        # check the new settings with one short model call
+lifecontext preflight --model-probe        # a short check of the new settings
 ```
 
 `llm show` never prints the key. `llm set` changes only the fields you give,
@@ -117,8 +117,8 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
 - `--non-interactive` without a provider or a model stops with
   `provider_required` or `model_required`; four Claude models are refused for
   the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
-- In a terminal, after writing the configuration, `init` makes one short call
-  to the model and reports it as `model_probe` (`status` and a `cause`, never
+- In a terminal, after writing the configuration, `init` checks the model
+  with two short calls (the model probe below) and reports it as `model_probe` (`status` and a `cause`, never
   the provider's own text); a failed probe does not undo the setup. Run
   `lifecontext preflight --model-probe` to check again.
 - It never starts the API or Hindsight. Its report lists `next_steps` for you
@@ -134,7 +134,8 @@ lifecontext doctor           # readable summary
 lifecontext doctor --json    # the full report
 ```
 
-`doctor` only reads. It reports the LifeContext, platform and Python versions;
+`doctor` only reads, and makes no model call unless you add `--model-probe`
+(see [Startup checks](#startup-checks)). It reports the LifeContext, platform and Python versions;
 the pinned Hindsight package versions; `command -v lifecontext` (the absolute
 path to put in MCP client configs); the paths and modes of `~/.lifeweave`,
 `config.yaml`, `.env`, the vault root and `Journal`; a config summary (provider,
@@ -381,9 +382,10 @@ provider's own error text. `doctor --model-probe` adds the same check to the
 doctor report.
 
 Plain `preflight` checks the configuration and that a key is stored, then
-starts the local memory engine and checks that it answers; it does not call the
-model. `--retain-smoke` also retains one test source, which calls the model and
-can take many minutes. Both commands use only the `lifeweave` Hindsight profile, bound to
+starts the local memory engine and checks that it answers. It does not check
+the model: starting the engine sends it one tiny test request and only logs
+the result. `--retain-smoke` also retains one test source, which goes through
+the model and can take many minutes. These two commands use only the `lifeweave` Hindsight profile, bound to
 `127.0.0.1`. They may start the profile and leave it running after the check;
 an already-running profile is reused without reconfiguration. Restart the
 profile before applying changed model settings. The JSON field `daemon_status`

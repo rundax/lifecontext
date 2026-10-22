@@ -17,7 +17,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="LifeContext">
 <meta property="og:title" content="LifeContext: ваші документи, зведені у вікі. Кожне твердження має джерело.">
-<meta property="og:description" content="Ваші AI-агенти читають договори, листи й скани з доказами: кожне твердження є дослівною цитатою, звіреною з джерелом, з посиланням на сторінку й версію. Працює на вашому комп’ютері, файли лишаються у вас.">
+<meta property="og:description" content="Ваші AI-агенти читають договори, листи й скани, і кожне твердження має доказ: дослівну цитату, звірену з джерелом, з посиланням на сторінку й версію. Працює на вашому комп’ютері, файли лишаються у вас.">
 <meta property="og:url" content="https://rundax.github.io/lifecontext/uk/">
 <meta property="og:image" content="https://rundax.github.io/lifecontext/og-uk.png">
 <meta property="og:image:width" content="1200">
@@ -101,7 +101,7 @@
       </div>
       <ul class="hero-facts">
         <li>Безкоштовно для приватних осіб для власного користування, зокрема на роботі; бізнесу потрібна комерційна ліцензія</li>
-        <li>Linux і macOS на Apple silicon</li>
+        <li>Linux, а також macOS на Apple silicon</li>
         <li>Одна команда встановлення і ключ API</li>
       </ul>
     </div>
@@ -429,10 +429,10 @@
       <ul class="upkeep-list">
         <li><strong>Щоденне зведення і журнал змін</strong>Що імпортовано, які сторінки змінилися, нові суперечності й сторінки, що застаріли.</li>
         <li><strong><code>wiki lint</code></strong>Показує застарілі сторінки, відкриті суперечності, сторінки без посилань і прогалини. Нічого не змінює.</li>
-        <li><strong>Щоденник</strong>Записуйте нотатки в Obsidian або через агента. Записи називаються за датою й заголовком, індексуються й доступні для пошуку. Збирання щоденника у вікі-сторінки з’явиться у v1.3.</li>
+        <li><strong>Щоденник</strong>Кладіть нотатки в теку <code>Journal/Inbox</code> в Obsidian (якщо ввімкнено їх автоматичне перетворення на записи) або записуйте їх через агента. Записи називаються за датою й заголовком, індексуються й доступні для пошуку. Збирання щоденника у вікі-сторінки з’явиться у v1.3.</li>
         <li><strong>Експорт та імпорт</strong>Переносьте бібліотеку між машинами одним пакетом.</li>
         <li><strong>Резервні копії</strong>Зберігайте оригінали, каталог, індекс і сховище та відновлюйте їх у новій домашній теці.</li>
-        <li><strong>Своя модель</strong>Anthropic, OpenAI, Google Gemini, OpenRouter або будь-який OpenAI-сумісний endpoint, зокрема локальний. Модель обираєте ви, типової немає.</li>
+        <li><strong>Своя модель</strong>Anthropic, OpenAI, Google Gemini, OpenRouter або будь-який OpenAI-сумісний endpoint, зокрема локальний. Модель обираєте ви: типової немає.</li>
       </ul>
     </div>
   </div>
@@ -443,7 +443,7 @@
     <header class="section-head">
       <p class="eyebrow"><b>[3]</b>Встановлення</p>
       <h2 id="install-h">Встановлення</h2>
-      <p class="lead">Одна команда на Linux і macOS, образ контейнера для решти систем або звичайний клон репозиторію, якщо спершу хочете прочитати код. Кожен спосіб просить обрати модель, типової немає.</p>
+      <p class="lead">Одна команда на Linux і macOS, образ контейнера для решти систем або звичайний клон репозиторію, якщо спершу хочете прочитати код. Для кожного способу треба обрати модель: типової немає.</p>
     </header>
 
     <div class="install-grid">
@@ -463,7 +463,7 @@
           </div>
           <p>Інсталятор запитає, яку модель використовувати (Anthropic, OpenAI, Google Gemini, OpenRouter, локальний сервер моделей чи інший OpenAI-сумісний endpoint; типової немає), перевірить, що модель відповідає, запустить LifeContext як сервіс користувача й підключить скіл до ваших агентів.</p>
           <p class="step-label">2 · Відкрийте сховище в Obsidian</p>
-          <p>Виберіть «Open folder as vault» і вкажіть <code>~/LifeContext/vault</code> або теку, яку ви назвали інсталятору. Підійде й будь-який редактор Markdown.</p>
+          <p>Виберіть «Open folder as vault» і вкажіть <code>~/LifeContext/vault</code> або теку, яку ви вказали інсталятору. Підійде й будь-який редактор Markdown.</p>
           <p class="step-label">3 · Імпортуйте документ і запитайте агента</p>
           <div class="code">
             <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Копіювати команду імпорту" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
@@ -522,7 +522,7 @@ docker compose exec lifecontext lifecontext doctor</code></pre>
 
         <div class="panel" role="tabpanel" id="panel-src" aria-labelledby="tab-src">
           <h3 class="panel-title">З вихідного коду</h3>
-          <p>Потрібні Python 3.12, <a href="https://github.com/astral-sh/uv">uv</a> і Tesseract з мовними даними <code>eng</code>, <code>ukr</code> та <code>rus</code>. На Linux файл обмежень залишає PyTorch у збірці для процесора; на macOS виконайте замість цього <code>uv pip install -e .</code>.</p>
+          <p>Потрібні Python 3.12 і <a href="https://github.com/astral-sh/uv">uv</a>, а щоб читати скани й зображення, ще й Tesseract з мовними даними <code>eng</code>, <code>ukr</code> та <code>rus</code>. На Linux файл обмежень залишає PyTorch у збірці для процесора; на macOS виконайте замість цього <code>uv pip install -e .</code>.</p>
           <div class="code">
             <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-src" aria-label="Копіювати команди встановлення з коду" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
             <pre tabindex="0"><code id="code-src">git clone https://github.com/rundax/lifecontext.git
@@ -532,7 +532,7 @@ uv pip install -c constraints-cpu.txt -e . \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   --index-strategy unsafe-best-match   <span class="c"># Linux, PyTorch лише для CPU</span>
 lifecontext init                         <span class="c"># постачальник, модель, ключ API, тека сховища</span>
-lifecontext preflight --model-probe      <span class="c"># один короткий запит для перевірки моделі</span>
+lifecontext preflight --model-probe      <span class="c"># коротка перевірка моделі</span>
 lifecontext service install --maintenance
 lifecontext skills install               <span class="c"># Claude Code, Codex, Gemini CLI, Hermes</span>
 lifecontext doctor</code></pre>
@@ -555,7 +555,7 @@ lifecontext doctor</code></pre>
           <li>Завантажує реліз через HTTPS і перевіряє контрольні суми SHA-256, а з cosign 3 або новішим також їхній підпис. Усі залежності ставить із lock-файлу із закріпленими хешами.</li>
           <li>Встановлює все в домашню теку. Для роботи LifeContext права root не потрібні.</li>
           <li>Ставить Tesseract з англійською, українською та російською мовами через Homebrew на macOS або через apt, dnf чи pacman, якщо sudo працює без пароля. Пароль інсталятор ніколи не питає: якщо так не виходить, він показує команду, яку треба виконати.</li>
-          <li>Запитує, яку модель використовувати (типової немає), і одним коротким запитом перевіряє, що вона відповідає. Ключ API читає з прихованого введення, у командному рядку він не передається.</li>
+          <li>Запитує, яку модель використовувати (типової немає), і коротким запитом перевіряє, що вона відповідає. Ключ API ви вводите приховано, у командному рядку він не передається.</li>
           <li>Виконує <code>init</code>, <code>service install --maintenance</code>, <code>skills install</code> і <code>doctor</code>, а наприкінці показує три наступні кроки.</li>
           <li>Повторний запуск оновлює встановлення: зупиняє сервіс, робить резервну копію даних, ставить нову версію й знову запускає сервіс.</li>
           <li>Залишає візуальну модель вимкненою.</li>
@@ -905,7 +905,7 @@ lifecontext doctor</code></pre>
         <p class="contact">Напишіть на <a href="mailto:roman@rundax.com">roman@rundax.com</a> і коротко опишіть, як плануєте його використовувати.</p>
       </div>
     </div>
-    <p class="licence-meta">Подробиці й більше прикладів є в <a href="https://github.com/rundax/lifecontext/blob/main/LICENSING.md">LICENSING.md</a>, повні умови: у <a href="https://github.com/rundax/lifecontext/blob/main/LICENSE">файлі ліцензії</a>. Рушій Hindsight усередині LifeContext має власну ліцензію MIT.</p>
+    <p class="licence-meta">Подробиці й більше прикладів є в <a href="https://github.com/rundax/lifecontext/blob/main/LICENSING.md">LICENSING.md</a>; повні умови містить <a href="https://github.com/rundax/lifecontext/blob/main/LICENSE">файл ліцензії</a>. Рушій Hindsight усередині LifeContext має власну ліцензію MIT.</p>
   </div>
 </section>
 
@@ -977,10 +977,10 @@ lifecontext doctor</code></pre>
         </details>
         <details>
           <summary>Чи потрібен Obsidian?</summary>
-          <div class="answer"><p>Ні. Сховище: звичайна тека з Markdown-файлами, яку відкриє будь-який редактор. Посилання, назви сторінок і граф розраховані на Obsidian.</p></div>
+          <div class="answer"><p>Ні. Сховище є звичайною текою з Markdown-файлами, яку відкриє будь-який редактор. Посилання, назви сторінок і граф розраховані на Obsidian.</p></div>
         </details>
         <details>
-          <summary>Чи збирає він у вікі й нотатки?</summary>
+          <summary>Чи потрапляють у вікі нотатки?</summary>
           <div class="answer"><p>У v1.2 записи щоденника й нотатки з теки <code>Journal/Inbox</code> індексуються й доступні для пошуку поруч із документами, і агенти знаходять їх із цитатами. Збирання щоденника у вікі-сторінки з’явиться у v1.3. Markdown-файл, який ви імпортуєте як документ, збирається так само, як інші документи.</p></div>
         </details>
         <details>
@@ -989,7 +989,7 @@ lifecontext doctor</code></pre>
         </details>
         <details>
           <summary>Кому він не підходить?</summary>
-          <div class="answer"><p>Тим, хто хоче застосунок і не має комп’ютера, на якому його запускати: LifeContext працює на вашому власному Linux чи Mac або в Docker. Командам, яким потрібна одна спільна база знань: він розрахований на одну людину. Тим, кому потрібен запис аудіо, відео чи вебсторінок: LifeContext читає документи й зображення.</p></div>
+          <div class="answer"><p>Тим, хто хоче готовий застосунок без власного комп’ютера чи сервера: LifeContext працює на вашому Linux чи Mac або в Docker. Командам, яким потрібна одна спільна база знань: він розрахований на одну людину. Тим, кому потрібен запис аудіо й відео чи збереження вебсторінок: LifeContext читає документи й зображення.</p></div>
         </details>
       </div>
     </div>

@@ -9,7 +9,7 @@ needs root:
   Desktop.
 - From source, as in the [README](../README.md#from-source).
 
-Every way asks you to choose the model provider and the model; there is no
+Every way needs you to choose the model provider and the model; there is no
 default ([choosing the model](operations.md#choosing-the-model)).
 Configuration after the install is in [operations.md](operations.md); what
 leaves your machine is in [privacy.md](privacy.md).
@@ -96,8 +96,8 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    the [variables below](#unattended-install). Existing settings in
    `~/.lifeweave` are kept; change them later with
    [`lifecontext llm set`](#change-the-model-or-endpoint-later).
-8. Checks the model with `lifecontext preflight --model-probe`: one short
-   request, at most 60 seconds, also on a re-run that keeps the existing
+8. Checks the model with `lifecontext preflight --model-probe`: a short
+   check, at most 60 seconds, also on a re-run that keeps the existing
    settings. If it fails, it prints the cause (the provider rejected the key,
    the model was not found, the model does not support the structured output
    LifeContext needs, or the endpoint did not answer) and the
@@ -108,7 +108,8 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    (with `--capture` if you said yes to `Journal/Inbox`) and waits for the API
    to answer. Otherwise it tells you to run `lifecontext serve`.
 10. Runs `lifecontext skills install` for the agents it finds (Claude Code,
-    Codex, Gemini CLI, Hermes), also when the setup is not complete yet, then
+    Codex, Gemini CLI, Hermes), also when it skipped `init` because nothing
+    was set (an unattended `init` that fails stops the installer before this), then
     `lifecontext doctor`, and ends with three next steps: open the vault in
     Obsidian, import a document, ask your agent about it.
 
@@ -170,7 +171,7 @@ variables the script installs everything and links the skill, but skips
 lifecontext llm show                       # provider, model, base URL, whether a key is stored
 lifecontext llm set --model MODEL          # change only what you name
 lifecontext llm set --api-key-stdin < ~/new-key.txt
-lifecontext preflight --model-probe        # check the result with one short model call
+lifecontext preflight --model-probe        # a short check of the result
 ```
 
 `llm show` never prints the key. `llm set` validates like `init`, keeps every
@@ -258,7 +259,8 @@ or run `docker exec -it lifecontext lifecontext init --vault /data/vault`.
 
 | Variable (shell or `.env`) | Meaning |
 |---|---|
-| `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL`, `LIFECONTEXT_BASE_URL`, `LIFECONTEXT_TIMEZONE` | `init` settings for the first start |
+| `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL` | Provider and model for the first start; required, there is no default |
+| `LIFECONTEXT_BASE_URL`, `LIFECONTEXT_TIMEZONE` | Other `init` settings for the first start |
 | `LIFECONTEXT_API_KEY_FILE` | Host path of the key file (default `./secrets/lifecontext_api_key`); it must be readable by uid 1000 |
 | `LIFECONTEXT_IMAGE` | Image to run (default `ghcr.io/rundax/lifecontext:1.2.0`) |
 | `LIFECONTEXT_CONTAINER` | Container name (default `lifecontext`) |
