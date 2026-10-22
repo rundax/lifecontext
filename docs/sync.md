@@ -117,6 +117,8 @@ CouchDB database. `docker/livesync/` in the repository holds a hub for it:
 - `init-couchdb.sh`: creates CouchDB's system databases, applies
   `livesync.ini`, then creates the database and a sync user that can use that
   database and nothing else.
+- `setup-uri.mjs`: makes the setup URI that joins a device to the hub
+  (step 6).
 
 ```bash
 cd docker/livesync
@@ -147,12 +149,12 @@ volume, so editing `couchdb.env` later does not change the admin password. To
 change it, set the new password in CouchDB first, then in `couchdb.env`:
 
 ```bash
-umask 077
-printf 'user = "admin:%s"\n' "$(sed -n 's/^COUCHDB_PASSWORD=//p' couchdb.env)" > .admin.curlrc
-printf '"%s"' "NEW-PASSWORD" > .new-password.json   # replace NEW-PASSWORD, letters and digits only
-curl -s --config .admin.curlrc -X PUT --data-binary @.new-password.json \
+cfg=$(mktemp) && pw=$(mktemp)   # private files, outside the repository
+printf 'user = "admin:%s"\n' "$(sed -n 's/^COUCHDB_PASSWORD=//p' couchdb.env)" > "$cfg"
+printf '"%s"' "NEW-PASSWORD" > "$pw"   # replace NEW-PASSWORD, letters and digits only
+curl -s --config "$cfg" -X PUT --data-binary @"$pw" \
   http://127.0.0.1:5984/_node/_local/_config/admins/admin
-rm -f .admin.curlrc .new-password.json
+rm -f "$cfg" "$pw"
 ```
 
 Then write the same password into `couchdb.env`. Removing the volumes
@@ -189,14 +191,19 @@ device that is on your tailnet but is not set up cannot read the notes.
 
 The server has no Obsidian to run the plugin, so the Self-hosted LiveSync
 project's command-line client mirrors the hub into the vault folder and back.
-These steps follow release 1.0.32 (commit
-`7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b`) and the README of its CLI at that
+These steps follow release 1.0.39 (commit
+`11edc6edef6291dd90ad10e33cf726ee5f7f82e0`) and the README of its CLI at that
 commit. You need Git, Node.js and npm.
+
+Use the same release here as the Obsidian plugin on your devices. Each release
+can change the chunk settings it prefers. A device whose settings differ from
+the hub's stops syncing without showing an error, until someone runs the
+plugin's "Sync now" command on it, sometimes twice.
 
 ```bash
 git clone https://github.com/vrtmrz/obsidian-livesync.git ~/.local/share/livesync-src
 cd ~/.local/share/livesync-src
-git checkout 7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b
+git checkout 11edc6edef6291dd90ad10e33cf726ee5f7f82e0
 npm ci --ignore-scripts
 npm run build --workspace self-hosted-livesync-cli
 node src/apps/cli/dist/index.cjs --help
@@ -237,7 +244,8 @@ PY
 
 The client on the server talks to the hub on `127.0.0.1` directly; only the
 devices use the Tailscale address. `encrypt` with a passphrase makes the hub
-hold only encrypted data; every device needs the same passphrase (step 6), and
+hold the contents of notes only in encrypted form (the names of files and
+folders stay readable, step 6); every device needs the same passphrase, and
 `e2ee.passphrase` is where it is kept on the server.
 
 The database folder comes first and the command last. Run the client once in
@@ -279,31 +287,132 @@ journalctl --user -u livesync-client   # "Initial replication complete", then "L
 The client keeps its own state in `~/.local/state/livesync`, outside the
 vault. Conflicting versions of one file are skipped by the client and shown by
 its `ls` command; resolve them with its `resolve` command or in Obsidian.
-These steps were run with release 1.0.32 on an Arch Linux server: the client
-mirrored a 70-note vault into the hub and stayed in continuous sync.
+These steps were first run with release 1.0.32 on an Arch Linux server: the
+client mirrored a 70-note vault into the hub and stayed in continuous sync.
+That server's client was then upgraded to 1.0.39 to match the plugin.
+
+To upgrade the client, build the new release next to the old one, back up the
+client's state and settings, and swap the folders. Set `old` to the release
+you run now, `new` to the release you move to, and `COMMIT` to its commit:
+
+```bash
+umask 077
+old=1.0.39 new=1.0.40   # example releases
+src=~/.local/share/livesync-src
+git clone https://github.com/vrtmrz/obsidian-livesync.git "$src-$new"
+cd "$src-$new"
+git checkout COMMIT
+npm ci --ignore-scripts
+npm run build --workspace self-hosted-livesync-cli
+systemctl --user stop livesync-client
+tar -C ~/.local/state -czf ~/livesync-state-$old.tgz livesync
+cp -p ~/.config/livesync/settings.json ~/livesync-settings-$old.json
+mv -T "$src" "$src-$old"
+mv -T "$src-$new" "$src"
+systemctl --user start livesync-client
+journalctl --user -u livesync-client -n 20   # "LiveSync active"
+```
+
+Each release gets its own folder name, so a folder left from an earlier
+upgrade never gets in the way (`mv -T` stops instead of moving into it). To go
+back, stop the service, move `$src` to `$src-$new` and `$src-$old` to `$src`,
+and restore both backups. Upgrade the plugin on every device to the same
+release.
 
 ## 6. The LiveSync plugin on each device
 
-In Obsidian, Settings, Community plugins, install and enable "Self-hosted
-LiveSync". In its setup choose CouchDB and enter:
+Each phone or laptop gets its own vault, filled from the hub. Do this once
+per device. These steps were checked with plugin release 1.0.39.
 
-- URI: the `https://` address from step 4.
-- Username `livesync`, and the password from `sync-user.password` (move it to
-  the device with a password manager, not through chat or email).
-- Database name `obsidian-livesync`.
-- End-to-end encryption on, with the passphrase from
-  `~/.config/livesync/e2ee.passphrase` on the server (step 5).
+### Before you start
 
-Choose the continuous "LiveSync" mode. Turn on end-to-end encryption with the
-passphrase of step 5: CouchDB holds only encrypted data, and every client,
-including the one on the server, must use the same passphrase. Losing it makes the
-hub unreadable, but not the vault on the server.
+- **The same release as the server.** Obsidian installs the plugin's latest
+  release and shows its version under Settings, Community plugins. If it is
+  newer than the server's client, upgrade the client first (end of step 5),
+  then make the setup URI. When the plugin later offers an update, upgrade the
+  client to that release as well.
+- **Tailscale is connected.** Install Tailscale on the device and sign in to
+  the same tailnet. A phone syncs only while Tailscale is connected, so turn on
+  VPN On Demand in the Tailscale app on iOS, or Always-on VPN for Tailscale in
+  Android's network settings. To check, open the hub's `https://` address
+  from step 4 in the device's browser: it asks for a user name and password.
+  If the page does not load, the device is not on the tailnet.
 
-The server's client (step 5) fills the hub from the server's vault, which
-LifeContext keeps current. On each device choose the plugin's option to fetch
-from the remote hub rather than to overwrite it. The plugin's
-"setup URI" carries the password; do not paste one into a command line, where
-other users on the machine can read it from the process list.
+### Make a setup URI on the server
+
+A setup URI carries the hub's address, the sync user's password and the
+end-to-end passphrase, encrypted with a setup password, so nothing has to be
+typed into the device except that password. `setup-uri.mjs` makes one from
+the settings of the server's client, so the device starts with the same
+encryption and chunk settings as the hub:
+
+```bash
+cd /path/to/lifecontext/docker/livesync
+node setup-uri.mjs --hub https://NAME.TAILNET.ts.net --device iphone
+qrencode -t ansiutf8 < ~/.config/livesync/device-setup/iphone.uri
+```
+
+`--hub` is the address from `tailscale serve status`; `--device` is a short
+name for the device. The script uses the client built in step 5 and its
+settings file; pass `--livesync-src DIR` or `--settings FILE` if yours are
+elsewhere, and `--help` lists every option. It writes the URI to
+`~/.config/livesync/device-setup/NAME.uri` and keeps the setup password in
+`setup.password` in the same folder, creating it the first time, both mode
+`0600`. It prints neither.
+
+`qrencode` (a package on most distributions) shows the URI as a QR code in the
+terminal. The code is about 100 columns wide, so widen the terminal or zoom
+out until it fits without wrapping. Move the setup password to the device with
+a password manager, not through chat or email; without `qrencode`, move the URI
+the same way. Never paste a setup URI into a command line, where other users
+of the machine can read it from the process list. Once the device syncs,
+delete its `.uri` file; delete `setup.password` to make the next URI with a
+new password.
+
+### Set up the device
+
+1. In Obsidian, create a new, empty vault. On an iPhone or iPad, keep it on
+   the device, not in iCloud Drive: iCloud and LiveSync would both sync the
+   same files.
+2. Settings, Community plugins: turn community plugins on, Browse, install
+   "Self-hosted LiveSync" and enable it.
+3. Open the setup URI: scan the QR code with the device's camera and open the
+   link in Obsidian, or copy the URI and run the command "Self-hosted LiveSync:
+   Use the copied setup URI (Formerly Open setup URI)". The dialog "Enter Setup
+   URI" opens. Type the setup password into its "Passphrase" field (the setup
+   password, not the end-to-end passphrase) and choose "Test Settings and
+   Continue".
+4. Under "Mostly Complete: Decision Required" choose "Join this device" and
+   go on. Never choose "Initialise or overwrite the remote": the hub already
+   holds the server's vault, and a new device would replace it.
+5. Under "Setup Complete: Preparing to Fetch Synchronisation Data" choose
+   "Restart and Fetch Data". Obsidian restarts and fills the vault from the
+   hub. Accept if the plugin asks to restart again or to use the hub's
+   settings.
+6. When the fetch has finished, open Settings, Self-hosted LiveSync, Sync
+   Settings. Under Presets choose "LiveSync" and Apply; "Sync Mode" then
+   shows LiveSync. Do not skip this. The fetch turns every kind of sync off
+   while it runs and leaves it off afterwards, so without this step the device
+   receives nothing new and sends nothing.
+
+### What the device does then
+
+In LiveSync mode the device keeps a connection to the hub open and sends and
+receives changes within seconds. The other options on the Sync Settings page
+apply only to the other modes; leave "Batch database update" off as well,
+because it holds changes back.
+
+- A laptop syncs while Obsidian is open.
+- A phone syncs only while Obsidian is open on screen: iOS and Android pause
+  apps in the background. Changes made elsewhere arrive a few seconds after you
+  open Obsidian, and a note written on the phone reaches the hub while
+  Obsidian is open and Tailscale is connected.
+
+Every client, the server's included, uses the same end-to-end passphrase. The
+hub holds the contents of notes only in encrypted form; the names of files and
+folders stay readable there, because these steps leave LiveSync's path
+obfuscation off. Losing the passphrase makes the hub unreadable, but not the
+vault on the server.
 
 ## 7. Agents on the server
 
@@ -326,12 +435,55 @@ returns to every device. `lifecontext capture --once --json` shows the counts,
 `journalctl --user -u lifecontext-capture` the timer's runs, and
 `journalctl --user -u livesync-client` the client.
 
+To check the other direction, write a note on the server outside
+`Journal/Inbox`, so that capture leaves it alone:
+
+```bash
+echo "Written on the server at $(date)" > ~/LifeContext/vault/"Sync check.md"
+```
+
+Each device with Obsidian open shows it within a few seconds. Delete it on any
+device afterwards; the deletion reaches the others.
+
+## When a device does not sync
+
+The plugin's log shows what it did: run "Self-hosted LiveSync: Show log", and
+turn on "Verbose Log" in the plugin's settings for more detail. The hub shows
+which devices connect and what they ask for. CouchDB logs requests only at the
+`notice` level, so turn that on while you look. The change lasts until CouchDB
+restarts, and the request lines show the names of notes.
+
+```bash
+cd /path/to/lifecontext/docker/livesync
+cfg=$(mktemp)   # a private file, outside the repository
+printf 'user = "admin:%s"\n' "$(sed -n 's/^COUCHDB_PASSWORD=//p' couchdb.env)" > "$cfg"
+curl -s --config "$cfg" -H 'X-Couch-Persist: false' -X PUT -d '"notice"' \
+  http://127.0.0.1:5984/_node/_local/_config/log/level
+```
+
+Now open Obsidian on the device and run "Sync now", then read the requests;
+each device appears by its tailnet address:
+
+```bash
+docker compose logs --since 5m couchdb | grep -v /_up
+curl -s --config "$cfg" -H 'X-Couch-Persist: false' -X PUT -d '"warning"' \
+  http://127.0.0.1:5984/_node/_local/_config/log/level
+rm -f "$cfg"
+```
+
+| What you see | Why | What to do |
+|---|---|---|
+| The hub's log has no requests from the device | Tailscale is off on the device, or Obsidian is in the background | Connect Tailscale and open Obsidian |
+| The device connects, makes two `_find` requests and stops; Sync Mode shows "On events" with every option off | The first fetch turned sync off | Presets: "LiveSync", Apply (step 6) |
+| "Sync now" logs "Some mismatches have been detected in the configuration between devices" | The device's chunk settings differ from the hub's, usually because the plugin and the server's client are on different releases | The plugin tries to resolve it during that "Sync now"; if it stops half way, run "Sync now" again. Put the plugin and the server's client on one release (step 5) |
+| "Remote synchronisation is paused for compatibility review" | The plugin wants you to confirm a change of release | Run "Review why synchronisation is paused" and choose to resume |
+
 ## What moves where
 
 - The hub holds a copy of everything in the vault that the client syncs:
   your notes, LifeContext's entries and wiki pages, and the copies of imported
-  originals. Step 5 encrypts it end to end, so the hub's disk holds no
-  readable notes.
+  originals. Step 5 encrypts the contents end to end; the names of files and
+  folders stay readable on the hub (step 6).
 - Notes and entries reach every device you set up. Nothing leaves your tailnet,
   except what LifeContext sends to the model you configured
   ([privacy](privacy.md)).

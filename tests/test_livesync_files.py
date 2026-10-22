@@ -311,5 +311,165 @@ class InitScriptTests(unittest.TestCase):
         self.assertIn("accessible to other users", result.stderr)
 
 
+# Stands in for LiveSync's encoder: the URI holds the password, the settings and the encoder's
+# other arguments in the clear, so the tests can read back what the script passed. A device
+# named "lossy" makes the decoder drop the sync password, as a broken encoder would.
+FAKE_ENCODER = """
+export async function encodeSettingsToSetupURI(settings, password, removeProperties, skipDefaultValue) {
+    const body = { password, settings, removeProperties, skipDefaultValue };
+    return `obsidian://setuplivesync?settings=${Buffer.from(JSON.stringify(body)).toString("base64url")}\\n`;
+}
+export async function decodeSettingsFromSetupURI(uri, password) {
+    const body = JSON.parse(Buffer.from(uri.split("settings=")[1], "base64url").toString());
+    if (body.password !== password) throw new Error("wrong password");
+    if (body.settings.deviceAndVaultName === "lossy") delete body.settings.couchDB_PASSWORD;
+    return body.settings;
+}
+"""
+SYNC_PASSWORD = "sync-user-password-0123456789"
+PASSPHRASE = "e2ee-passphrase-0123456789"
+HUB = "https://server.tailnet.ts.net"
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node")
+class SetupUriTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-setup-uri-test.")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.src = self.root / "livesync-src"
+        encoder = self.src / "node_modules/@vrtmrz/livesync-commonlib/dist/API/processSetting.js"
+        encoder.parent.mkdir(parents=True)
+        encoder.write_text(FAKE_ENCODER)
+        self.settings = self.root / "settings.json"
+        self.write_settings()
+        self.out = self.root / "device-setup"
+
+    def write_settings(self, **changes) -> None:
+        settings = {
+            "couchDB_URI": "http://127.0.0.1:5984", "couchDB_USER": "livesync", "couchDB_PASSWORD": SYNC_PASSWORD,
+            "couchDB_DBNAME": "obsidian-livesync", "encrypt": True, "passphrase": PASSPHRASE,
+            "deviceAndVaultName": "headless-vault", "liveSync": True, "syncOnStart": True,
+            "customChunkSize": 60, "tweakModified": 1792494277156, "isConfigured": True}
+        self.settings.write_text(json.dumps({**settings, **changes}))
+
+    def run_script(self, *arguments: str):
+        command = ["node", str(LIVESYNC / "setup-uri.mjs"), "--livesync-src", str(self.src),
+                   "--settings", str(self.settings), "--out-dir", str(self.out), *arguments]
+        return subprocess.run(command, text=True, capture_output=True, env={"PATH": os.environ["PATH"],
+                              "HOME": str(self.root)}, stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+    def decoded(self, device: str) -> dict:
+        uri = (self.out / f"{device}.uri").read_text()
+        self.assertTrue(uri.startswith("obsidian://setuplivesync?settings="))
+        self.assertFalse(uri.endswith("\n"), "a QR code would hold the newline too")
+        return json.loads(base64.urlsafe_b64decode(uri.split("settings=")[1] + "=="))
+
+    def assert_refused(self, result, message: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(message, result.stderr)
+        for secret in (SYNC_PASSWORD, PASSPHRASE):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_writes_a_private_uri_with_the_hub_and_live_sync_without_printing_secrets(self) -> None:
+        result = self.run_script("--hub", f"{HUB}/", "--device", "iphone")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        password = (self.out / "setup.password").read_text().strip()
+        self.assertRegex(password, r"^[A-Za-z0-9]{16}$")
+        for name in ("setup.password", "iphone.uri"):
+            self.assertEqual(stat.S_IMODE((self.out / name).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o700)
+        self.assertEqual(sorted(os.listdir(self.out)), ["iphone.uri", "setup.password"])
+        body = self.decoded("iphone")
+        settings = body["settings"]
+        self.assertEqual(body["password"], password)
+        # The arguments the plugin uses for its own setup URIs.
+        self.assertEqual((body["removeProperties"], body["skipDefaultValue"]), (["pluginSyncExtendedSetting"], True))
+        self.assertEqual((settings["couchDB_URI"], settings["deviceAndVaultName"]), (HUB, "iphone"))
+        self.assertTrue(settings["liveSync"])
+        self.assertFalse(settings["syncOnStart"] or settings["syncOnSave"] or settings["periodicReplication"])
+        # The device gets the server's chunk and encryption settings, so it matches the hub.
+        self.assertEqual((settings["customChunkSize"], settings["tweakModified"], settings["passphrase"]),
+                         (60, 1792494277156, PASSPHRASE))
+        for secret in (password, SYNC_PASSWORD, PASSPHRASE, "obsidian://"):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_the_servers_saved_remotes_do_not_reach_the_device(self) -> None:
+        self.write_settings(remoteConfigurations={"local": {"uri": "sls+http://127.0.0.1:5984"}},
+                            activeConfigurationId="local")
+        self.assertEqual(self.run_script("--hub", HUB, "--device", "iphone").returncode, 0)
+        settings = self.decoded("iphone")["settings"]
+        self.assertEqual((settings["remoteConfigurations"], settings["activeConfigurationId"]), ({}, ""))
+
+    def test_an_existing_setup_password_is_kept_and_made_private(self) -> None:
+        self.out.mkdir(mode=0o700)
+        (self.out / "setup.password").write_text("Kept0123456789ab\n")
+        (self.out / "setup.password").chmod(0o644)
+        result = self.run_script("--hub", HUB, "--device", "mac")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.decoded("mac")["password"], "Kept0123456789ab")
+        self.assertEqual(stat.S_IMODE((self.out / "setup.password").stat().st_mode), 0o600)
+
+    def test_an_existing_folder_open_to_others_is_refused_and_left_as_it_is(self) -> None:
+        self.out.mkdir()
+        self.out.chmod(0o755)
+        self.assert_refused(self.run_script("--hub", HUB, "--device", "iphone"), "accessible to other users")
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o755)
+        self.assertEqual(os.listdir(self.out), [])
+
+    def test_an_unusable_setup_password_is_refused(self) -> None:
+        self.out.mkdir(mode=0o700)
+        for content in ("", "  \n", "short1\n", "has spaces in it\n"):
+            with self.subTest(content=content):
+                (self.out / "setup.password").write_text(content)
+                self.assert_refused(self.run_script("--hub", HUB, "--device", "iphone"), "delete it to make a new one")
+                self.assertFalse((self.out / "iphone.uri").exists())
+
+    def test_bad_input_is_refused_before_anything_is_written(self) -> None:
+        cases = [
+            (("--hub", "http://server.tailnet.ts.net", "--device", "iphone"), "--hub must be"),
+            (("--hub", f"{HUB}/path", "--device", "iphone"), "--hub must be"),
+            (("--hub", f"{HUB}?x=1", "--device", "iphone"), "--hub must be"),
+            (("--hub", f"{HUB}#top", "--device", "iphone"), "--hub must be"),
+            (("--hub", "https://user:secret@server.tailnet.ts.net", "--device", "iphone"), "--hub must be"),
+            (("--hub", "not a url", "--device", "iphone"), "--hub must be"),
+            (("--hub", HUB, "--device", "my phone"), "--device must be"),
+            (("--hub", HUB, "--device", "../iphone"), "--device must be"),
+            (("--hub", HUB, "--device", "iphone", "--colour", "red"), "unknown option"),
+            (("--hub", HUB, "--device", "iphone", "--constructor", "x"), "unknown option"),
+            (("--hub", HUB, "--device"), "needs a value"),
+            (("--hub", HUB, "--device", "iphone", "--livesync-src", "/nonexistent"), "not found"),
+        ]
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments):
+                self.assert_refused(self.run_script(*arguments), message)
+                self.assertFalse(self.out.exists())
+
+    def test_bad_server_settings_are_refused_without_quoting_them(self) -> None:
+        cases = [
+            (json.dumps({"couchDB_PASSWORD": SYNC_PASSWORD, "passphrase": PASSPHRASE})[:-1] + ",", "could not be read"),
+            (json.dumps({"couchDB_PASSWORD": SYNC_PASSWORD, "encrypt": False}), "no end-to-end passphrase"),
+            ("[]", "no end-to-end passphrase"),
+        ]
+        for content, message in cases:
+            with self.subTest(content=content):
+                self.settings.write_text(content)
+                self.assert_refused(self.run_script("--hub", HUB, "--device", "iphone"), message)
+                self.assertFalse(self.out.exists())
+        self.settings.unlink()
+        self.assert_refused(self.run_script("--hub", HUB, "--device", "iphone"), "could not be read")
+
+    def test_a_uri_that_does_not_decode_back_is_not_written(self) -> None:
+        self.assert_refused(self.run_script("--hub", HUB, "--device", "lossy"), "decode back to the same couchDB_PASSWORD")
+        self.assertFalse((self.out / "lossy.uri").exists())
+        self.assertEqual(os.listdir(self.out), ["setup.password"])
+
+    def test_help_prints_the_usage(self) -> None:
+        result = self.run_script("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("node setup-uri.mjs --hub https://NAME.TAILNET.ts.net --device NAME", result.stdout)
+        self.assertFalse(self.out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,14 @@
   (image pinned by digest, `127.0.0.1` only, `require_valid_user`) and
   `init-couchdb.sh`; [docs/sync.md](docs/sync.md) describes the setup with
   capture, Tailscale and a headless LiveSync client.
+- `docker/livesync/setup-uri.mjs --hub URL --device NAME` makes a LiveSync
+  setup URI for a device from the server client's settings, encrypted with a
+  setup password and written to a private file, so the device joins the hub
+  with the same encryption and chunk settings.
+  [docs/sync.md](docs/sync.md) now follows LiveSync 1.0.39, explains how to
+  upgrade the server's client to the plugin's release, walks through each
+  device step (including choosing the LiveSync preset after the first fetch,
+  which turns sync off), and has a section on devices that do not sync.
 - A confirmed `delete` now also erases the document's text from internal
   storage: its extracted text under `~/.lifeweave/derived` is removed, and the
   citations and claims in every stored wiki revision of a page that cited it (a
