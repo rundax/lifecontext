@@ -38,8 +38,8 @@ With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less.
 `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` and
 `claude-mythos-5-1` do not work yet: LifeContext's retain step uses strict
 structured output and reflect forces a named tool, and these models refuse a
-forced tool choice. `init` and `llm set` refuse them with provider `anthropic`
-and warn when the same IDs are reached through `openai_compatible`; `doctor`
+forced tool choice. `init` and `llm set` refuse them for the native Anthropic
+adapter and warn when the same IDs are reached through `openai_compatible`; `doctor`
 warns about an existing `config.yaml` that names one.
 
 A run without a terminal never guesses: it needs the provider and the model as
@@ -115,8 +115,8 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
   `{"error": CODE}` under `--json`, 2 for a usage error.
 - A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
 - `--non-interactive` without a provider or a model stops with
-  `provider_required` or `model_required`; four Claude models are refused with
-  provider `anthropic` ([Choosing the model](#choosing-the-model)).
+  `provider_required` or `model_required`; four Claude models are refused for
+  the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
 - In a terminal, after writing the configuration, `init` makes one short call
   to the model and reports it as `model_probe` (`status` and a `cause`, never
   the provider's own text); a failed probe does not undo the setup. Run
