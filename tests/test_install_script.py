@@ -23,6 +23,9 @@ except ImportError:  # no pseudo-terminals on this platform
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
+# The release this install.sh installs, and so the wheel it looks for.
+RELEASE = re.search(r'^LIFECONTEXT_RELEASE="([^"]+)"$', INSTALLER.read_text(), re.MULTILINE).group(1)
+WHEEL = f"lifecontext-{RELEASE}-py3-none-any.whl"
 
 
 def _stub(path: Path, body: str) -> None:
@@ -66,7 +69,12 @@ class InstallScriptTests(unittest.TestCase):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
     def test_help_and_usage_errors(self) -> None:
-        self.assertEqual(self.run_installer("--help").returncode, 0)
+        shown = self.run_installer("--help")
+        self.assertEqual(shown.returncode, 0)
+        # No model default and no release number that a version bump would leave stale.
+        for stale in ("8317", "CLIProxyAPI", "default: anthropic", "default: 1.2.0", "proxy"):
+            self.assertNotIn(stale, shown.stdout)
+        self.assertIn("--skip-model-probe", shown.stdout)
         for args in (("--bogus",), ("--wheel", "x.whl"), ("--lock", "l.txt"), ("--version",),
                      ("--version", "latest"), ("--version", "1.2.0;id"), ("--version", "1.2.0/../x"),
                      ("--assets", "d", "--wheel", "w.whl", "--lock", "l.txt")):
@@ -104,10 +112,10 @@ class InstallScriptTests(unittest.TestCase):
         lock = "requirements-macos-arm64.txt" if platform.system() == "Darwin" else f"requirements-linux-{machine}.txt"
         assets = Path(self.temp.name) / "assets"
         assets.mkdir()
-        files = {"lifecontext-1.2.0-py3-none-any.whl": b"wheel", lock: b"lock"}
+        files = {WHEEL: b"wheel", lock: b"lock"}
         (assets / "SHA256SUMS").write_text("".join(
             f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items()))
-        files["lifecontext-1.2.0-py3-none-any.whl"] = wheel_bytes
+        files[WHEEL] = wheel_bytes
         for name, data in files.items():
             (assets / name).write_bytes(data)
         (assets / "SHA256SUMS.sigstore.json").write_text("{}")
@@ -117,7 +125,7 @@ class InstallScriptTests(unittest.TestCase):
         assets = self._assets(wheel_bytes=b"tampered")
         result = self.run_installer("--assets", str(assets), "--non-interactive")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("checksum mismatch for lifecontext-1.2.0-py3-none-any.whl", result.stderr)
+        self.assertIn(f"checksum mismatch for {WHEEL}", result.stderr)
         self.assertFalse((self.home / ".local").exists())
 
     def test_an_old_cosign_is_treated_as_absent(self) -> None:
@@ -309,9 +317,9 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.harness = root / "harness.sh"
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
-            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret",
-                         "print_init_report", "configure_interactive")
-            + '\nconfigure_interactive\n')
+            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_yes",
+                         "choose_provider", "ask_anthropic_model", "print_init_report", "configure_interactive")
+            + '\nconfigure_interactive\necho "capture=$capture"\n')
 
     def converse(self, answers: list[tuple[str, str]]) -> tuple[int, str]:
         """Answer each prompt once it appears; the hidden key only after the terminal stopped echoing."""
@@ -353,21 +361,30 @@ class InstallEndpointPromptTests(unittest.TestCase):
             _, status = os.waitpid(pid, 0)
         return os.waitstatus_to_exitcode(status), transcript.decode(errors="replace")
 
-    def test_defaults_are_a_local_openai_compatible_proxy_and_an_empty_key_is_allowed(self) -> None:
+    def test_the_menu_preselects_nothing_and_a_local_server_suggests_its_url(self) -> None:
+        from lifecontext.initialize import model_question, provider_menu
+
         code, transcript = self.converse([
-            ("Provider (", ""), ("API base URL [http://127.0.0.1:8317/v1]", ""), ("Model ID", "my-model"),
-            ("API key", ""), ("Vault folder", "")])
+            ("Choose 1-6: ", ""), ("Choose 1-6: ", "5"), ("Base URL of the server [http://127.0.0.1:11434/v1]", ""),
+            ("Model ID", "llama3.3"), ("API key", ""), ("Vault folder", ""), ("Turn notes", "n")])
         self.assertEqual(code, 0, transcript)
-        self.assertIn("[openai_compatible]", transcript)
+        # The same menu, word for word, as lifecontext init.
+        for line in provider_menu().splitlines()[:-1]:
+            self.assertIn(line + "\r\n", transcript)
+        self.assertIn("type a number from 1 to 6", transcript)
+        self.assertIn(model_question("openai_compatible", 5) + ": ", transcript)
         self.assertEqual(self.calls.read_text().splitlines(), [
-            (f"init --non-interactive --json --provider openai_compatible --model my-model "
-             f"--vault {self.home}/LifeContext/vault --base-url http://127.0.0.1:8317/v1")])
+            (f"init --non-interactive --json --provider openai_compatible --model llama3.3 "
+             f"--vault {self.home}/LifeContext/vault --base-url http://127.0.0.1:11434/v1")])
+        self.assertIn("capture=0", transcript)
 
     def test_the_key_is_hidden_reaches_init_only_through_a_private_file_and_is_removed(self) -> None:
         key = "sk-typed-secret-0123456789"
         code, transcript = self.converse([
-            ("Provider (", "openai_compatible"), ("API base URL", "http://127.0.0.1:9999/v1"),
-            ("Model ID", "other-model"), ("API key", key), ("Vault folder", str(self.home / "Notes"))])
+            ("Choose 1-6: ", "6"), ("API base URL", "http://127.0.0.1:9999/v1"),
+            ("Model ID (exactly as your endpoint names it)", "other-model"), ("API key", key),
+            ("Vault folder", str(self.home / "Notes")),
+            ("Turn notes you put in Journal/Inbox into journal entries automatically? [Y/n]", "")])
         self.assertEqual(code, 0, transcript)
         self.assertNotIn(key, transcript)
         recorded = self.calls.read_text().splitlines()
@@ -375,17 +392,99 @@ class InstallEndpointPromptTests(unittest.TestCase):
                                       f"--model other-model --vault {self.home}/Notes "
                                       f"--base-url http://127.0.0.1:9999/v1")
         self.assertEqual(recorded[1], f"key={key} -rw------- {self.tmp}")
-        self.assertEqual(list(self.tmp.iterdir()), [])
+        self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
+        self.assertIn("capture=1", transcript)
 
-    def test_anthropic_needs_no_base_url_and_proposes_a_model(self) -> None:
+    def test_anthropic_suggests_a_model_and_refuses_the_ones_that_cannot_work(self) -> None:
+        from lifecontext.initialize import model_question
+
         code, transcript = self.converse([
-            ("Provider (", "anthropic"), ("API base URL", ""),
-            ("Model ID (exactly as your endpoint names it) [claude-sonnet-5]", ""),
-            ("API key", ""), ("Vault folder", "")])
+            ("Choose 1-6: ", "1"), (f"{model_question('anthropic')} [claude-sonnet-5]", "claude-opus-5-5"),
+            # Enter at the model prompt asked again takes the suggestion.
+            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "")])
         self.assertEqual(code, 0, transcript)
+        self.assertNotIn("URL", transcript)
         self.assertEqual(self.calls.read_text().splitlines(), [
             (f"init --non-interactive --json --provider anthropic --model claude-sonnet-5 "
              f"--vault {self.home}/LifeContext/vault")])
+
+    def test_the_refused_models_and_the_model_lists_match_lifecontext_init(self) -> None:
+        from lifecontext.initialize import (
+            FORCED_TOOL_REJECTING_MODELS,
+            MODEL_LISTS,
+            model_question,
+        )
+
+        script = INSTALLER.read_text()
+        refused = re.search(r"^\t\t(claude-[^)]+)\)$", script, re.MULTILINE).group(1)
+        self.assertEqual(set(refused.split(" | ")), FORCED_TOOL_REJECTING_MODELS)
+        for provider in MODEL_LISTS:
+            self.assertIn(f'ask_required "{model_question(provider)}" ""', script)
+
+
+class InstallModelCheckTests(unittest.TestCase):
+    """check_model with `lifecontext preflight --model-probe` replaced by a stub."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-probe-test.")
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.home = root / "home"
+        (self.home / ".lifeweave").mkdir(parents=True)
+        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+        self.tmp = root / "tmp"
+        self.tmp.mkdir()
+        self.calls = root / "calls.log"
+        venv_bin = root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        os.symlink(sys.executable, venv_bin / "python")
+        self.lc = venv_bin / "lifecontext"
+        self.harness = root / "harness.sh"
+        self.harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
+            'skip_model_probe=${SKIP:-0}\n' + _functions("say", "check_model")
+            + '\ncheck_model\necho "model_state=$model_state"\n')
+
+    def check(self, output: str, status: int = 0, **environ: str) -> str:
+        _stub(self.lc, f'echo "$*" >> "{self.calls}"\necho "provider text on stderr" >&2\n'
+                       f"printf '%s' '{output}'\nexit {status}\n")
+        env = {"PATH": os.defpath, **environ}
+        result = subprocess.run(["/bin/sh", str(self.harness)], text=True, capture_output=True, env=env,
+                                stdin=subprocess.DEVNULL, timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("provider text", result.stdout + result.stderr)
+        return result.stdout
+
+    def test_a_passing_model(self) -> None:
+        out = self.check(json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {"status": "pass"}}}))
+        self.assertIn("The model answered", out)
+        self.assertTrue(out.endswith("model_state=passed\n"))
+        self.assertEqual(self.calls.read_text(), "preflight --model-probe\n")
+
+    def test_a_rejected_key_names_the_cause_and_the_fix_and_the_install_goes_on(self) -> None:
+        probe = {"status": "fail", "cause": "key_rejected", "message": "the provider rejected the key",
+                 "fix": "lifecontext llm set --api-key-stdin < FILE", "reflect": {"status": "skipped"}}
+        out = self.check(json.dumps({"model_probe": probe}), status=3)
+        self.assertIn("The model check failed: the provider rejected the key.\n"
+                      "Fix it with: lifecontext llm set --api-key-stdin < FILE\n", out)
+        self.assertTrue(out.endswith("model_state=failed\n"))
+        self.assertIn("the provider rejected the key", (self.tmp / "model-check").read_text())
+
+    def test_a_reflect_warning_and_a_check_that_did_not_run(self) -> None:
+        out = self.check(json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {
+            "status": "warn", "message": "the model refused a forced tool call"}}}))
+        self.assertIn("Warning: the model refused a forced tool call.", out)
+        out = self.check("Traceback: not JSON", status=1)
+        self.assertIn("did not run", out)
+        self.assertTrue(out.endswith("model_state=failed\n"))
+
+    def test_the_check_can_be_skipped(self) -> None:
+        for environ in ({"SKIP": "1"}, {"LIFECONTEXT_SKIP_MODEL_PROBE": "1"}):
+            with self.subTest(environ=environ):
+                out = self.check("{}", **environ)
+                self.assertIn("Skipped", out)
+                self.assertTrue(out.endswith("model_state=not checked\n"))
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":
