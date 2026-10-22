@@ -1,6 +1,6 @@
 {
   "name": "lifecontext",
-  "version": "1.2.0.dev0",
+  "version": "1.2.0rc1",
   "description": "Operate a local LifeContext journal and document wiki: capture, verify, cite evidence and build summaries. Needs the lifecontext command installed and its service running.",
   "author": {
     "name": "Roman Slysh",

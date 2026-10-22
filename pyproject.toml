@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lifecontext"
-version = "1.2.0.dev0"
+version = "1.2.0rc1"
 description = "Your private, durable context layer for AI"
 license = "BUSL-1.1"
 license-files = ["LICENSE", "NOTICE"]
