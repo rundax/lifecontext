@@ -234,26 +234,52 @@ GitHub Actions workflows live in `.github/workflows/`:
   size, package count, install and import times in the run summary.
 - `ci.yml` also checks the dependency locks against `pyproject.toml`
   (`requirements/compile.sh --check`).
-- `qualify.yml`, manual (`gh workflow run qualify.yml --ref BRANCH`, input
-  `macos` adds macOS 14): builds the wheel, installs it with `install.sh` on
-  a clean Ubuntu 24.04 runner and builds and starts the Docker image with
-  Compose, then runs a small synthetic scenario against the CI model (repository
-  secrets `LIFECONTEXT_CI_LLM_API_KEY` and `LIFECONTEXT_CI_LLM_BASE_URL`,
-  variable `LIFECONTEXT_CI_LLM_MODEL`): capture, documents with OCR, cited
-  recall, evidence, the compiled wiki, skills, MCP, backup and restore,
-  re-install and uninstall, and for Docker no published port, a non-root user,
-  recreate and restore. Each job uploads its evidence (`qualify-evidence-*`:
-  versions, timings, sizes, check results) only after a scan for the endpoint
-  and key. One run at a time; the model gateway is shared, so do not dispatch
-  it in a loop. `.github/scripts/qualify.py` is the scenario. With
-  `release_tag` it rehearses a release instead: it downloads that draft
-  release's assets, runs its `install.sh --assets` (checksums and cosign
-  signature included) and pulls and verifies the image.
-- `release.yml`, on `v*` tags (a manual run is a dry run): see
-  [Releasing](#releasing).
-- `pages.yml`, manual: deploys `site/` from `main` to GitHub Pages, only while
-  the repository is public. The release workflow will start it with
-  `gh workflow run pages.yml --ref main`.
+- `qualify.yml`, manual (`gh workflow run qualify.yml --ref BRANCH`), the full
+  scenario: builds the wheel, installs it with `install.sh` on a clean Ubuntu
+  24.04 runner (and on macOS 14 with `-f macos=true`) and builds and starts the
+  Docker image with Compose, then runs a small synthetic scenario against a
+  real model: capture, documents with OCR, cited recall, evidence, the
+  compiled wiki, skills, MCP, backup and restore, re-install, upgrade and
+  uninstall, and for Docker no published port, a non-root user, recreate and
+  restore. The native install must end with the three next steps. A
+  `wrong_key` job installs with a key the provider rejects and expects exit 3,
+  "the provider rejected the key" and the `lifecontext llm set` command.
+  Every job takes the model from two inputs:
+  - `-f provider=openai_compatible` (the default) goes through the CI gateway:
+    repository secrets `LIFECONTEXT_CI_LLM_API_KEY` and
+    `LIFECONTEXT_CI_LLM_BASE_URL`, and the model from the variable
+    `LIFECONTEXT_CI_LLM_MODEL` unless `-f model=ID` names another.
+  - `-f provider=anthropic -f model=claude-sonnet-5` talks to Anthropic's own
+    API with the secret `LIFECONTEXT_CI_ANTHROPIC_API_KEY`. No base URL is set,
+    and the model input is required.
+
+  Each job records the provider, the model and whether a base URL is set, read
+  back with `lifecontext llm show`. It uploads its evidence
+  (`qualify-evidence-*`: versions, timings, sizes, check results) only after a
+  scan for the gateway endpoint and every CI key, which a final job repeats
+  over all of it. One run at a time; the gateway is shared, so do not dispatch
+  it in a loop. `.github/scripts/qualify.py` is the scenario, and
+  `.github/scripts/ci-model.sh` picks the key. Two inputs replace the full
+  scenario, and `macos` changes nothing with either:
+  - `release_tag=vVERSION` checks a draft release: it downloads the draft's
+    assets with the workflow token, runs its `install.sh --assets` (checksums
+    and cosign signature included), runs doctor, pulls and verifies the image,
+    and records the GHCR package's visibility.
+  - `public_tag=vVERSION` checks a published release the way a new user
+    installs it, with no token, on `ubuntu-24.04` and `macos-14`: `curl -fsSL
+    …/releases/download/vVERSION/install.sh | sh -s -- --non-interactive`, or
+    `…/releases/latest/download/install.sh` for a final, then doctor and
+    `preflight --model-probe`. For a final it also pulls the image anonymously
+    and runs `cosign verify` on it.
+- `release.yml`, on `v*` tags: see [Releasing](#releasing). A manual run
+  (`gh workflow run release.yml --ref BRANCH`) is a dry run: it builds and
+  checks the wheel, the assets and the two-platform image, and signs, pushes
+  and publishes nothing.
+- `pages.yml`, manual: deploys `site/` from `main` to GitHub Pages. Nothing
+  starts it on its own; on the day of a final release the maintainer runs
+  `gh workflow run pages.yml --ref main` after the release is published (step
+  12 of [Releasing](#releasing)). Before that, the site's install commands
+  would fail.
 - `.github/dependabot.yml` proposes action updates weekly.
 
 Actions are pinned to full commit SHAs; update the SHA and its version comment
@@ -261,23 +287,72 @@ together.
 
 ## Releasing
 
-1. Set the version in `pyproject.toml`, `LIFECONTEXT_RELEASE` in `install.sh`
-   and the image tag in `compose.yaml` (and the plugin manifests) to the same
-   number, and make sure CI is green.
-2. Push the tag `vVERSION`. `release.yml` checks that every file names that
-   version, builds the wheel, sdist and assets without write access, signs
-   `SHA256SUMS` keylessly with cosign, builds, pushes and signs the
-   linux/amd64 and linux/arm64 image with an SBOM and provenance, and creates
-   a draft release. Only for a final version (no letters in it) does a last
-   job publish the draft, after the image is pushed and signed; a pre-release
-   such as `1.2.0rc1` stays a draft.
-3. Check the draft and the image: `gh workflow run qualify.yml --ref main -f
-   release_tag=vVERSION` installs from the draft's assets and verifies both
-   signatures.
-4. In the repository settings, turn on immutable releases, so a published
-   release's tag and assets can no longer change.
-5. The GHCR package `lifecontext` stays private while the repository is; make
-   it public in its package settings after the repository goes public.
+The maintainer approves every tag, every publish and every settings change.
+`VERSION` below is the release number, for example `1.2.0rc1` or `1.2.0`; a
+version with letters in it is a pre-release.
+
+1. Cut the branch `release/vVERSION` from `main`.
+2. Write `VERSION`, identical in all five files: `version` in
+   `pyproject.toml`, `__version__` in `src/lifecontext/__init__.py`,
+   `"version"` in `src/lifecontext/agent_skill/.claude-plugin/plugin.json`,
+   `LIFECONTEXT_RELEASE` in `install.sh` and the image tag in `compose.yaml`.
+   `release.yml` compares the tag with three of them as plain strings, so
+   `1.2.0rc1` is never written `1.2.0-rc1`. For a final, the release commit
+   also replaces `# Unreleased` in `CHANGELOG.md` with
+   `# VERSION (YYYY-MM-DD)`.
+3. Push the branch; `ci.yml` must be green on it.
+4. Run the full qualification on the branch:
+   `gh workflow run qualify.yml --ref release/vVERSION -f macos=true`. Every
+   job must pass.
+5. Check that immutable releases are on (Settings, General, Releases). A
+   release published afterwards can no longer change its tag or assets;
+   drafts stay editable.
+6. Tag the branch head and push the tag: `git tag vVERSION` and
+   `git push origin vVERSION`.
+7. `release.yml` runs on the tag. It checks that the tag, `pyproject.toml`,
+   `install.sh` and `compose.yaml` name the same version. It builds and checks
+   the wheel, the sdist and the assets with their `SHA256SUMS`, with no write
+   access, and signs `SHA256SUMS` with cosign, keyless. It builds, pushes and
+   signs the linux/amd64 and linux/arm64 image with an SBOM and provenance:
+   `:VERSION`, and `:latest` for a final, which takes up to 150 minutes. Only
+   then does it create the release as a **draft**. Every release stays a
+   draft, a final too; nothing publishes it on its own.
+8. Check the draft: `gh workflow run qualify.yml --ref main -f
+   release_tag=vVERSION`. It must pass, and the `package_visibility` it records
+   must be `private`: the image package stays private until a final is
+   published (see "If a check of the draft fails" below).
+9. Publish the draft. For a pre-release, run `gh release edit vVERSION
+   --draft=false --prerelease`. A pre-release never becomes "latest", so
+   `releases/latest/download/install.sh` keeps pointing at the last final. For
+   a final, run `gh release edit vVERSION --draft=false --latest`.
+10. For a final, make the GHCR package `rundax/lifecontext` public in its
+    package settings. Do this before step 11, which pulls the image
+    anonymously.
+11. Check the public install: `gh workflow run qualify.yml --ref main -f
+    public_tag=vVERSION`. For a pre-release this installs from the release's
+    own URL. For a final it installs through `releases/latest` and also pulls
+    and verifies the image.
+12. For a final, deploy the site: `gh workflow run pages.yml --ref main`.
+13. For a final, merge back into `main`: the `CHANGELOG.md` heading, and the
+    versions by the rule below. A pre-release is not merged back. Its branch
+    changes only the version; fixes land on `main` and go out in a new branch
+    and tag.
+
+**Versions on `main`.** After a final release, `pyproject.toml`,
+`src/lifecontext/__init__.py` and `plugin.json` carry the next development
+version (`1.2.1.dev0` after `1.2.0`). `install.sh` and `compose.yaml` keep
+naming the latest published release (`1.2.0`): an install from a checkout
+fetches that release, and the README's Docker quick start pulls that image.
+
+**If a check of the draft fails** (step 8): delete the draft and the tag (a
+draft is not immutable), fix on `main`, cut the branch again and tag the same
+version. The image tags the failed run pushed are overwritten by the next run
+before anyone can pull them, because the package is still private. If step 8
+records the package as public, set it to private before going on.
+
+**Dry run.** `gh workflow run release.yml --ref BRANCH` runs the build and
+image jobs without signing, pushing or creating a release; use it after a
+change to `release.yml` or the Dockerfile.
 
 ## Local LLM route through a private CA
 
