@@ -37,8 +37,8 @@ are available through `--provider` and `LIFECONTEXT_PROVIDER`.
 With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less.
 `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` and
 `claude-mythos-5-1` do not work yet: LifeContext's retain step uses strict
-structured output and reflect forces a named tool, and these models refuse a
-forced tool choice. `init` and `llm set` refuse them for the native Anthropic
+structured output, which on Anthropic is a forced tool call, and these models
+refuse a forced tool choice. `init` and `llm set` refuse them for the native Anthropic
 adapter and warn when the same IDs are reached through `openai_compatible`; `doctor`
 warns about an existing `config.yaml` that names one.
 
