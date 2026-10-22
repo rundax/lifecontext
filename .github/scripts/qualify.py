@@ -11,6 +11,8 @@ records checks in the evidence file named by $QUALIFY_EVIDENCE:
     qualify.py capture --cli lifecontext --fixtures DIR --state FILE
     qualify.py verify --cli lifecontext --state FILE --label installed --wiki --ukrainian
     qualify.py mcp --cli lifecontext
+    qualify.py llm --cli lifecontext
+    qualify.py probe --cli lifecontext --label public
     qualify.py finalize
 
 Evidence holds versions, timings, sizes and check outcomes only: never document
@@ -96,6 +98,11 @@ _INSTALLED = ("doctor_installed", "journal_retain", "journal_readback", "documen
               "recall_cites_document_en_installed", "evidence_readback_en_installed",
               "journal_readback_installed")
 _SCENARIO = ("document_import_uk", "document_import_image", "ocr_image")
+# Providers whose CI route needs a base URL (the gateway); any other uses its own API.
+GATEWAY_PROVIDERS = {"openai_compatible"}
+_PUBLIC = ("install_sh_public", "release_signature_checked", "installed_version", "tag_url_matches_latest",
+           "llm_settings",
+           "service_running", "service_ready", "doctor_public", "model_probe_public", "image_pull", "image_signature")
 
 
 def _verified(label: str, keys: tuple[str, ...], wiki: bool) -> tuple[str, ...]:
@@ -109,7 +116,8 @@ def _verified(label: str, keys: tuple[str, ...], wiki: bool) -> tuple[str, ...]:
 
 EXPECTED = {
     "native": (
-        "systemd_user_session", "install_sh", "service_running", "service_ready", *_INSTALLED, *_SCENARIO,
+        "systemd_user_session", "install_sh", "install_sh_next_steps", "llm_settings", "service_running",
+        "service_ready", *_INSTALLED, *_SCENARIO,
         *_verified("installed", ("en", "uk", "image"), True), "skills_install_check", "mcp_tools", "backup",
         "service_ready_after_backup", "restore_fresh_home", "restored_service_ready",
         *_verified("restored", ("en",), False), "restore_keeps_catalog", "install_sh_rerun",
@@ -117,16 +125,19 @@ EXPECTED = {
         "uninstall_keeps_data",
     ),
     "docker": (
-        "docker_build", "container_healthy", "no_published_ports", "non_root_user", "api_loopback_only",
+        "docker_build", "container_healthy", "llm_settings", "no_published_ports", "non_root_user", "api_loopback_only",
         "doctor_container", "journal_retain", "journal_readback", "document_import_en", *_SCENARIO,
         *_verified("container", ("en", "uk", "image"), True), "mcp_tools", "wrapper_download_to_host",
         "container_healthy_recreated", "recreate_keeps_data", *_verified("recreated", ("en",), False),
         "clean_stop", "backup_in_container", "restore_in_container", "container_healthy_restored",
         *_verified("restored", ("en",), False), "restore_keeps_data",
     ),
-    "macos": ("install_sh", "service_running", "service_ready", *_INSTALLED),
-    "release": ("release_assets", "install_sh_release", "release_signature_checked", "doctor_release",
-                "image_pull", "image_signature"),
+    "macos": ("install_sh", "llm_settings", "service_running", "service_ready", *_INSTALLED),
+    "release": ("release_assets", "install_sh_release", "release_signature_checked", "llm_settings",
+                "doctor_release", "image_pull", "image_signature"),
+    "wrong_key": ("systemd_user_session", "install_sh_wrong_key", "llm_settings"),
+    "public_linux": _PUBLIC,
+    "public_macos": _PUBLIC,
 }
 RECALL_TIMEOUT = 900
 IMPORT_TIMEOUT = 1200
@@ -225,6 +236,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "machine": platform.machine(), "release": platform.release(), "cpus": os.cpu_count(),
         },
         "started_at": now(),
+        "llm": {"provider": os.environ.get("LLM_PROVIDER"), "model": os.environ.get("LLM_MODEL")},
         "expected_checks": list(dict.fromkeys(EXPECTED[args.job])),
         "versions": {}, "timings_seconds": {}, "sizes_bytes": {}, "info": {}, "checks": {},
     }
@@ -451,6 +463,34 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                        f"exit {code}, problems {report.get('problems')}, warnings {warnings}") else 1
 
 
+def cmd_llm(args: argparse.Namespace) -> int:
+    """The model settings the install wrote, from `llm show`: provider, model and, never the URL itself,
+    whether a base URL is set. Only a gateway provider may have one."""
+    cli = CLI(args.cli)
+    code, value = cli.json("llm", "show")
+    provider, model = os.environ.get("LLM_PROVIDER"), os.environ.get("LLM_MODEL")
+    base_url = "set" if value.get("base_url") else "none"
+    expected = "set" if provider in GATEWAY_PROVIDERS else "none"
+    metric("info", "llm_settings", {"provider": value.get("provider"), "model": value.get("model"),
+                                    "base_url": base_url, "api_key": value.get("api_key")})
+    passed = (code == 0 and value.get("provider") == provider and value.get("model") == model
+              and base_url == expected and value.get("api_key") == "set")
+    return 0 if record("llm_settings", passed, f"exit {code}, provider {value.get('provider')}, model "
+                       f"{value.get('model')}, base_url {base_url} (expected {expected}), key {value.get('api_key')}") else 1
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """`preflight --model-probe`: one model call through retain's own path; exit 0 on a pass, 3 on a failure."""
+    cli = CLI(args.cli)
+    started = time.monotonic()
+    code, value = cli.json("preflight", "--model-probe", timeout=180)
+    probe = value.get("model_probe") if isinstance(value.get("model_probe"), dict) else {}
+    reflect = probe.get("reflect") if isinstance(probe.get("reflect"), dict) else {}
+    return 0 if record(f"model_probe_{args.label}", code == 0 and probe.get("status") == "pass",
+                       f"exit {code}, status {probe.get('status')}, cause {probe.get('cause')}, "
+                       f"reflect {reflect.get('status')}", time.monotonic() - started) else 1
+
+
 def cmd_fingerprint(args: argparse.Namespace) -> int:
     """Catalog-level state, kept in a private file outside the evidence."""
     cli = CLI(args.cli)
@@ -617,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("value")
     command = commands.add_parser("fixtures")
     command.add_argument("--out", required=True)
-    for name in ("capture", "verify", "doctor", "mcp", "fingerprint"):
+    for name in ("capture", "verify", "doctor", "mcp", "llm", "probe", "fingerprint"):
         command = commands.add_parser(name)
         command.add_argument("--cli", required=True, help="the lifecontext command line, shell-quoted")
         if name in {"capture", "verify"}:
@@ -630,8 +670,9 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--ukrainian", action="store_true")
             command.add_argument("--ocr", action="store_true", help="also recall a fact read from the image")
             command.add_argument("--wiki", action="store_true")
-        if name == "doctor":
+        if name in {"doctor", "probe"}:
             command.add_argument("--label", required=True)
+        if name == "doctor":
             command.add_argument("--versions", action="store_true")
             command.add_argument("--require-ocr", action="store_true")
             command.add_argument("--allow-warning", action="append", help="a doctor warning that may appear")

@@ -1,20 +1,37 @@
 name: Qualify install paths
 
 # Manual only. Installs LifeContext with install.sh and with the Docker image on
-# clean runners and runs a small synthetic scenario against the CI model
-# endpoint (a shared gateway): one run at a time, never cancelled. Evidence
+# clean runners and runs a small synthetic scenario against a real model: by
+# default the CI gateway (openai_compatible, a shared endpoint), or with
+# provider=anthropic Anthropic's own API with no base URL. A third job installs
+# with a key the provider rejects. One run at a time, never cancelled. Evidence
 # (versions, timings, sizes, check results) is uploaded per job after a scan
-# for the endpoint and the key. With release_tag, it instead installs from that
-# draft release's assets and checks its signatures (a release rehearsal).
+# for the endpoint and every CI key. With release_tag, it instead installs from
+# that draft release's assets and checks its signatures; with public_tag, it
+# runs the one-line install of a published release from its public URL with no
+# token, on Linux and macOS.
 on:
   workflow_dispatch:
     inputs:
+      provider:
+        description: Model provider for every job; anthropic takes the secret LIFECONTEXT_CI_ANTHROPIC_API_KEY and no base URL
+        type: choice
+        options: [openai_compatible, anthropic]
+        default: openai_compatible
+      model:
+        description: Model ID; empty means the variable LIFECONTEXT_CI_LLM_MODEL (openai_compatible only)
+        type: string
+        default: ""
       macos:
-        description: Also qualify install.sh on macos-14 (arm64); macOS minutes cost ten times more
+        description: Also qualify install.sh on macos-14 (arm64), full scenario only; macOS minutes cost ten times more
         type: boolean
         default: false
       release_tag:
         description: Instead, rehearse a release whose draft and image exist (for example v1.2.0rc1)
+        type: string
+        default: ""
+      public_tag:
+        description: Instead, install a published release (for example v1.2.0rc1) from its public URL, no token
         type: string
         default: ""
 
@@ -32,10 +49,13 @@ defaults:
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   Q: python3 .github/scripts/qualify.py
+  # The CI model; for openai_compatible an empty model input means the repository variable.
+  LLM_PROVIDER: ${{ inputs.provider }}
+  LLM_MODEL: ${{ inputs.model || (inputs.provider == 'openai_compatible' && vars.LIFECONTEXT_CI_LLM_MODEL || '') }}
 
 jobs:
   build:
-    if: github.repository == 'rundax/lifecontext' && inputs.release_tag == ''
+    if: github.repository == 'rundax/lifecontext' && inputs.release_tag == '' && inputs.public_tag == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -81,18 +101,10 @@ jobs:
           echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
       - name: Keep the CI model key in a private file
         env:
-          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
-          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-        run: |
-          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
-            exit 1
-          fi
-          umask 077
-          mkdir -p "$RUNNER_TEMP/private"
-          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
-          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
+        run: sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
       - name: Start a systemd user manager for the runner account
         run: |
           sudo loginctl enable-linger "$USER"
@@ -109,16 +121,18 @@ jobs:
           mkdir -p "$HOME/.claude"
       - name: Run install.sh with the built wheel, unattended
         env:
-          LIFECONTEXT_PROVIDER: openai_compatible
-          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
           LIFECONTEXT_TIMEZONE: UTC
         run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
           export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
           start=$SECONDS
           status=0
           sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt \
-            --non-interactive || status=$?
+            --non-interactive 2>&1 | tee "$RUNNER_TEMP/install.log" || status=$?
           seconds=$((SECONDS - start))
           $Q metric timings_seconds install_sh_first_run "$seconds"
           data="$HOME/.local/share/lifecontext"
@@ -133,6 +147,25 @@ jobs:
           $Q metric versions torch "$("$data/venv/bin/python" -c 'import torch; print(torch.__version__)')"
           [ "$status" -eq 0 ] && result=pass || result=fail
           $Q record install_sh "$result" --detail "exit $status, link $(readlink "$LC")" --seconds "$seconds"
+      - name: The install ends with the next steps and wrote the chosen model
+        continue-on-error: true
+        run: |
+          failed=0
+          if grep -q -- --skip-model-probe install.sh; then
+            missing=""
+            for step in "Open folder as vault" "lifecontext documents import" "What does my lease say about the deposit?"; do
+              grep -qF "$step" "$RUNNER_TEMP/install.log" || missing="$missing '$step'"
+            done
+            if [ -z "$missing" ]; then
+              $Q record install_sh_next_steps pass --detail "the three next steps shown"
+            else
+              $Q record install_sh_next_steps fail --detail "missing:$missing" || failed=1
+            fi
+          else
+            $Q record install_sh_next_steps skip --detail "this install.sh has no model probe and no next steps yet"
+          fi
+          $Q llm --cli "$LC" || failed=1
+          exit "$failed"
       - name: Check that the API runs as a user service
         run: |
           if systemctl --user is-active --quiet lifecontext.service; then
@@ -228,10 +261,12 @@ jobs:
       - name: Run install.sh again; it keeps settings, key and data
         continue-on-error: true
         env:
-          LIFECONTEXT_PROVIDER: openai_compatible
-          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
         run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
           export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
           if [ "$SERVICE_MODE" = foreground ]; then
             nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
@@ -310,7 +345,7 @@ jobs:
           journalctl --user -u lifecontext.service -n 150 --no-pager || true
           tail -n 80 "$RUNNER_TEMP"/*.log || true
           tail -n 150 "$HOME/.hindsight/profiles/lifeweave.log" || true
-      - name: Check the evidence for the endpoint and the key
+      - name: Check the evidence for the endpoint and the keys
         id: scan
         if: always()
         run: |
@@ -320,7 +355,7 @@ jobs:
             exit 1
           fi
           if grep -rliF -f "$patterns" evidence/; then
-            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
             exit 1
           fi
           echo "No endpoint or key in: $(ls evidence)"
@@ -359,18 +394,11 @@ jobs:
           $Q metric versions compose "$(docker compose version --short)"
       - name: Keep the CI model key in a private file
         env:
-          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
-          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
         run: |
-          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
-            exit 1
-          fi
-          umask 077
-          mkdir -p "$RUNNER_TEMP/private"
-          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
-          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+          sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
           # The compose secret: mode 0600, owned by the image's uid 1000.
           cp "$RUNNER_TEMP/private/llm-api-key" "$RUNNER_TEMP/private/docker-api-key"
           sudo chown 1000:1000 "$RUNNER_TEMP/private/docker-api-key"
@@ -396,11 +424,13 @@ jobs:
           docker image ls "$LIFECONTEXT_IMAGE"
       - name: docker compose up, first start sets up from the environment
         env:
-          LIFECONTEXT_PROVIDER: openai_compatible
-          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
           LIFECONTEXT_TIMEZONE: UTC
         run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
           docker compose up -d --no-build
           status=0
           $Q wait-docker container_healthy lifecontext --timeout 900 || status=$?
@@ -428,6 +458,7 @@ jobs:
         continue-on-error: true
         run: |
           failed=0
+          $Q llm --cli "$W" || failed=1
           $Q doctor --cli "$W" --label container --versions --require-ocr || failed=1
           $Q capture --cli "$W" --fixtures inputs/fixtures --state "$RUNNER_TEMP/state.json" || failed=1
           $Q verify --cli "$W" --state "$RUNNER_TEMP/state.json" --label container --wiki --ukrainian --ocr || failed=1
@@ -532,7 +563,7 @@ jobs:
       - name: Summarize the evidence
         if: always()
         run: $Q finalize
-      - name: Check the evidence for the endpoint and the key
+      - name: Check the evidence for the endpoint and the keys
         id: scan
         if: always()
         run: |
@@ -542,7 +573,7 @@ jobs:
             exit 1
           fi
           if grep -rliF -f "$patterns" evidence/; then
-            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
             exit 1
           fi
           echo "No endpoint or key in: $(ls evidence)"
@@ -578,25 +609,19 @@ jobs:
           echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
       - name: Keep the CI model key in a private file
         env:
-          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
-          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-        run: |
-          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
-            exit 1
-          fi
-          umask 077
-          mkdir -p "$RUNNER_TEMP/private"
-          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
-          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
+        run: sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
       - name: Run install.sh with the built wheel, unattended
         env:
-          LIFECONTEXT_PROVIDER: openai_compatible
-          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
           LIFECONTEXT_TIMEZONE: UTC
         run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
           export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
           start=$SECONDS
           status=0
@@ -621,6 +646,7 @@ jobs:
         continue-on-error: true
         run: |
           failed=0
+          $Q llm --cli "$LC" || failed=1
           $Q doctor --cli "$LC" --label installed --versions || failed=1
           $Q capture --cli "$LC" --fixtures inputs/fixtures --state "$RUNNER_TEMP/state.json" --english-only || failed=1
           $Q verify --cli "$LC" --state "$RUNNER_TEMP/state.json" --label installed || failed=1
@@ -628,7 +654,7 @@ jobs:
       - name: Summarize the evidence
         if: always()
         run: $Q finalize
-      - name: Check the evidence for the endpoint and the key
+      - name: Check the evidence for the endpoint and the keys
         id: scan
         if: always()
         run: |
@@ -638,7 +664,7 @@ jobs:
             exit 1
           fi
           if grep -rliF -f "$patterns" evidence/; then
-            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
             exit 1
           fi
           echo "No endpoint or key in: $(ls evidence)"
@@ -653,10 +679,110 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  wrong_key:
+    # A clean install with a key the provider rejects: install.sh still sets up the
+    # service, the skill and doctor, then names the cause and the command that
+    # fixes it, and exits 3.
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/wrong_key.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qualify-inputs
+          path: inputs
+      - name: Start the evidence file
+        run: |
+          $Q init --job wrong_key
+          echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
+      - name: Keep the CI model key in a private file
+        env:
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
+        run: sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
+      - name: Start a systemd user manager for the runner account
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          if XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user show-environment > /dev/null 2>&1; then
+            $Q record systemd_user_session pass --detail "lingering user manager for uid $uid"
+          else
+            $Q record systemd_user_session skip --detail "no user manager; install.sh cannot start the service"
+          fi
+      - name: Run install.sh with a key the provider rejects
+        continue-on-error: true
+        env:
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
+          if ! grep -q -- --skip-model-probe install.sh; then
+            $Q record install_sh_wrong_key skip --detail "this install.sh has no model probe yet"
+            $Q record llm_settings skip --detail "not installed"
+            exit 0
+          fi
+          (umask 077 && printf '%s\n' lifecontext-qualify-not-a-key > "$RUNNER_TEMP/private/wrong-api-key")
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/wrong-api-key"
+          log="$RUNNER_TEMP/install.log"
+          start=$SECONDS
+          status=0
+          sh ./install.sh --wheel inputs/dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt \
+            --non-interactive 2>&1 | tee "$log" || status=$?
+          seconds=$((SECONDS - start))
+          grep -qF "the provider rejected the key" "$log" && cause=yes || cause=no
+          # The fix for that cause, printed with it.
+          grep -A3 -F "the provider rejected the key" "$log" | grep -qF "lifecontext llm set --api-key-stdin" && fix=yes || fix=no
+          grep -qF "lifecontext doctor reported a problem" "$log" && doctor=problem || doctor=ok
+          [ "$status" -eq 3 ] && [ "$cause" = yes ] && [ "$fix" = yes ] && [ "$doctor" = ok ] && result=pass || result=fail
+          failed=0
+          $Q record install_sh_wrong_key "$result" --seconds "$seconds" \
+            --detail "exit $status (3 expected), cause named: $cause, fix command: $fix, doctor: $doctor" || failed=1
+          $Q llm --cli "$LC" || failed=1
+          exit "$failed"
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Check the evidence for the endpoint and the keys
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-wrong_key
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
   release:
     # A release rehearsal: install from a draft release's assets (checking SHA256SUMS
     # and its signature) and pull and verify the image of that tag.
-    if: github.repository == 'rundax/lifecontext' && inputs.release_tag != ''
+    if: github.repository == 'rundax/lifecontext' && inputs.release_tag != '' && inputs.public_tag == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -675,18 +801,10 @@ jobs:
           echo "LC=$HOME/.local/bin/lifecontext" >> "$GITHUB_ENV"
       - name: Keep the CI model key in a private file
         env:
-          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
-          LLM_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-        run: |
-          if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_BASE_URL" ] || [ -z "$LLM_MODEL" ]; then
-            echo "::error::LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL or LIFECONTEXT_CI_LLM_MODEL is missing"
-            exit 1
-          fi
-          umask 077
-          mkdir -p "$RUNNER_TEMP/private"
-          sh .github/scripts/secret-patterns.sh "$RUNNER_TEMP/private/secret-patterns"
-          printf '%s\n' "$LLM_API_KEY" > "$RUNNER_TEMP/private/llm-api-key"
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
+        run: sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Download the draft release's assets
         env:
@@ -708,11 +826,13 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
       - name: Run the release's install.sh against its assets
         env:
-          LIFECONTEXT_PROVIDER: openai_compatible
-          LIFECONTEXT_MODEL: ${{ vars.LIFECONTEXT_CI_LLM_MODEL }}
-          LIFECONTEXT_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
           LIFECONTEXT_TIMEZONE: UTC
         run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
           export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
           start=$SECONDS
           status=0
@@ -727,9 +847,13 @@ jobs:
           else
             $Q record release_signature_checked fail --detail "install.sh did not report a verified signature"
           fi
-      - name: Doctor
+      - name: Model settings and doctor
         continue-on-error: true
-        run: $Q doctor --cli "$LC" --label release --versions --require-ocr
+        run: |
+          failed=0
+          $Q llm --cli "$LC" || failed=1
+          $Q doctor --cli "$LC" --label release --versions --require-ocr || failed=1
+          exit "$failed"
       - name: Pull the image and verify its signature
         continue-on-error: true
         env:
@@ -754,7 +878,7 @@ jobs:
       - name: Summarize the evidence
         if: always()
         run: $Q finalize
-      - name: Check the evidence for the endpoint and the key
+      - name: Check the evidence for the endpoint and the keys
         id: scan
         if: always()
         run: |
@@ -764,7 +888,7 @@ jobs:
             exit 1
           fi
           if grep -rliF -f "$patterns" evidence/; then
-            echo "::error::the evidence above contains the CI endpoint or key; it is not uploaded"
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
             exit 1
           fi
           echo "No endpoint or key in: $(ls evidence)"
@@ -779,8 +903,200 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  public:
+    # The one-line install of a published release from its public URL, with no
+    # token, as a new user runs it; for a final through releases/latest, plus an
+    # anonymous pull of the image and a check of its signature.
+    if: github.repository == 'rundax/lifecontext' && inputs.public_tag != '' && inputs.release_tag == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            job: public_linux
+          - os: macos-14
+            job: public_macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      QUALIFY_EVIDENCE: ${{ github.workspace }}/evidence/${{ matrix.job }}.json
+      TAG: ${{ inputs.public_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the evidence file
+        env:
+          JOB: ${{ matrix.job }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([a-z]+[0-9]+)?$ ]]; then
+            echo "::error::public_tag must be a release tag such as v1.2.0 or v1.2.0rc1"
+            exit 1
+          fi
+          $Q init --job "$JOB"
+          version=${TAG#v}
+          # Only a final is "latest"; a pre-release is reached by its tag.
+          case "$version" in
+            *[a-z]*) url="https://github.com/rundax/lifecontext/releases/download/$TAG/install.sh"; prerelease=true ;;
+            *) url="https://github.com/rundax/lifecontext/releases/latest/download/install.sh"; prerelease=false ;;
+          esac
+          {
+            echo "LC=$HOME/.local/bin/lifecontext"
+            echo "VERSION=$version"
+            echo "PRERELEASE=$prerelease"
+            echo "INSTALL_URL=$url"
+          } >> "$GITHUB_ENV"
+          $Q metric info install_url "$url"
+      - name: Keep the CI model key in a private file
+        env:
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
+        run: sh .github/scripts/ci-model.sh "$RUNNER_TEMP/private"
+      - name: Start a systemd user manager for the runner account
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid=$(id -u)
+          for _ in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # As docs/install.md suggests, so install.sh checks the signature of SHA256SUMS.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Install with the one-line command from the public URL
+        # An exit 3 still leaves an installed copy whose doctor and probe say why.
+        continue-on-error: true
+        env:
+          LIFECONTEXT_PROVIDER: ${{ env.LLM_PROVIDER }}
+          LIFECONTEXT_MODEL: ${{ env.LLM_MODEL }}
+          # Only the gateway takes a base URL; the step unsets an empty one.
+          LIFECONTEXT_BASE_URL: ${{ env.LLM_PROVIDER == 'openai_compatible' && secrets.LIFECONTEXT_CI_LLM_BASE_URL || '' }}
+          LIFECONTEXT_TIMEZONE: UTC
+        run: |
+          [ -n "$LIFECONTEXT_BASE_URL" ] || unset LIFECONTEXT_BASE_URL
+          export LIFECONTEXT_API_KEY_FILE="$RUNNER_TEMP/private/llm-api-key"
+          log="$RUNNER_TEMP/install.log"
+          start=$SECONDS
+          status=0
+          curl -fsSL "$INSTALL_URL" | sh -s -- --non-interactive 2>&1 | tee "$log" || status=$?
+          seconds=$((SECONDS - start))
+          $Q metric timings_seconds install_sh_public "$seconds"
+          failed=0
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record install_sh_public "$result" --seconds "$seconds" --detail "exit $status, no token, $(grep -m1 -o 'The wheel and requirements-[a-z0-9_-]*.txt match SHA256SUMS' "$log" || echo 'no checksum line')" || failed=1
+          if grep -q "Signature of SHA256SUMS verified with cosign" "$log"; then
+            $Q record release_signature_checked pass --detail "install.sh verified SHA256SUMS.sigstore.json with cosign, anonymously"
+          else
+            $Q record release_signature_checked fail --detail "install.sh did not report a verified signature" || failed=1
+          fi
+          installed=$("$LC" --version 2>/dev/null || echo "none")
+          [ "${installed##* }" = "$VERSION" ] && result=pass || result=fail
+          $Q record installed_version "$result" --detail "$installed from $INSTALL_URL, $VERSION expected" || failed=1
+          # The release notes give the tag's own URL; for a final it must serve the same script.
+          if [ "$PRERELEASE" = true ]; then
+            $Q record tag_url_matches_latest skip --detail "a pre-release is never latest"
+          else
+            tagged="https://github.com/rundax/lifecontext/releases/download/$TAG/install.sh"
+            status=0
+            curl -fsSL "$tagged" -o "$RUNNER_TEMP/install-tag.sh" && curl -fsSL "$INSTALL_URL" -o "$RUNNER_TEMP/install-latest.sh" &&
+              cmp -s "$RUNNER_TEMP/install-tag.sh" "$RUNNER_TEMP/install-latest.sh" || status=$?
+            [ "$status" -eq 0 ] && result=pass || result=fail
+            $Q record tag_url_matches_latest "$result" --detail "$tagged and $INSTALL_URL $([ "$status" -eq 0 ] && echo serve the same install.sh || echo differ or failed)" || failed=1
+          fi
+          exit "$failed"
+      - name: Check that the API runs as a user service
+        run: |
+          if [ "$RUNNER_OS" = Linux ] && systemctl --user is-active --quiet lifecontext.service; then
+            $Q record service_running pass --detail "lifecontext.service $(systemctl --user is-active lifecontext.service)"
+          elif [ "$RUNNER_OS" = macOS ] && launchctl print "gui/$(id -u)/io.github.rundax.lifecontext" > /dev/null 2>&1; then
+            $Q record service_running pass --detail "launchd agent io.github.rundax.lifecontext loaded"
+          else
+            $Q record service_running skip --detail "no user service manager on this runner; lifecontext serve runs in the background instead"
+            nohup "$LC" serve > "$RUNNER_TEMP/serve.log" 2>&1 &
+          fi
+          $Q wait-http service_ready http://127.0.0.1:8765/healthz --timeout 900
+      - name: Model settings, doctor and the model probe
+        continue-on-error: true
+        run: |
+          failed=0
+          $Q llm --cli "$LC" || failed=1
+          ocr=""
+          [ "$RUNNER_OS" != Linux ] || ocr=--require-ocr
+          $Q doctor --cli "$LC" --label public --versions $ocr || failed=1
+          $Q probe --cli "$LC" --label public || failed=1
+          exit "$failed"
+      - name: Pull the image anonymously and verify its signature
+        continue-on-error: true
+        run: |
+          if [ "$RUNNER_OS" != Linux ]; then
+            $Q record image_pull skip --detail "no Docker on the macOS runner"
+            $Q record image_signature skip --detail "no Docker on the macOS runner"
+            exit 0
+          fi
+          failed=0
+          image="ghcr.io/rundax/lifecontext:$VERSION"
+          docker logout ghcr.io > /dev/null 2>&1 || true
+          status=0
+          docker pull "$image" > "$RUNNER_TEMP/pull.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/pull.log"
+          if [ "$status" -eq 0 ]; then
+            digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo 'no digest')
+            if [ "$PRERELEASE" = true ]; then
+              # Visibility is per package: once a final made it public, a pre-release image is public from its tag on.
+              echo "::warning::$image can be pulled anonymously before its release is published"
+              $Q record image_pull skip --detail "image public before the release is published: anonymous pull exit 0, $digest"
+            else
+              $Q record image_pull pass --detail "anonymous, exit 0, $digest"
+            fi
+          elif [ "$PRERELEASE" = true ] && grep -qiE 'denied|unauthorized' "$RUNNER_TEMP/pull.log"; then
+            $Q record image_pull pass --detail "image not anonymously pullable (package private)"
+            $Q record image_signature skip --detail "no anonymous pull to verify; the check of the draft verifies it with a token"
+            exit 0
+          else
+            $Q record image_pull fail --detail "anonymous pull exit $status$(grep -qiE 'manifest unknown|not found' "$RUNNER_TEMP/pull.log" && echo ', no such image tag')" || failed=1
+          fi
+          status=0
+          cosign verify "$image" \
+            --certificate-identity "https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/$TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null || status=$?
+          [ "$status" -eq 0 ] && result=pass || result=fail
+          $Q record image_signature "$result" --detail "cosign verify exit $status, identity release.yml@refs/tags/$TAG" || failed=1
+          exit "$failed"
+      - name: Show the service logs after a failure
+        if: failure()
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then journalctl --user -u lifecontext.service -n 150 --no-pager || true; fi
+          tail -n 80 "$RUNNER_TEMP"/*.log || true
+      - name: Summarize the evidence
+        if: always()
+        run: $Q finalize
+      - name: Check the evidence for the endpoint and the keys
+        id: scan
+        if: always()
+        run: |
+          patterns="$RUNNER_TEMP/private/secret-patterns"
+          if [ ! -s "$patterns" ] || [ ! -d evidence ]; then
+            echo "::error::nothing to scan"
+            exit 1
+          fi
+          if grep -rliF -f "$patterns" evidence/; then
+            echo "::error::the evidence above contains the CI endpoint or a key; it is not uploaded"
+            exit 1
+          fi
+          echo "No endpoint or key in: $(ls evidence)"
+      - name: Add the checked summary to the run page
+        if: always() && steps.scan.outcome == 'success'
+        run: cat evidence/*-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outcome == 'success'
+        with:
+          name: qualify-evidence-${{ matrix.job }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
   evidence:
-    needs: [build, native, docker, macos, release]
+    needs: [build, native, docker, macos, wrong_key, release, public]
     if: always() && github.repository == 'rundax/lifecontext'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -794,17 +1110,31 @@ jobs:
           pattern: qualify-evidence-*
           path: evidence
           merge-multiple: true
-      - name: Scan all evidence for the endpoint and the key, then summarize
+      - name: Scan all evidence for the endpoint and the keys, then summarize
         env:
-          LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_LLM_API_KEY: ${{ secrets.LIFECONTEXT_CI_LLM_API_KEY }}
+          LIFECONTEXT_CI_LLM_BASE_URL: ${{ secrets.LIFECONTEXT_CI_LLM_BASE_URL }}
+          LIFECONTEXT_CI_ANTHROPIC_API_KEY: ${{ secrets.LIFECONTEXT_CI_ANTHROPIC_API_KEY }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLIC_TAG: ${{ inputs.public_tag }}
+          MACOS: ${{ inputs.macos }}
         run: |
+          if [ -n "$RELEASE_TAG" ] && [ -n "$PUBLIC_TAG" ]; then
+            echo "::error::give release_tag or public_tag, not both"
+            exit 1
+          fi
+          if [ -n "$RELEASE_TAG$PUBLIC_TAG" ] && [ "$MACOS" = true ]; then
+            echo "::warning::macos applies to the full scenario only; with a tag it changes nothing"
+          fi
           patterns="$RUNNER_TEMP/secret-patterns"
           sh .github/scripts/secret-patterns.sh "$patterns"
+          if [ ! -s "$patterns" ]; then
+            echo "::error::nothing to scan for"
+            exit 1
+          fi
           ls -l evidence
           if grep -rliF -f "$patterns" evidence/; then
-            echo "::error::evidence contains the CI endpoint or key"
+            echo "::error::evidence contains the CI endpoint or a key"
             exit 1
           fi
           {
@@ -816,9 +1146,17 @@ jobs:
               jq -r '"| \(.job) | \(.result // "unfinished") | \([.checks[] | select(.status == "pass")] | length) | \([.checks | to_entries[] | select(.value.status == "fail") | .key] | join(", ")) | \([.checks | to_entries[] | select(.value.status == "skip") | .key] | join(", ")) |"' "$file"
             done
             echo
-            echo "Jobs: native ${{ needs.native.result }}, docker ${{ needs.docker.result }}, macos ${{ needs.macos.result }}, release ${{ needs.release.result }}"
+            echo "Model: provider \`$LLM_PROVIDER\`, model \`$LLM_MODEL\`"
+            echo
+            echo "Jobs: native ${{ needs.native.result }}, docker ${{ needs.docker.result }}, macos ${{ needs.macos.result }}, wrong_key ${{ needs.wrong_key.result }}, release ${{ needs.release.result }}, public ${{ needs.public.result }}"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ -n "$RELEASE_TAG" ]; then required="release"; else required="native docker"; fi
+          if [ -n "$RELEASE_TAG" ]; then
+            required="release"
+          elif [ -n "$PUBLIC_TAG" ]; then
+            required="public_linux public_macos"
+          else
+            required="native docker wrong_key"
+          fi
           for job in $required; do
             [ -f "evidence/$job.json" ] || { echo "::error::no evidence from $job"; exit 1; }
           done

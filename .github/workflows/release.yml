@@ -4,11 +4,11 @@ name: Release
 # compose.yaml name the same release; build the wheel, sdist and release assets
 # (with the hashed dependency locks) and SHA256SUMS without write access; sign
 # SHA256SUMS (cosign keyless); push a linux/amd64 + linux/arm64 image with an
-# SBOM and provenance to GHCR and sign it; create a DRAFT GitHub release; and
-# publish the draft only after the image is pushed and signed, and only for a
-# final version (a pre-release such as 1.2.0rc1 stays a draft). A manual run is
-# a dry run: it builds and checks everything but signs, publishes and pushes
-# nothing. See "Releasing" in docs/development.md.
+# SBOM and provenance to GHCR and sign it; and once both signatures exist,
+# create a DRAFT GitHub release. Every release stays a draft, a final too: it is
+# qualified as a draft and the maintainer publishes it. A manual run is a dry
+# run: it builds and checks everything but signs, publishes and pushes nothing.
+# See "Releasing" in docs/development.md.
 on:
   push:
     tags: ["v*"]
@@ -185,7 +185,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   draft:
-    needs: [build, sign]
+    # Only once the image is pushed and signed: publishing the draft then needs nothing more.
+    needs: [build, sign, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -205,29 +206,19 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
-          prerelease=()
-          if [ "$PRERELEASE" = true ]; then prerelease=(--prerelease); fi
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags=(--prerelease); fi
           {
             echo "LifeContext $VERSION, source-available under the Business Source License 1.1."
             echo
             echo "Install: \`curl -fsSL https://github.com/rundax/lifecontext/releases/download/$GITHUB_REF_NAME/install.sh | sh\`"
-            echo "Docker: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64)."
+            # The image package stays private until the final release is published.
+            if [ "$PRERELEASE" != true ]; then
+              echo "Docker: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64)."
+            fi
             echo "Changes: [CHANGELOG.md](https://github.com/rundax/lifecontext/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
             echo "Verify: [docs/install.md](https://github.com/rundax/lifecontext/blob/$GITHUB_REF_NAME/docs/install.md#verifying-a-release)."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"
+            --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
 
-  publish:
-    # Only a final version leaves draft, and only once the image is pushed and signed.
-    needs: [build, draft, image]
-    if: needs.build.outputs.prerelease == 'false'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write # publish the draft
-    steps:
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
