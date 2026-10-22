@@ -7,8 +7,10 @@ needs root:
   Ubuntu 22.04, Debian 12 or newer) and macOS 14 or later on Apple silicon.
 - [Docker](#docker) anywhere Docker runs, including Windows through Docker
   Desktop.
-- From source, as in the [README](../README.md#quick-start).
+- From source, as in the [README](../README.md#from-source).
 
+Every way needs you to choose the model provider and the model; there is no
+default ([choosing the model](operations.md#choosing-the-model)).
 Configuration after the install is in [operations.md](operations.md); what
 leaves your machine is in [privacy.md](privacy.md).
 
@@ -18,10 +20,9 @@ leaves your machine is in [privacy.md](privacy.md).
 curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
 ```
 
-This command works once the repository is public and v1.2.0 is published with
-its release assets. Until then, run the script from a checkout with a wheel
-built from the tree and the lock for your platform (`linux-x86_64`,
-`linux-aarch64` or `macos-arm64`):
+It installs the latest release. To install a commit from a checkout instead,
+build a wheel from the tree and pass it with the lock for your platform
+(`linux-x86_64`, `linux-aarch64` or `macos-arm64`):
 
 ```bash
 git clone https://github.com/rundax/lifecontext.git
@@ -68,25 +69,51 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    service's first start makes no Hugging Face calls.
 6. Installs Tesseract with English, Russian and Ukrainian through Homebrew on
    macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux) when `sudo`
-   works without a password prompt; it never asks for a password. Otherwise it prints the exact command
-   and goes on; scans and images stay unread (listed as unresolved) and
+   works without a password prompt; it never asks for a password. Otherwise it
+   prints the exact command and goes on; scans and images stay unread (listed as unresolved) and
    `doctor` reports OCR as missing until you run it.
 7. Sets up `~/.lifeweave` and the vault. In a terminal (this works under
-   `curl | sh` too) it asks for the model endpoint: the provider (default
-   `openai_compatible`), the API base URL (default `http://127.0.0.1:8317/v1`,
-   where a local CLIProxyAPI usually listens), the model ID, the API key with a
-   hidden prompt (leave it empty for an endpoint on this machine that needs
-   none) and the vault folder. The key reaches `lifecontext init` through a
+   `curl | sh` too) it asks which model to use, with no choice made for you:
+
+   ```
+   Which model should LifeContext use? The text of your documents and notes is sent to it.
+     1) Anthropic (API key)
+     2) OpenAI (API key)
+     3) Google Gemini (API key)
+     4) OpenRouter (API key)
+     5) A local model server (Ollama, vLLM, LM Studio)
+     6) Another OpenAI-compatible endpoint
+   Choose 1-6:
+   ```
+
+   Then the model ID (with Anthropic it suggests `claude-sonnet-5`; for the
+   others, type the ID from your provider's model list), the base URL for
+   choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`),
+   the API key with a hidden prompt (a server on this machine needs none), the
+   vault folder, and whether to turn notes you put in `Journal/Inbox` into
+   journal entries automatically. The key reaches `lifecontext init` through a
    private temporary file, never as an argument. Without a terminal it takes
    the [variables below](#unattended-install). Existing settings in
    `~/.lifeweave` are kept; change them later with
    [`lifecontext llm set`](#change-the-model-or-endpoint-later).
-8. When the setup is complete and a systemd user session (Linux) or launchd
-   (macOS) is available, runs `lifecontext service install --maintenance` and
-   waits for the API to answer. Otherwise it tells you to run
-   `lifecontext serve`.
-9. Runs `lifecontext skills install` for the agents it finds (Claude Code,
-   Codex, Gemini CLI, Hermes), then `lifecontext doctor`.
+8. Checks the model with `lifecontext preflight --model-probe`: a short
+   check, at most 60 seconds, also on a re-run that keeps the existing
+   settings; it is skipped while the setup is not complete. If it fails, it
+   prints the cause (for example: the provider rejected the key, the model was
+   not found, the model does not support the structured output LifeContext
+   needs, or the endpoint did not answer; [all causes](operations.md#startup-checks))
+   and the command that fixes it, usually `lifecontext llm set`, carries on
+   with the next steps, and exits with status 3 at the end.
+9. When the setup is complete and a systemd user session (Linux) or launchd
+   (macOS) is available, runs `lifecontext service install --maintenance`
+   (with `--capture` if you said yes to `Journal/Inbox`) and waits for the API
+   to answer. Otherwise it tells you to run `lifecontext serve`.
+10. Runs `lifecontext skills install` for the agents it finds (Claude Code,
+    Codex, Gemini CLI, Hermes), also when it skipped `init` because nothing
+    was set (an unattended `init` that fails stops the installer before this), then
+    `lifecontext doctor`. Unless the model check failed, it ends with three
+    next steps: open the vault in Obsidian, import a document, ask your agent
+    about it.
 
 It ships no vision model and writes no `vision` block: vision stays off until
 you configure it ([operations](operations.md)). It never prints your key.
@@ -95,50 +122,58 @@ you configure it ([operations](operations.md)). It never prints your key.
 
 | Option | Meaning |
 |---|---|
-| `--version VERSION` | Release to install (default: the one the script pins, 1.2.0); letters, digits, `.`, `+` and `-` only |
+| `--version VERSION` | Release to install (default: the release the script belongs to); letters, digits, `.`, `+` and `-` only |
 | `--assets DIR` | Use release assets already in `DIR` (as `gh release download` saves them) instead of downloading; they are checked the same way |
 | `--wheel PATH --lock PATH` | Install a locally built wheel with a lock from `requirements/` instead of a release |
 | `--non-interactive` | Never prompt; set up from the variables below only |
 | `--no-service` | Do not install the systemd user service or launchd agent |
 | `--no-skills` | Do not link the agent skill |
+| `--skip-model-probe` | Do not call the model at the end of the setup (also `LIFECONTEXT_SKIP_MODEL_PROBE=1`) |
 | `--no-backup` | Do not back up before upgrading an existing installation |
 | `--allow-root` | Allow running as root (not recommended) |
 | `--uninstall` | Remove what the script installed ([below](#uninstall)) |
 
-Exit status: `0` installed and `doctor` passed; `1` failed; `2` usage error;
-`3` installed, but `doctor` reported a problem (it is printed above).
+Exit status: `0` installed, the model answered and `doctor` passed; `1`
+failed; `2` usage error; `3` installed, but the model check or `doctor`
+reported a problem (it is printed above).
 
 ### Unattended install
 
 When any of `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL` or
-`LIFECONTEXT_API_KEY_FILE` is set, `init` runs without questions:
+`LIFECONTEXT_API_KEY_FILE` is set, `init` runs without questions. It never
+guesses a provider or a model: both must be set, or it stops with
+`provider_required` or `model_required`.
 
 | Variable | Meaning |
 |---|---|
-| `LIFECONTEXT_PROVIDER` | Provider ID (default `anthropic`) |
-| `LIFECONTEXT_MODEL` | Exact model ID (default `claude-sonnet-5` for Anthropic) |
+| `LIFECONTEXT_PROVIDER` | Provider ID, required: `anthropic`, `openai`, `gemini`, `openrouter`, `openai_compatible` or [another](operations.md#required-llm-configuration) |
+| `LIFECONTEXT_MODEL` | Exact model ID, required |
 | `LIFECONTEXT_BASE_URL` | API root, required for `openai_compatible` |
 | `LIFECONTEXT_VAULT` | Vault folder (default `~/LifeContext/vault`) |
 | `LIFECONTEXT_TIMEZONE` | IANA time zone (default: the system's) |
 | `LIFECONTEXT_API_KEY_FILE` | A file whose single line is the provider key |
+| `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default here |
+| `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
 ```bash
-LIFECONTEXT_MODEL=claude-sonnet-5 LIFECONTEXT_API_KEY_FILE=~/anthropic-key.txt \
-  sh install.sh --non-interactive
+curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh |
+  LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 \
+  LIFECONTEXT_API_KEY_FILE=~/anthropic-key.txt sh -s -- --non-interactive
 ```
 
 The key is read from the file into `~/.lifeweave/.env` (mode `0600`); it is
 never passed on a command line. Without a terminal and without these
-variables the script installs everything but skips `init`, the service and
-the skill links and tells you to run `lifecontext init`.
+variables the script installs everything and links the skill, but skips
+`init` and the service and tells you to run `lifecontext init` and then
+`lifecontext service install --maintenance`.
 
 ### Change the model or endpoint later
 
 ```bash
 lifecontext llm show                       # provider, model, base URL, whether a key is stored
 lifecontext llm set --model MODEL          # change only what you name
-lifecontext llm set --base-url http://127.0.0.1:8317/v1 --provider openai_compatible --model MODEL
 lifecontext llm set --api-key-stdin < ~/new-key.txt
+lifecontext preflight --model-probe        # a short check of the result
 ```
 
 `llm show` never prints the key. `llm set` validates like `init`, keeps every
@@ -146,7 +181,8 @@ other setting, replaces the key only when you give one (on stdin, or from the
 file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
 runs; without a usable service manager it prints the command to run. Changing
 the provider needs `--model` as well, and `openai_compatible` needs
-`--base-url`.
+`--base-url`; [operations.md](operations.md#choosing-the-model) has every
+provider and rule.
 
 ### Upgrade
 
@@ -190,9 +226,8 @@ starts with `HF_HUB_OFFLINE=1` and downloads no models. It runs as the unprivile
 is published; you reach it with `docker exec` or the
 [`lifecontext-docker`](#agents-and-the-lifecontext-docker-wrapper) wrapper.
 
-Once v1.2.0 is published the image is `ghcr.io/rundax/lifecontext:1.2.0`.
-Until then, build it from a checkout: `docker compose build` (or
-`docker build -t lifecontext .`).
+The image is `ghcr.io/rundax/lifecontext:1.2.0`. To build it from a checkout
+instead, run `docker compose build` (or `docker build -t lifecontext .`).
 
 ### Start with Docker Compose
 
@@ -219,13 +254,18 @@ On the first start the entrypoint runs `lifecontext init --non-interactive
 (`/run/secrets/lifecontext_api_key`). The variables matter only for that first
 start; later starts keep the settings in the home volume. The key is stored
 again from the secret on every start (`init --replace-key`), so to change it,
-update the secret file and run `docker compose restart`. Without them the
-container waits until you run
-`docker exec -it lifecontext lifecontext init --vault /data/vault`.
+update the secret file and run `docker compose restart`. There is no default
+model: without `LIFECONTEXT_PROVIDER` or `LIFECONTEXT_MODEL` the container logs
+which one is missing and waits. Set both and run `docker compose up -d` again,
+or run `docker exec -it lifecontext lifecontext init --vault /data/vault`.
+Without a stored key (unless the endpoint needs none) it also waits, on every
+start, and logs how to add one: put it in the secret file, or run
+`docker exec -it lifecontext lifecontext llm set --api-key-stdin`.
 
 | Variable (shell or `.env`) | Meaning |
 |---|---|
-| `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL`, `LIFECONTEXT_BASE_URL`, `LIFECONTEXT_TIMEZONE` | `init` settings for the first start |
+| `LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL` | Provider and model for the first start; required, there is no default |
+| `LIFECONTEXT_BASE_URL`, `LIFECONTEXT_TIMEZONE` | Other `init` settings for the first start |
 | `LIFECONTEXT_API_KEY_FILE` | Host path of the key file (default `./secrets/lifecontext_api_key`); it must be readable by uid 1000 |
 | `LIFECONTEXT_IMAGE` | Image to run (default `ghcr.io/rundax/lifecontext:1.2.0`) |
 | `LIFECONTEXT_CONTAINER` | Container name (default `lifecontext`) |

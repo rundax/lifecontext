@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
-<title>LifeContext · Your documents, compiled into a cited wiki</title>
-<meta name="description" content="A self-hosted context layer for AI agents. LifeContext keeps your original files, extracts text with local OCR and compiles an Obsidian wiki where every claim is a literal quote checked against its source.">
+<title>LifeContext · Your documents, compiled. Every claim cited.</title>
+<meta name="description" content="Give Claude Code, Codex and your other agents your contracts, letters, scans and notes. LifeContext keeps the files on your machine and cites every claim with the exact quote, its page or passage, and the source version.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f7f6" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0c1110" media="(prefers-color-scheme: dark)">
@@ -16,8 +16,8 @@
 <link rel="alternate" hreflang="x-default" href="https://rundax.github.io/lifecontext/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="LifeContext">
-<meta property="og:title" content="LifeContext: your documents and notes, compiled. Every claim cited.">
-<meta property="og:description" content="Self-hosted context layer for AI agents. Original files stay on your machine; the wiki it compiles quotes them, cites them and records where they disagree.">
+<meta property="og:title" content="LifeContext: your documents, compiled. Every claim cited.">
+<meta property="og:description" content="Your AI agents read your leases, letters and scans with receipts: every claim is a literal quote, checked against the source and cited to its page and version. Self-hosted; the files stay on your machine.">
 <meta property="og:url" content="https://rundax.github.io/lifecontext/">
 <meta property="og:image" content="https://rundax.github.io/lifecontext/og.png">
 <meta property="og:image:width" content="1200">
@@ -87,10 +87,11 @@
   <div class="wrap hero-grid">
     <div class="hero-head">
       <p class="eyebrow">Self-hosted · source-available · v1.2</p>
-      <h1 id="hero-h">Your documents and notes, compiled. <span class="accent-line">Every claim cited.</span></h1>
+      <h1 id="hero-h">Your documents, compiled. <span class="accent-line">Every claim cited.</span></h1>
     </div>
     <div class="hero-copy">
-      <p class="lead">LifeContext is a self-hosted context layer for your AI agents. It keeps your original files, reads them (scans included) and compiles a Markdown wiki in your Obsidian vault. Every claim is a literal quote, checked against the source text before the page is written; the short summary above the claims is labelled as model-written.</p>
+      <p class="lead">Give Claude Code, Codex and your other agents your contracts, letters, scans and notes. LifeContext keeps the files on your machine, sends their text only to the model you choose, and cites every claim with the exact quote, its page or passage, and the source version, so you can check it.</p>
+      <p class="licence-meta">For people who work with AI agents and keep documents that matter: leases, contracts, insurance, tax and medical letters, research PDFs, scans in English, Ukrainian or Russian.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="#install">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v12M6 12l6 6 6-6M5 20h14"/></svg>
@@ -99,9 +100,9 @@
         <a class="btn btn-secondary" href="https://github.com/rundax/lifecontext">View on GitHub</a>
       </div>
       <ul class="hero-facts">
-        <li>Linux and macOS; Windows via Docker or WSL</li>
-        <li>Free for individuals</li>
-        <li>OCR for English, Ukrainian and Russian</li>
+        <li>Free for one person for their own use, including at work; businesses need a commercial licence</li>
+        <li>Linux, and macOS on Apple silicon</li>
+        <li>One install command and an API key</li>
       </ul>
     </div>
 
@@ -428,10 +429,10 @@
       <ul class="upkeep-list">
         <li><strong>Daily brief and change log</strong>What was imported, which pages changed, new contradictions and pages that went stale.</li>
         <li><strong><code>wiki lint</code></strong>Reports stale pages, open contradictions, orphan pages and gaps. It reports; it changes nothing.</li>
-        <li><strong>Journal</strong>Capture diary text from the command line or through an agent. Entries are named by date and title.</li>
+        <li><strong>Journal</strong>Put notes in <code>Journal/Inbox</code> in Obsidian (with capture on) or write them through an agent. Entries are named by date and title, indexed and searchable; compiling the journal into wiki pages comes in v1.3.</li>
         <li><strong>Export and import</strong>Move a library between machines as a bundle.</li>
         <li><strong>Backup and restore</strong>Back up originals, catalog, index and vault, and restore them into a fresh home directory.</li>
-        <li><strong>Bring your own model</strong>Anthropic, OpenAI, Gemini, OpenRouter or any OpenAI-compatible endpoint, local ones included.</li>
+        <li><strong>Bring your own model</strong>Anthropic, OpenAI, Google Gemini, OpenRouter or any OpenAI-compatible endpoint, local ones included. You choose; there is no default.</li>
       </ul>
     </div>
   </div>
@@ -442,7 +443,7 @@
     <header class="section-head">
       <p class="eyebrow"><b>[3]</b>Install</p>
       <h2 id="install-h">Install</h2>
-      <p class="lead">One command on Linux and macOS, a container image for everything else, or a plain checkout if you want to read the code first.</p>
+      <p class="lead">One command on Linux and macOS, a container image for everything else, or a plain checkout if you want to read the code first. Every way needs you to choose the model; there is no default.</p>
     </header>
 
     <div class="install-grid">
@@ -460,19 +461,20 @@
             <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh" aria-label="Copy install command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
             <pre class="wrap-lines" tabindex="0"><code id="code-sh">curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh</code></pre>
           </div>
-          <p class="step-label">2 · Optional: rerun setup any time</p>
-          <p><code>install.sh</code> already runs <code>init</code>, <code>service install</code>, <code>skills install</code> and <code>doctor</code>; rerun them any time.</p>
+          <p>It asks which model to use (Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server or another OpenAI-compatible endpoint; there is no default), checks that the model answers, starts LifeContext as a user service and gives your agents the skill.</p>
+          <p class="step-label">2 · Open the vault in Obsidian</p>
+          <p>Choose “Open folder as vault” and pick <code>~/LifeContext/vault</code>, or the folder you gave the installer. Any Markdown editor works too.</p>
+          <p class="step-label">3 · Import a document and ask your agent</p>
           <div class="code">
-            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Copy setup commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
-            <pre tabindex="0"><code id="code-sh-2">lifecontext init            <span class="c"># provider, model, API key, vault folder</span>
-lifecontext doctor          <span class="c"># readiness, OCR languages, vision status</span>
-lifecontext skills install  <span class="c"># Claude Code, Codex, Gemini CLI, Hermes</span></code></pre>
+            <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Copy import command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
+            <pre class="wrap-lines" tabindex="0"><code id="code-sh-2">lifecontext documents import ~/Documents/lease.pdf</code></pre>
           </div>
+          <p>Indexing and compiling call your model and can take a few minutes; the page then appears under <code>Journal/wiki/</code> in the vault. Ask Claude Code, Codex or Gemini CLI: “What does my lease say about the deposit?” The agent answers from LifeContext’s evidence: the quote, the page and the version of the lease it came from.</p>
         </div>
 
         <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
           <h3 class="panel-title">Docker</h3>
-          <p>The image includes Tesseract with English, Ukrainian and Russian and the local models, and runs as an unprivileged user. No port is published: the service listens on loopback inside the container, and you talk to it with <code>docker exec</code>. Your key goes in a Compose secret, never into the image; the other settings apply on the first start.</p>
+          <p>The image includes Tesseract with English, Ukrainian and Russian and the local models, and runs as an unprivileged user. No port is published: the service listens on loopback inside the container, and you talk to it with <code>docker exec</code>. Your key goes in a Compose secret, never into the image; the other settings apply on the first start. Set the provider and model you chose: there is no default, and without them the container waits and logs which one is missing.</p>
           <p class="step-label">compose.yaml</p>
           <div class="code">
             <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Copy compose.yaml" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
@@ -510,7 +512,7 @@ docker compose exec lifecontext lifecontext doctor</code></pre>
           <div class="code">
             <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-run" aria-label="Copy docker run command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
             <pre tabindex="0"><code id="code-run">docker run -d --name lifecontext \
-  -e LIFECONTEXT_MODEL=claude-sonnet-5 \
+  -e LIFECONTEXT_PROVIDER=anthropic -e LIFECONTEXT_MODEL=claude-sonnet-5 \
   -v "$PWD/secrets/lifecontext_api_key:/run/secrets/lifecontext_api_key:ro" \
   -v lifecontext-home:/data/home -v lifecontext-vault:/data/vault \
   ghcr.io/rundax/lifecontext:1.2.0</code></pre>
@@ -520,18 +522,19 @@ docker compose exec lifecontext lifecontext doctor</code></pre>
 
         <div class="panel" role="tabpanel" id="panel-src" aria-labelledby="tab-src">
           <h3 class="panel-title">From source</h3>
-          <p>Needs Python 3.11 to 3.13, <a href="https://github.com/astral-sh/uv">uv</a>, and Tesseract with the <code>eng</code>, <code>ukr</code> and <code>rus</code> language data. On Linux the constraints file keeps PyTorch on its CPU build; on macOS run <code>uv pip install -e .</code> instead.</p>
+          <p>Needs Python 3.12 and <a href="https://github.com/astral-sh/uv">uv</a>; to read scans and images, also Tesseract with the <code>eng</code>, <code>ukr</code> and <code>rus</code> language data. On Linux the constraints file keeps PyTorch on its CPU build; on macOS run <code>uv pip install -e .</code> instead.</p>
           <div class="code">
             <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-src" aria-label="Copy source install commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
             <pre tabindex="0"><code id="code-src">git clone https://github.com/rundax/lifecontext.git
 cd lifecontext
-uv venv &amp;&amp; . .venv/bin/activate
+uv venv --python 3.12 &amp;&amp; . .venv/bin/activate
 uv pip install -c constraints-cpu.txt -e . \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   --index-strategy unsafe-best-match   <span class="c"># Linux, CPU-only PyTorch</span>
-lifecontext init
-lifecontext service install
-lifecontext skills install
+lifecontext init                         <span class="c"># provider, model, API key, vault folder</span>
+lifecontext preflight --model-probe      <span class="c"># a short check of the model</span>
+lifecontext service install --maintenance
+lifecontext skills install               <span class="c"># Claude Code, Codex, Gemini CLI, Hermes</span>
 lifecontext doctor</code></pre>
           </div>
         </div>
@@ -542,7 +545,7 @@ lifecontext doctor</code></pre>
         <ul>
           <li>Linux (x86_64 or aarch64, glibc 2.35 or later) or macOS 14 or later on Apple silicon, natively.</li>
           <li>Windows through Docker or WSL.</li>
-          <li>An API key for your model provider, or a local OpenAI-compatible endpoint such as Ollama or vLLM.</li>
+          <li>An API key from the model provider you choose (Anthropic, OpenAI, Google Gemini or OpenRouter), or a local model server such as Ollama, vLLM or LM Studio.</li>
           <li>About 3 GB of disk for the runtime and models (measured in CI on Linux: 2.4 GB for the installation, 0.6 GB for the models). The installer downloads the embedding and rerank models once.</li>
           <li>Recall reranks on the CPU; expect tens of seconds on a 4-core machine.</li>
         </ul>
@@ -551,8 +554,9 @@ lifecontext doctor</code></pre>
           <li>Checks your operating system and CPU, and stops with a clear message on combinations it does not support.</li>
           <li>Downloads the release over HTTPS, checks its SHA-256 checksums and, with cosign 3 or later, their signature, and installs every dependency from a lock with pinned hashes.</li>
           <li>Installs into your home directory. Running LifeContext never needs root.</li>
-          <li>Installs Tesseract with English, Ukrainian and Russian through brew, or through apt or dnf when sudo works without a password. It never asks for a password; otherwise it prints the command to run.</li>
-          <li>Runs <code>init</code>, <code>service install</code>, <code>skills install</code> and <code>doctor</code>. Your API key is asked for at <code>init</code>, never passed on the command line.</li>
+          <li>Installs Tesseract with English, Ukrainian and Russian through Homebrew on macOS, or through apt, dnf or pacman when sudo works without a password. It never asks for a password; otherwise it prints the command to run.</li>
+          <li>Asks which model to use, with no default, and checks with a short probe that it answers. Your API key is read with a hidden prompt, never passed on the command line.</li>
+          <li>Runs <code>init</code>, <code>service install --maintenance</code>, <code>skills install</code> and <code>doctor</code>, and, when the model answered, ends with three next steps.</li>
           <li>Run it again to upgrade: it stops the service, backs up your data, installs, and starts the service again.</li>
           <li>Leaves vision off.</li>
         </ul>
@@ -615,14 +619,14 @@ lifecontext doctor</code></pre>
     <div class="providers">
       <div>
         <h3>Bring your own model</h3>
-        <p>LifeContext uses one model provider at a time, set at <code>init</code>. Anthropic is the one we document first.</p>
+        <p>LifeContext uses one model at a time. There is no default: the installer and <code>init</code> ask you to choose one of these.</p>
         <ul class="provider-list">
-          <li class="featured">Anthropic</li>
+          <li>Anthropic</li>
           <li>OpenAI</li>
-          <li>Gemini</li>
+          <li>Google Gemini</li>
           <li>OpenRouter</li>
-          <li>Any OpenAI-compatible endpoint</li>
-          <li>Ollama or vLLM, locally</li>
+          <li>A local model server (Ollama, vLLM, LM Studio)</li>
+          <li>Another OpenAI-compatible endpoint</li>
         </ul>
       </div>
       <p class="trust"><strong>What agents are allowed to do.</strong> A connected agent runs the CLI with your authority. The skill tells it what not to do (no repairs, no edits to internal state, report failures instead of retrying around them); LifeContext does not enforce separate permissions per agent.</p>
@@ -659,7 +663,7 @@ lifecontext doctor</code></pre>
         <tbody>
           <tr class="ours">
             <th scope="row">LifeContext<sup><a href="#fn-ours" aria-label="Note 1">1</a></sup></th>
-            <td>BUSL-1.1, source-available, free for individuals</td>
+            <td>BUSL-1.1, source-available: free for one person for their own use; businesses need a commercial licence</td>
             <td>Yes (loopback service)</td>
             <td>Immutable, checksummed, versioned</td>
             <td>TXT/MD/PDF/DOCX/XLSX/PPTX/images; local Tesseract OCR (EN/RU/UK)</td>
@@ -975,6 +979,18 @@ lifecontext doctor</code></pre>
           <summary>Do I need Obsidian?</summary>
           <div class="answer"><p>No. The vault is a folder of Markdown files that any editor can open. Links, page names and the graph view are designed with Obsidian in mind.</p></div>
         </details>
+        <details>
+          <summary>Are my notes compiled too?</summary>
+          <div class="answer"><p>In v1.2, journal entries and notes you put in <code>Journal/Inbox</code> are indexed and searchable next to your documents, and your agents can recall them with citations. Compiling the journal into wiki pages comes in v1.3. A Markdown file you import as a document is compiled like any other document.</p></div>
+        </details>
+        <details>
+          <summary>Can I use it on my phone or on several devices?</summary>
+          <div class="answer"><p>Advanced and optional. LifeContext runs on one machine, and the vault is a folder there. To read and write the vault on a phone or a second computer, the Self-hosted LiveSync plugin for Obsidian can sync it through a hub on that machine, reached over Tailscale. It takes Docker, Tailscale and some setup on every device; the <a href="https://github.com/rundax/lifecontext/blob/main/docs/sync.md">sync guide</a> walks through it.</p></div>
+        </details>
+        <details>
+          <summary>Who is it not for?</summary>
+          <div class="answer"><p>People who want an app with no computer to run it on: LifeContext runs on your own Linux machine or Mac, or in Docker. Teams that want one shared knowledge base: it is built for one person. Anyone looking for audio, video or web capture: it reads documents and images.</p></div>
+        </details>
       </div>
     </div>
   </div>
@@ -990,7 +1006,7 @@ lifecontext doctor</code></pre>
           <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="mark-bg" width="32" height="32" rx="7"/><rect class="mark-fg" x="7" y="8.5" width="12" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="14.5" width="18" height="3" rx="1.5"/><rect class="mark-fg" x="7" y="20.5" width="9" height="3" rx="1.5"/><circle class="mark-dot" cx="23.5" cy="10" r="2.5"/></svg>
           LifeContext
         </a>
-        <p>A self-hosted context layer for AI agents. Built in Ukraine.</p>
+        <p>Your documents, compiled. Every claim cited. Self-hosted, built in Ukraine.</p>
         <p>Built on the open-source <a href="https://github.com/vectorize-io/hindsight">Hindsight</a> memory engine (MIT, by Vectorize).</p>
       </div>
       <nav aria-labelledby="f-project">

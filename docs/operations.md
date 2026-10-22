@@ -8,6 +8,63 @@ In the development checkout use `bin/lifecontext-dev` instead, which pins port
 [architecture.md](architecture.md); what leaves the machine is in
 [privacy.md](privacy.md).
 
+## Choosing the model
+
+LifeContext uses one model at a time, and the text of your documents and notes
+is sent to it. There is no default: in a terminal, the installer and
+`lifecontext init` ask
+
+```
+Which model should LifeContext use? The text of your documents and notes is sent to it.
+  1) Anthropic (API key)
+  2) OpenAI (API key)
+  3) Google Gemini (API key)
+  4) OpenRouter (API key)
+  5) A local model server (Ollama, vLLM, LM Studio)
+  6) Another OpenAI-compatible endpoint
+Choose 1-6:
+```
+
+and anything but a number from 1 to 6 asks again, up to three times. Choices 1 to 4 select the native
+providers `anthropic`, `openai`, `gemini` and `openrouter`. Choice 5 selects
+`openai_compatible` and suggests `http://127.0.0.1:11434/v1`, Ollama's address
+(vLLM and LM Studio listen on other ports); a server on this machine needs no
+key. Choice 6 selects `openai_compatible` and asks for the endpoint's URL. Then
+type the exact model ID your provider uses; the provider's model list has them.
+The other provider IDs in [Required LLM configuration](#required-llm-configuration)
+are available through `--provider` and `LIFECONTEXT_PROVIDER`.
+
+With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less.
+`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` and
+`claude-mythos-5-1` do not work yet: LifeContext's retain step uses strict
+structured output, which on Anthropic is a forced tool call, and these models
+refuse a forced tool choice. `init` and `llm set` refuse them for the native Anthropic
+adapter and warn when the same IDs are reached through `openai_compatible`; `doctor`
+warns about an existing `config.yaml` that names one.
+
+A run without a terminal never guesses: it needs the provider and the model as
+flags or as `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL`, and stops with
+`provider_required` or `model_required` otherwise.
+
+### Change the model or endpoint later
+
+```bash
+lifecontext llm show                       # provider, model, base URL, whether a key is stored
+lifecontext llm set --model MODEL          # change only what you name
+lifecontext llm set --provider openai --model MODEL --api-key-stdin < ~/openai-key.txt
+lifecontext llm set --provider openai_compatible --base-url https://HOST/v1 --model MODEL
+lifecontext llm set --api-key-stdin < ~/new-key.txt   # replace the key (or set LIFECONTEXT_API_KEY_FILE)
+lifecontext preflight --model-probe        # a short check of the new settings
+```
+
+`llm show` never prints the key. `llm set` changes only the fields you give,
+checks them the way `init` does, leaves every other setting alone and, when the
+user service runs, restarts it so the new settings take effect; where no
+service manager is available it prints the exact restart command. A new
+provider needs `--model` too, and `openai_compatible` needs `--base-url`.
+[Applying changed model settings](#applying-changed-model-settings) has the
+details.
+
 ## Setting up with `lifecontext init`
 
 ```bash
@@ -19,12 +76,12 @@ lifecontext init --non-interactive --api-key-stdin \
 `init` creates `~/.lifeweave` (mode `0700`), writes `config.yaml` with the `llm`,
 `vault` and `timezone` blocks described below and `.env` with
 `LIFEWEAVE_LLM_API_KEY` (both mode `0600`), and creates the vault root, its
-`Journal` directory and `Journal/entries` (mode `0700`; an existing directory you
-own is tightened to `0700`). Defaults: provider `anthropic`, model
-`claude-sonnet-5` (`claude-haiku-5-5` costs less), vault `~/LifeContext/vault`,
-and the system time zone (from `TZ`, `/etc/timezone` or the `/etc/localtime`
-link, else `UTC`). Other flags: `--base-url`, `--vault DIR`,
-`--non-interactive`, `--json`.
+`Journal` directory, `Journal/entries` and `Journal/Inbox` (mode `0700`; an
+existing directory you own is tightened to `0700`). The provider and the model
+have no default ([Choosing the model](#choosing-the-model)); the vault defaults
+to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
+`/etc/timezone` or the `/etc/localtime` link, else `UTC`). Other flags:
+`--base-url`, `--vault DIR`, `--non-interactive`, `--json`.
 
 - It is idempotent: an existing `config.yaml` and key are kept. When a flag
   asks for something else than the existing `config.yaml` holds, the report
@@ -57,9 +114,18 @@ link, else `UTC`). Other flags: `--base-url`, `--vault DIR`,
 - Exit codes: 0 when set up (also when only the key is missing), 1 with
   `{"error": CODE}` under `--json`, 2 for a usage error.
 - A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
-- Claude Sonnet 5.5 and Opus 5.5 are reported with a warning: they reject the
-  forced tool call that Hindsight 0.9.2 uses for fact extraction, so retain fails.
-- It never starts the API or Hindsight; it prints the next steps.
+- `--non-interactive` without a provider or a model stops with
+  `provider_required` or `model_required`; four Claude models are refused for
+  the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
+- In a terminal, after writing the configuration, `init` checks the model
+  with two short calls (the model probe below) and reports it as `model_probe` (`status` and a `cause`, never
+  the provider's own text); a failed probe does not undo the setup. Run
+  `lifecontext preflight --model-probe` to check again.
+- It never starts the API or Hindsight. Its report lists `next_steps` for you
+  (open the vault in Obsidian, import a document, ask your agent) and
+  `setup_steps` for a source install (`preflight`, `service install
+  --maintenance`, `skills install`, `doctor`), which `install.sh` has already
+  run.
 
 ## Diagnostics with `lifecontext doctor`
 
@@ -68,7 +134,8 @@ lifecontext doctor           # readable summary
 lifecontext doctor --json    # the full report
 ```
 
-`doctor` only reads. It reports the LifeContext, platform and Python versions;
+`doctor` only reads, and makes no model call unless you add `--model-probe`
+(see [Startup checks](#startup-checks)). It reports the LifeContext, platform and Python versions;
 the pinned Hindsight package versions; `command -v lifecontext` (the absolute
 path to put in MCP client configs); the paths and modes of `~/.lifeweave`,
 `config.yaml`, `.env`, the vault root and `Journal`; a config summary (provider,
@@ -96,10 +163,13 @@ see [Engine access](#engine-access-token-port-and-postgres)), `engine_port_taken
 (something else listens on the profile's port), `postgres_tcp` (Postgres
 listens on TCP or the profile is set up for it), `postgres_files_unsafe` (the
 socket directory is not `0700` or not `~/.lifeweave/postgres`, or
-`instance.json` is not a private file of yours), `engine_profile_unsafe`.
-`warnings` do not change the exit code: `service_not_running`,
+`instance.json` is not a private file of yours), `engine_profile_unsafe`, and
+with `--model-probe`, `model_probe_failed` (the report's `model_probe` says
+why). `warnings` do not change the exit code: `service_not_running`,
 `service_not_ready`, `tesseract_missing`, `tesseract_languages_missing`,
-`models_not_cached` (normal before the first start), `disk_low` (under 2 GB).
+`models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
+`model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
+that do not work yet) and, with `--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 
@@ -119,9 +189,11 @@ llm:
 `openai_compatible` and `volcano`; it is optional for other native providers
 that have a built-in endpoint. Use the exact lowercase provider ID:
 
-- `openai_compatible` — any service that implements OpenAI Chat Completions.
-  LifeContext maps this to Hindsight's `openai` adapter. Supply that service's API root
-  in `base_url` (usually ending `/v1`), not its `/chat/completions` endpoint.
+- `openai_compatible`: the OpenAI Chat Completions protocol, not a vendor; use
+  it for any service that implements it, such as a local Ollama, vLLM or LM
+  Studio server. LifeContext maps it to Hindsight's `openai` adapter. Supply
+  that service's API root in `base_url` (usually ending `/v1`), not its
+  `/chat/completions` endpoint.
 - Native adapters: `openai`, `openai-responses`, `anthropic`, `gemini`,
   `groq`, `openrouter`, `minimax`, `ollama-cloud`, `deepseek`, `volcano`,
   `requesty`, `zai`, `opencode-go`, `atlas`, `fireworks`.
@@ -145,7 +217,9 @@ LifeContext fixes Hindsight's fact-extraction output limit at 8,192 tokens so it
 default does not exceed common provider limits. The selected model endpoint
 must accept that output limit; this is not a separate user config field.
 
-LifeContext rejects unknown provider IDs, unknown fields inside `llm`, old
+LifeContext supports one selected provider, one model, at most one custom
+URL and one key at a time; there is no provider fallback and no
+provider-specific key lookup. It rejects unknown provider IDs, unknown fields inside `llm`, old
 `hindsight.llm_provider`/`llm_model`/`llm_base_url` fields, invalid URLs, and
 credentials in YAML.
 
@@ -168,7 +242,8 @@ LifeContext requires a non-empty LLM key for every provider except
 `openai_compatible` with a loopback `base_url` (`localhost`, `127.0.0.0/8` or
 `::1`): a local Ollama, llama.cpp or vLLM server needs none, `.env` may then be
 absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
-used when present. It does not read provider-specific variables, Hermes
+used when present. It does not read provider-specific variables
+(`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HINDSIGHT_LLM_API_KEY`), Hermes
 credentials, or ambient shell variables. The key file must be owned by the
 current user and mode `0600` on POSIX systems; the containing directory must be
 mode `0700`. LifeContext creates `~/.lifeweave` with mode `0700` when it is
@@ -281,7 +356,7 @@ On start, the service resumes unfinished imports, including their vision reads,
 before it answers requests, as it already does for unfinished indexing. After a
 long outage with several pending documents, startup can take minutes per
 document; the service's log shows that it is busy, not hung. Under
-`lifecontext service install` the log is in `journalctl --user -u lifecontext`
+`lifecontext service install --maintenance` the log is in `journalctl --user -u lifecontext`
 on Linux and `~/Library/Logs/lifecontext/` on macOS (see
 [Running as a user service](#running-as-a-user-service)).
 
@@ -294,16 +369,37 @@ and honoured by recovery and every rerun. `documents retry ... --rerun-extractio
 
 ```bash
 lifecontext preflight
+lifecontext preflight --model-probe
 lifecontext preflight --retain-smoke
 ```
 
-Both commands use only the `lifeweave` Hindsight profile, bound to
+`preflight --model-probe` only calls the model: one small request through the
+same structured-output path that retain uses for your provider, with a
+60-second limit (one retry on a rate limit), plus a check of the named tool
+call that reflect uses, which can only warn. It does not start the memory
+engine. It prints `{"model_probe": {...}}` with `status` (`pass` or `fail`),
+a `cause`, a `message` and the `fix` command for a failure, and `reflect`
+(`pass`, `warn` or `skipped`), and exits 0 on a pass and 3 on a failure. The
+causes: the provider rejected the key (`key_rejected`), no key is stored
+(`key_missing`), the model was not found (`model_not_found`), the model does
+not support the structured output LifeContext needs
+(`structured_output_unsupported`), the provider is rate limiting the key
+(`rate_limited`), the endpoint did not answer (`unreachable`), the settings
+are not valid (`invalid_config`), or another failure (`failed`). It never
+prints the provider's own error text. `doctor --model-probe` adds the same
+check to the doctor report.
+
+Plain `preflight` checks the configuration and that a key is stored, then
+starts the local memory engine and checks that it answers. It does not check
+the model: starting the engine sends it one tiny test request and only logs
+the result. `--retain-smoke` also retains one test source, which goes through
+the model and can take many minutes. These two commands use only the `lifeweave` Hindsight profile, bound to
 `127.0.0.1`. They may start the profile and leave it running after the check;
 an already-running profile is reused without reconfiguration. Restart the
 profile before applying changed model settings. The JSON field `daemon_status`
 reports `running`, `engine_auth` reports `enforced` and `postgres` reports
-`socket_only`. The second command also retains one fixed disposable test
-source in the local Hindsight database. Both emit redacted JSON. They do not
+`socket_only`. The test source of `--retain-smoke` stays in a disposable bank
+of the local Hindsight database. Both emit redacted JSON. They do not
 launch a LifeContext HTTP API service.
 
 ### Engine access: token, port and Postgres
@@ -489,7 +585,8 @@ Never stop another Hindsight profile (for example one used by a different
 agent) for LifeContext work.
 
 HTTP health alone does not prove the model route works: `lifecontext preflight
---retain-smoke` or a synthetic retain does.
+--model-probe` checks it in a minute, and `preflight --retain-smoke` or a
+synthetic retain takes the whole retain path.
 
 ## Running as a user service
 

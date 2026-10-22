@@ -1,85 +1,130 @@
 # LifeContext
 
-**Your private, durable context layer for AI**
+**Your documents, compiled. Every claim cited.**
 
-LifeContext keeps your journal entries and documents on your own machine,
-indexes them with the Hindsight memory engine and the LLM you choose, and
-compiles a wiki in your Obsidian vault where every claim is a checked quote
-from a source. Any agent that can run a shell command (Claude Code, Codex,
-Gemini CLI, Hermes) reads and adds to it through one CLI and one skill, with
-citations back to the exact source version.
+Give Claude Code, Codex and your other agents your contracts, letters, scans
+and notes. LifeContext keeps the files on your machine, sends their text only
+to the model you choose, and cites every claim with the exact quote, its page
+or passage, and the source version, so you can check it.
 
-LifeContext is source-available under the Business Source License 1.1: free for
-one person running their own copy, including at work, and for non-profit,
-educational and research institutions (see [License](#license)).
+For people who work with AI agents and keep documents that matter: leases,
+contracts, insurance, tax and medical letters, research PDFs, scans in
+English, Ukrainian or Russian.
 
-## Status
-
-This tree is the 1.2.0 development version (1.2.0.dev0); 1.2.0 will be the first public release.
-
-- CI runs the test suite on Ubuntu 24.04 with Python 3.12 only. The package
-  declares Python 3.11 to 3.13; 3.11 and 3.13 are not tested.
-- A manual CI job installs the package on macOS 14 (arm64) and imports it.
-  Nothing else is checked on macOS.
-- Windows is not supported natively.
+Free for one person for their own use, including at work; businesses need a
+commercial license ([License](#license)). Linux, and macOS on Apple silicon.
 
 ## Quick start
 
-Pick one of three ways: the `install.sh` script (Linux x86_64 and aarch64,
-macOS on Apple silicon), the Docker image, or from source.
-[docs/install.md](docs/install.md) covers the script and Docker in full.
-
-**install.sh.** Once v1.2.0 is published (the repository is not public yet),
-one command installs uv, Python 3.12, LifeContext with CPU-only PyTorch and
-Tesseract into your home directory, then runs `init`, `service install
---maintenance`, `skills install` and `doctor` (steps 2 and 3 below):
+**1. Install.** On Linux (x86_64 or aarch64, glibc 2.35 or later) or macOS 14
+or later on Apple silicon, with about 3 GB of free disk:
 
 ```bash
 curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
 ```
 
-Until then, run it from a checkout with a wheel built from the tree:
-`sh install.sh --wheel dist/lifecontext-*.whl --lock requirements/linux-x86_64.txt`
-([how](docs/install.md#installsh)). Run it again to upgrade; `--uninstall`
-removes the installation and keeps your settings, key, vault and backups.
+It installs into your home directory, asks which model to use (there is no
+default: pick Anthropic, OpenAI, Google Gemini, OpenRouter, a local model
+server or another OpenAI-compatible endpoint, and have its API key ready),
+checks that the model answers, starts LifeContext as a user service and gives
+your agents the skill. [docs/install.md](docs/install.md) explains each step.
 
-**Docker.** The image runs as an unprivileged user, publishes no port, and has
-Tesseract and the local models inside. From a checkout:
+**2. Open the vault in Obsidian.** Choose "Open folder as vault" and pick
+`~/LifeContext/vault` (or the folder you gave the installer). Any Markdown
+editor works too.
+
+**3. Import a document and ask your agent.**
 
 ```bash
-docker compose build                       # until the 1.2.0 image is published
+lifecontext documents import ~/Documents/lease.pdf
+```
+
+(If the shell does not find `lifecontext`, add `~/.local/bin` to your `PATH`
+as the installer says, or open a new terminal.) Indexing and compiling call your model and can take a few minutes; the page
+then appears under `Journal/wiki/` in the vault. Ask Claude Code, Codex or
+Gemini CLI: *"What does my lease say about the deposit?"* The agent answers
+from LifeContext's evidence: the quote, the page and the version of the lease
+it came from.
+
+## What you get
+
+- **A wiki page for each document**, in your vault, with numbered claims. Each claim
+  is a literal quote, checked against the extracted text before the page is
+  written, and cited to the source, its version and the passage or page. A
+  short summary above the claims is labelled as written by the model.
+- **Originals kept** byte for byte, checksummed and versioned. A correction
+  adds a version, and pages built on a corrected or forgotten source are
+  marked stale.
+- **Scans read locally**: Tesseract OCR for English, Ukrainian and Russian.
+  Pages it could not read are listed, not skipped.
+- **One memory for your agents**: one CLI and one skill for Claude Code, Codex,
+  Gemini CLI and Hermes, and a read-only MCP server for Claude Desktop and
+  Cursor.
+- **Notes too**: journal entries and notes from `Journal/Inbox` are indexed and
+  searchable next to your documents; compiling the journal into wiki pages
+  comes in v1.3.
+
+## Status
+
+This tree is the 1.2.0 development version (1.2.0.dev0). 1.2.0, the first
+public release, is planned for 2026-11-01; until then the install command
+above and the Docker image are not available, and you can install from a
+checkout ([docs/install.md](docs/install.md#installsh)).
+
+- Each release candidate is installed on clean GitHub-hosted machines and put
+  through one scenario against a real model: on Ubuntu 24.04 (x86_64) with
+  `install.sh` and with Docker (install, service, `doctor`, journal entries,
+  document import with OCR, recall and the wiki), and on macOS 14 (Apple
+  silicon) with `install.sh` (install, the launchd service, `doctor`, one
+  import and one recall). `install.sh` also runs on Linux aarch64, which is
+  not qualified.
+- CI runs the test suite on Ubuntu 24.04 with Python 3.12 only.
+- Local models (Ollama, vLLM, LM Studio) are supported but not yet part of
+  release qualification.
+- Windows is not supported natively; use Docker or WSL.
+
+## Other ways to install
+
+### Docker
+
+The image runs as an unprivileged user, publishes no port, and has Tesseract
+and the local models inside. From a checkout:
+
+```bash
 mkdir -p secrets && (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Ctrl-D
-LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
+LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
 docker compose exec lifecontext lifecontext doctor
 ```
 
+Set `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL` to the provider and model
+you chose; without them the container waits and logs which one is missing.
 Agents on the host use `bin/lifecontext-docker`; see
 [docs/install.md](docs/install.md#docker).
 
-**From source:**
+### From source
 
-### 1. Install
-
-You need Python 3.12 (see [Status](#status)), Git, and about 3 GB of disk for
-the environment and models. Tesseract OCR is optional but needed to read scans
-and images.
+You need Python 3.12, Git, and about 3 GB of disk for the environment and
+models. Tesseract OCR is optional but needed to read scans and images.
 
 ```bash
 git clone https://github.com/rundax/lifecontext.git
 cd lifecontext
-python3 -m venv .venv
+python3.12 -m venv .venv
 # constraints-cpu.txt pins CPU-only PyTorch on Linux: about 2.4 GB instead of
 # about 6 GB with the default CUDA build. It changes nothing on macOS.
 .venv/bin/pip install -c constraints-cpu.txt \
   --extra-index-url https://download.pytorch.org/whl/cpu .
 export PATH="$PWD/.venv/bin:$PATH"
 lifecontext --version
+```
 
-# Optional OCR: English, Russian and Ukrainian
-# Debian/Ubuntu
-sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr
-# Arch Linux
-sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr
+Optional OCR with English, Russian and Ukrainian:
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr       # Debian, Ubuntu
+sudo dnf install tesseract tesseract-langpack-eng tesseract-langpack-rus tesseract-langpack-ukr # Fedora
+sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr      # Arch Linux
+brew install tesseract tesseract-lang                                                          # macOS
 ```
 
 With [uv](https://github.com/astral-sh/uv) instead of pip, add
@@ -88,7 +133,7 @@ With [uv](https://github.com/astral-sh/uv) instead of pip, add
 fails:
 
 ```bash
-uv venv .venv
+uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -c constraints-cpu.txt \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   --index-strategy unsafe-best-match .
@@ -98,60 +143,31 @@ LifeContext is not published on PyPI, so never install the bare name
 `lifecontext` from there; use a checkout (`.`) or a wheel from a
 [GitHub release](https://github.com/rundax/lifecontext/releases).
 
-### 2. Configure
+Then set it up and start it:
 
 ```bash
-lifecontext init
-```
-
-`init` asks for the model provider (Anthropic by default), the model, the vault
-folder and the time zone, and reads your API key with a hidden prompt. It
-creates `~/.lifeweave` (mode `0700`) with `config.yaml` and `.env` (mode
-`0600`), and the vault `~/LifeContext/vault` with `Journal` inside (mode
-`0700`). Running it again changes nothing; `--force` applies the flags you give
-to `config.yaml` and keeps your other settings, and `--replace-key` replaces
-the stored key and nothing else. It never starts anything.
-
-The suggested Claude model is `claude-sonnet-5`; `claude-haiku-5-5` costs less.
-Claude Sonnet 5.5 and Opus 5.5 do not work yet: they reject the forced tool
-call that the pinned Hindsight uses to extract facts.
-
-For an unattended install, pass everything as flags and the key on stdin:
-
-```bash
-lifecontext init --non-interactive --api-key-stdin --model claude-sonnet-5 \
-  --timezone Europe/Vienna < ~/anthropic-key.txt
-```
-
-`--provider`, `--base-url` and `--vault DIR` select another provider or vault;
-`LIFECONTEXT_PROVIDER`, `LIFECONTEXT_MODEL`, `LIFECONTEXT_BASE_URL`,
-`LIFECONTEXT_VAULT` and `LIFECONTEXT_API_KEY_FILE` (a file holding the key) do
-the same from the environment, and flags win.
-[Configure the model](#configure-the-model) lists every provider and rule, and
-the files `init` writes can also be edited by hand.
-
-### 3. Start
-
-```bash
-lifecontext preflight                        # checks config and key, starts the local memory engine
+lifecontext init                             # provider, model, key (hidden), vault, time zone
+lifecontext preflight --model-probe          # a short check of the provider, key and model
 lifecontext service install --maintenance    # run it as a user service, plus a daily 07:00 upkeep
                                              # add --capture to take in notes from Journal/Inbox every 30 s
 lifecontext skills install                   # give Claude Code, Codex, Gemini CLI, Hermes the skill
 lifecontext doctor                           # check everything; exit 1 only if something is broken
 ```
 
-`service install` writes a `systemd --user` unit on Linux or a launchd agent on
-macOS (`--dry-run` shows the files first). To run in a terminal instead, use
-`lifecontext serve` (loopback only, port 8765) and `lifecontext status --json`
-from a second terminal.
-
-The first start downloads the local embedding and reranking models into
-`~/.cache/huggingface` (about 1 GB on Linux, measured in CI; install.sh fetches
-fixed revisions of them instead, about 0.6 GB); once they are there, later
-starts make no Hugging Face calls. Open the vault folder in Obsidian to read what LifeContext
-writes. Back it all up with `lifecontext backup --stop-service`, which stops
-the service for the backup and starts it again
-([operations](docs/operations.md#backup-and-restore)).
+`init` creates `~/.lifeweave` (mode `0700`) with `config.yaml` and `.env` (mode
+`0600`), and the vault `~/LifeContext/vault` with `Journal`, `Journal/entries`
+and `Journal/Inbox` inside (mode `0700`). It never starts anything; running it
+again changes nothing unless you pass `--force` or `--replace-key`.
+`lifecontext preflight` without `--model-probe` checks the configuration and
+that a key is stored, then starts the local memory engine and checks that it
+answers; it does not check the model (starting the engine sends it one tiny
+test request and only logs the result). `service install` writes a
+`systemd --user` unit on Linux or a launchd agent on macOS (`--dry-run` shows
+the files first); to run in a terminal instead, use `lifecontext serve`. The
+first start downloads the local embedding and reranking models into
+`~/.cache/huggingface` (about 1 GB; `install.sh` fetches fixed revisions of
+them instead, about 0.6 GB). [docs/operations.md](docs/operations.md) covers
+each command, unattended setup and backups.
 
 In Claude Code you can also add the skill as a plugin:
 
@@ -163,151 +179,31 @@ In Claude Code you can also add the skill as a plugin:
 The plugin carries only the skill, so install the `lifecontext` command first,
 and use either the plugin or `lifecontext skills install` for Claude Code.
 
-## Configure the model
+## Choose a model
 
-LifeContext reads exactly one LLM configuration from
-`~/.lifeweave/config.yaml`. Set these fields:
-
-```yaml
-llm:
-  provider: openai_compatible
-  model: "<exact model ID from your provider>"
-  base_url: "https://<provider API host>/v1"
-  # reasoning_effort: high
-```
-
-This example selects the **OpenAI-compatible protocol**, not a specific vendor.
-Use it for a service that implements the OpenAI Chat Completions API. Set
-`base_url` to that service's API root, usually ending in `/v1`; do not include
-`/chat/completions`. LifeContext maps this protocol to Hindsight's OpenAI
-adapter.
-
-You can instead set `provider` to one of these exact native adapter IDs:
-
-`openai`, `openai-responses`, `anthropic`, `gemini`, `groq`, `openrouter`,
-`minimax`, `ollama-cloud`, `deepseek`, `volcano`, `requesty`, `zai`,
-`opencode-go`, `atlas`, or `fireworks`.
-
-For a native provider, `model` is that provider's exact model ID. `base_url`
-may be omitted to use the adapter's built-in endpoint, or set to a custom API
-root when the provider adapter supports it. It is required for `volcano`,
-which has no built-in endpoint in the pinned adapter. The native Gemini adapter
-does not support a custom URL, so omit `base_url` for `gemini`. Choose
-`openai_compatible` when a different service exposes the OpenAI Chat
-Completions protocol.
-
-LifeContext supports one selected provider, one model, at most one custom URL,
-and one key at a time. There is no provider fallback or provider-specific key
-lookup. Unknown provider IDs and unknown `llm` fields are rejected. Do not add
-credentials to YAML.
-
-### Change the model or endpoint later
-
-```bash
-lifecontext llm show                       # provider, model, base URL, whether a key is stored
-lifecontext llm set --model MODEL          # change only what you name
-lifecontext llm set --provider openai_compatible --base-url http://127.0.0.1:8317/v1 --model MODEL
-lifecontext llm set --api-key-stdin < ~/new-key.txt   # replace the key (or set LIFECONTEXT_API_KEY_FILE)
-```
-
-`llm show` never prints the key. `llm set` changes only the fields you give,
-checks them the way `init` does, leaves every other setting alone and, when the
-user service runs, restarts it so the new settings take effect; where no
-service manager is available it prints the exact restart command. A new
-provider needs `--model` too, and `openai_compatible` needs `--base-url`. A
-local proxy such as CLIProxyAPI on `http://127.0.0.1:8317/v1` is a common
-`openai_compatible` endpoint and needs no key.
-
-### Reasoning effort
-
-`llm.reasoning_effort` is optional. LifeContext accepts `low`, `medium`,
-`high`, or `xhigh`; omit it to leave the model's effort at the provider
-default. When set, it configures Hindsight's global LLM reasoning effort for
-its operations. The selected model and endpoint must support the requested
-value. The pinned native Anthropic and Gemini adapters do not apply this
-setting, so LifeContext rejects it for those providers. This controls request
-effort; it does not expose private chain-of-thought text. Hindsight may omit
-the setting for model IDs it recognizes as incompatible, and a custom endpoint
-may reject unsupported values.
-
-LifeContext sets Hindsight's fact-extraction output limit to 8,192 tokens.
-The selected model endpoint must accept that output limit; this setting is
-fixed internally and is not a separate user config field.
-
-### API key
-
-Put the selected provider's API key in the private file
-`~/.lifeweave/.env`, under this exact name:
-
-```dotenv
-LIFEWEAVE_LLM_API_KEY=<your provider API key>
-```
-
-The key is required for every provider except `openai_compatible` with a
-loopback `base_url` (a local Ollama, llama.cpp or vLLM server), which needs
-none. Do not use `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HINDSIGHT_LLM_API_KEY`,
-or an ambient shell variable. LifeContext reads only `LIFEWEAVE_LLM_API_KEY`
-(and, for vision, `LIFEWEAVE_VISION_API_KEY`) from its own `.env` file. It
-passes the LLM key to the isolated Hindsight profile at startup; Hindsight's
-generated profile file is managed internally and must not be edited by hand.
-
-### URL rules
-
-- Remote endpoints must use `https://`.
-- `http://` is allowed only for loopback hosts (`localhost`, `127.0.0.0/8`,
-  or `::1`) for local development.
-- Do not put a username, password, query, or fragment in `base_url`.
-- Do not put an API key in the URL.
-
-### Optional: read pictures, handwriting and charts
-
-Typed text comes from each page's text layer, and scans are read by local
-Tesseract OCR. Everything else (handwriting, photos, diagrams, charts, tables
-stored as images) is listed by `documents show` under `coverage.unresolved` or
-`coverage.partial` until you choose a vision model:
-
-```yaml
-vision:
-  provider: anthropic            # openai_compatible | openai | anthropic | gemini
-  model: "<exact vision model ID>"
-  # base_url: "http://127.0.0.1:11434/v1"   # required for openai_compatible
-  # max_pages_per_document: 200
-```
-
-Vision is off without this block and never inherits the `llm` settings. When it
-is on, only the pages that need it are sent, as images, to the endpoint you
-name. Its key is `LIFEWEAVE_VISION_API_KEY` in the same `.env`; a local
-OpenAI-compatible server (Ollama, llama.cpp, vLLM) needs none. Model-read text
-is always labelled so you can tell it from the original. `lifecontext
-preflight --vision-probe` checks that the model can see images, and
-`documents import --no-vision` keeps a single document away from it. See
-[docs/operations.md](docs/operations.md) for the details.
+LifeContext uses one model at a time and has no default: the installer and
+`lifecontext init` ask you to pick the provider and the model, and the text of
+your documents and notes is sent to it. With Anthropic, `claude-sonnet-5` works
+and `claude-haiku-5-5` costs less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and
+Mythos 5.1 do not work yet. Change it later with `lifecontext llm set`; every
+provider, field and rule, the API key and the optional vision model are in
+[docs/operations.md](docs/operations.md#choosing-the-model).
 
 ## Daily use
 
-The service must be running (`lifecontext serve`). Add `--json` for stable
-machine-readable output; reuse an idempotency key only to retry the same
-request.
-
-**Capture a journal entry.** Each entry is a source with your own ID and a
-version number; it becomes `Journal/entries/YYYY-MM-DD - Title.md` in the
-vault.
-
-```bash
-printf '%s\n' 'Entry date: 2026-10-17. Walked to the lake and decided to start the Spanish course in November.' |
-  lifecontext retain journal-2026-10-17-lake 1 --idempotency-key journal-2026-10-17-lake --json
-# Read it back, including the stored text
-lifecontext evidence journal-2026-10-17-lake --version 1 --include-content --json
-```
+The service must be running: the installer and `lifecontext service install`
+start it, `lifecontext service status` shows it, and `lifecontext serve` runs
+it in a terminal instead. Add `--json` for stable machine-readable output; reuse
+an idempotency key only to retry the same request.
 
 **Import a document.** PDF, DOCX, XLSX, PPTX, PNG, JPEG, TIFF, plain text and
 Markdown. The original is kept byte for byte; its text is extracted, indexed
 and compiled into a wiki page.
 
 ```bash
-lifecontext documents import ~/Documents/lease.pdf --json
-lifecontext documents list --json
-lifecontext documents show SOURCE_ID --json   # stages and page coverage
+lifecontext documents import ~/Documents/lease.pdf
+lifecontext documents list
+lifecontext documents show SOURCE_ID         # stages and page coverage
 ```
 
 **Read the wiki.** Each document has a page `source_<source id>` with numbered,
@@ -315,8 +211,8 @@ quote-backed claims; `index` lists them. The pages also appear under
 `Journal/wiki/` in the vault.
 
 ```bash
-lifecontext wiki list --json
-lifecontext wiki show index --json
+lifecontext wiki list
+lifecontext wiki show index
 ```
 
 **Ask.** `recall` returns cited passages, each tied to one source version. It
@@ -324,9 +220,16 @@ reranks on the CPU and can take tens of seconds; run one at a time. `reflect`
 writes an answer from cited evidence.
 
 ```bash
-lifecontext recall --query "When did I decide to start the Spanish course?" --json
-lifecontext reflect --query "What did I decide about learning Spanish?" --json
+lifecontext recall --query "When is the rent due?"
+lifecontext reflect --query "What does my lease say about the deposit?"
 ```
+
+**Write a journal entry.** Put a Markdown note into `Journal/Inbox` in the
+vault: `lifecontext capture --once` (or the service with `--capture`, every 30
+seconds) turns it into a journal entry, `Journal/entries/YYYY-MM-DD -
+Title.md`. Agents write entries with `lifecontext retain`; see
+[docs/agents.md](docs/agents.md). Entries are indexed and searchable;
+compiling the journal comes in v1.3.
 
 `curate` corrects, re-indexes, forgets or deletes a source version;
 `reconcile` checks the vault against custody and repairs managed files.
@@ -349,29 +252,19 @@ in [docs/agents.md](docs/agents.md#mcp-server).
 backup or export); see
 [docs/agents.md](docs/agents.md#agents-on-another-machine).
 
-## Your own setup: Obsidian, capture and sync
+**Back up.** `lifecontext backup --stop-service` stops the service for the
+backup and starts it again
+([operations](docs/operations.md#backup-and-restore)).
 
-One personal arrangement, described step by step in
-[docs/sync.md](docs/sync.md); every step after the first is optional.
+## Several devices (advanced, optional)
 
-- **The vault in Obsidian.** Open the vault folder (`~/LifeContext/vault` by
-  default) as an Obsidian vault. Entries, wiki pages and notes are Markdown
-  files there.
-- **Capture.** Write a note into `Journal/Inbox` (create the folder) and
-  `lifecontext capture --once` turns every settled Markdown note there into a
-  journal entry through the API; `lifecontext service install --capture` runs
-  it every 30 seconds. Notes still being edited, files over 1 MiB and anything
-  that is not UTF-8 Markdown are skipped, and a note is captured once and
-  again only when you change it.
-- **Several devices.** The Self-hosted LiveSync Obsidian plugin syncs the
-  vault through a CouchDB hub. `docker/livesync/` ships one: pinned by digest,
-  on `127.0.0.1` only, with an init script that creates the database and a
-  restricted sync user. `tailscale serve` publishes it as HTTPS to your tailnet
-  alone, and a headless LiveSync client on the server mirrors the hub into the
-  vault folder. Docker and Tailscale need `sudo` once to install; the sync is
-  not needed to use LifeContext.
-- **Agents.** On the server, agents use the CLI, the skill
-  (`lifecontext skills install`) or MCP on the same data.
+LifeContext does not need sync: open the vault on the machine that runs it.
+To read and write the vault on a phone or a second computer, the Self-hosted
+LiveSync Obsidian plugin can sync it through a CouchDB hub that
+`docker/livesync/` ships, published to your tailnet with `tailscale serve`.
+It takes Docker, Tailscale and a headless LiveSync client on the server, which
+must run the same LiveSync release as the plugin on every device;
+[docs/sync.md](docs/sync.md) walks through it.
 
 ## Privacy
 
@@ -410,21 +303,24 @@ LifeContext is **source-available**, not open source, under the
   before 2030-11-08.
 
 The exact grant and common cases: [LICENSING.md](LICENSING.md). Third-party
-components and models: [NOTICE](NOTICE).
+components and models: [NOTICE](NOTICE). LifeContext is built on the
+open-source [Hindsight](https://github.com/vectorize-io/hindsight) memory
+engine (MIT, by Vectorize).
 
 ## Documentation
 
 - [docs/install.md](docs/install.md): `install.sh` (options, unattended
   install, upgrade, uninstall), Docker and Compose, verifying a release
-- [docs/sync.md](docs/sync.md): Obsidian, `lifecontext capture` and sync
-  between devices with Self-hosted LiveSync, CouchDB and Tailscale
-- [docs/operations.md](docs/operations.md): configuration, startup checks,
-  recovery, documents, OCR, vision, wiki rebuilds, file names
+- [docs/operations.md](docs/operations.md): choosing the model, configuration,
+  startup checks, recovery, documents, OCR, vision, wiki rebuilds, file names
+- [docs/agents.md](docs/agents.md): the agent skill, how agents use the CLI,
+  the MCP server for Claude Desktop and Cursor, and agents on another machine
+- [docs/sync.md](docs/sync.md) (advanced, optional): Obsidian on several
+  devices with Self-hosted LiveSync, CouchDB and Tailscale, and
+  `lifecontext capture`
 - [docs/architecture.md](docs/architecture.md): how data flows and where it is
   stored
 - [docs/privacy.md](docs/privacy.md): what leaves the machine
-- [docs/agents.md](docs/agents.md): the agent skill, how agents use the CLI,
-  the MCP server for Claude Desktop and Cursor, and agents on another machine
 - [docs/development.md](docs/development.md): development checkout, tests, CI,
   and the [compatibility identifiers](docs/development.md#compatibility-identifiers)
   that keep their legacy `lifeweave` names
