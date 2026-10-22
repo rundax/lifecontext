@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 REPORT = {"provider": "anthropic", "model": "claude-sonnet-5", "config_state": "written",
           "credentials_state": "missing", "vault_root": "/data/vault"}
+REFUSED = {"error": "model_unsupported", "message": "claude-opus-5-5 ... do not work with LifeContext yet"}
 
 
 class EntrypointTests(unittest.TestCase):
@@ -29,14 +30,20 @@ class EntrypointTests(unittest.TestCase):
         stubs = root / "stubs"
         stubs.mkdir()
         self.calls = root / "calls.log"
+        # What `lifecontext init` answers, and the key state `lifecontext llm show` reports.
+        self.init_report = root / "init.json"
+        self.init_report.write_text(json.dumps(REPORT))
+        self.key_state = root / "llm.json"
         lifecontext = stubs / "lifecontext"
         lifecontext.write_text(
-            f'#!/bin/sh\necho "$*" >> "{self.calls}"\n'
-            f"""case "$1" in init) printf '%s' '{json.dumps(REPORT)}' ;; hindsight) echo '{{}}' ;; esac\n""")
+            f'#!/bin/sh\ncase "$1" in llm) cat "{self.key_state}" 2>/dev/null; exit 0 ;; esac\n'
+            f'echo "$*" >> "{self.calls}"\n'
+            f"""case "$1" in init) cat "{self.init_report}" ;; hindsight) echo '{{}}' ;; esac\n""")
         lifecontext.chmod(0o755)
         os.symlink(sys.executable, stubs / "python")
         self.env = {"HOME": str(self.home), "PATH": f"{stubs}:/usr/bin:/bin",
                     "LIFECONTEXT_API_KEY_FILE": str(root / "no-such-secret")}
+        self.secret = root / "secret"
 
     def start(self, **environ: str) -> subprocess.Popen:
         process = subprocess.Popen(["/bin/sh", str(ENTRYPOINT)], env={**self.env, **environ},
@@ -60,7 +67,11 @@ class EntrypointTests(unittest.TestCase):
     def logged(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
-    def test_without_provider_and_model_it_waits_for_a_config_and_then_serves(self) -> None:
+    def write_config(self) -> None:
+        (self.home / ".lifeweave").mkdir(mode=0o700, exist_ok=True)
+        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+
+    def test_without_provider_and_model_it_waits_for_the_config_and_the_key_then_serves(self) -> None:
         process = self.start()
         log = self.read_until(process, "waiting for ~/.lifeweave/config.yaml")
         self.assertIn("LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL are not set", log)
@@ -68,10 +79,34 @@ class EntrypointTests(unittest.TestCase):
         time.sleep(1)
         self.assertIsNone(process.poll())
         self.assertEqual(self.logged(), [])  # init never ran, so no restart loop
-        (self.home / ".lifeweave").mkdir(mode=0o700)
-        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+        # `lifecontext init` in the container writes config.yaml before it asks for the key.
+        self.key_state.write_text('{"api_key": "missing"}')
+        self.write_config()
+        self.read_until(process, "waiting for the model key")
+        self.assertIsNone(process.poll())
+        self.key_state.write_text('{"api_key": "set"}')
         self.assertEqual(process.wait(timeout=30), 0)
         self.assertEqual(self.logged(), ["serve --port 8765", "hindsight stop --json"])
+
+    def test_a_key_secret_is_stored_once_the_wait_ends(self) -> None:
+        self.secret.write_text("sk-secret\n")
+        process = self.start(LIFECONTEXT_API_KEY_FILE=str(self.secret))
+        self.read_until(process, "waiting for ~/.lifeweave/config.yaml")
+        self.write_config()
+        self.assertEqual(process.wait(timeout=30), 0)
+        self.assertEqual(self.logged(), ["init --non-interactive --replace-key --json",
+                                         "serve --port 8765", "hindsight stop --json"])
+
+    def test_a_refused_model_shows_why_and_waits_instead_of_exiting(self) -> None:
+        self.init_report.write_text(json.dumps(REFUSED))
+        process = self.start(LIFECONTEXT_PROVIDER="anthropic", LIFECONTEXT_MODEL="claude-opus-5-5")
+        log = self.read_until(process, "waiting for ~/.lifeweave/config.yaml")
+        self.assertIn("lifecontext init failed: claude-opus-5-5 ... do not work with LifeContext yet", log)
+        time.sleep(1)
+        self.assertIsNone(process.poll())
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=30), 0)
+        self.assertEqual(self.logged(), ["init --non-interactive --json --vault /data/vault"])
 
     def test_a_missing_model_alone_is_named_and_docker_stop_ends_the_wait(self) -> None:
         for environ, missing in (({"LIFECONTEXT_PROVIDER": "anthropic"}, "LIFECONTEXT_MODEL is not set"),

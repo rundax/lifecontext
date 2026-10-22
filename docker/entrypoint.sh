@@ -53,7 +53,8 @@ report_init() {
 import json, sys
 report = json.loads(sys.stdin.read() or "{}")
 if "error" in report or "credentials_state" not in report:
-    print("lifecontext-entrypoint: lifecontext init failed: %s" % report.get("error", "no report"), file=sys.stderr)
+    print("lifecontext-entrypoint: lifecontext init failed: %s"
+          % (report.get("message") or report.get("error", "no report")), file=sys.stderr)
     sys.exit(1)
 print("lifecontext-entrypoint: %s %s, config %s, key %s, vault %s" % (
     report["provider"], report["model"], report["config_state"], report["credentials_state"],
@@ -61,34 +62,62 @@ print("lifecontext-entrypoint: %s %s, config %s, key %s, vault %s" % (
 '
 }
 
+# Whether a key is stored, or the endpoint needs none.
+key_stored() {
+	lifecontext llm show --json 2>/dev/null | python -I -c '
+import json, sys
+try:
+    sys.exit(json.loads(sys.stdin.read()).get("api_key") not in ("set", "not_required"))
+except (ValueError, AttributeError):
+    sys.exit(1)
+'
+}
+
+# There is no default model. Wait for the setup rather than exit, which
+# restart: unless-stopped would turn into a restart loop: for config.yaml, and
+# then, without a key secret, for `lifecontext init` in the container to store the key.
+wait_for_setup() {
+	log "set LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (and LIFECONTEXT_BASE_URL for openai_compatible)"
+	log "and the key file, then recreate the container; or run"
+	log "  docker exec -it CONTAINER lifecontext init --vault /data/vault"
+	log "waiting for ~/.lifeweave/config.yaml"
+	trap 'exit 0' TERM INT
+	waiting_for_key=0
+	until [ -f "$lifeweave/config.yaml" ] &&
+		{ [ -n "${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ] || key_stored; }; do
+		if [ -f "$lifeweave/config.yaml" ] && [ "$waiting_for_key" -eq 0 ]; then
+			log "waiting for the model key (lifecontext init asks for it; or lifecontext llm set --api-key-stdin)"
+			waiting_for_key=1
+		fi
+		sleep 5
+	done
+	trap - TERM INT
+}
+
 missing=""
 [ -n "${LIFECONTEXT_PROVIDER:-}" ] || missing="LIFECONTEXT_PROVIDER"
 [ -n "${LIFECONTEXT_MODEL:-}" ] || missing="${missing:+$missing and }LIFECONTEXT_MODEL"
 
+key_stored_by_init=0
 if [ ! -f "$lifeweave/config.yaml" ]; then
 	if [ -n "$missing" ]; then
-		# There is no default model. Wait rather than exit, which restart: unless-stopped
-		# would turn into a restart loop.
 		case "$missing" in
 		*" and "*) log "not set up yet: $missing are not set" ;;
 		*) log "not set up yet: $missing is not set" ;;
 		esac
-		log "set LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (and LIFECONTEXT_BASE_URL for openai_compatible)"
-		log "and the key file, then recreate the container; or run"
-		log "  docker exec -it CONTAINER lifecontext init --vault /data/vault"
-		log "waiting for ~/.lifeweave/config.yaml"
-		trap 'exit 0' TERM INT
-		until [ -f "$lifeweave/config.yaml" ]; do
-			sleep 5
-		done
-		trap - TERM INT
+		wait_for_setup
 	else
 		set -- --non-interactive --json --vault /data/vault
 		[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
 		report=$(run_init "$@") || true
-		printf '%s' "$report" | report_init
+		if printf '%s' "$report" | report_init; then
+			key_stored_by_init=1
+		else
+			wait_for_setup
+		fi
 	fi
-elif [ -n "${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ]; then
+fi
+if [ "$key_stored_by_init" -eq 0 ] && [ -n "${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ]; then
 	# The secret is the key: store it on every start, so a restore (backups never
 	# hold the key) or a changed secret takes effect.
 	report=$(run_init --non-interactive --replace-key --json) || true

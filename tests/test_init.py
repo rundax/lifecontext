@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -353,6 +353,37 @@ Choose 1-6""")
                 model_question = next(question for question, _ in questions if question.startswith("Model ID"))
                 self.assertIn("ollama list" if choice == "5" else "exactly as your endpoint", model_question)
 
+    def test_a_refused_model_is_asked_for_again_with_the_reason(self) -> None:
+        questions = []
+        replies = iter(["1", "claude-opus-5-5", "claude-haiku-5-5"])
+
+        def ask(question, default):
+            questions.append(question)
+            return next(replies, "")
+
+        with _temporary_home():
+            report = run_init(InitOptions(interactive=True, timezone="UTC"), ask=ask, ask_secret=lambda question: "")
+            self.assertEqual(report["model"], "claude-haiku-5-5")
+            self.assertTrue(questions[2].startswith("claude-opus-5-5 refuses the forced tool choice"))
+
+    def test_menu_choices_decide_the_base_url_whatever_the_environment_says(self) -> None:
+        environ = {"LIFECONTEXT_BASE_URL": "http://127.0.0.1:8000/v1"}
+        for choice, expected in (("1", None), ("5", "http://127.0.0.1:8000/v1")):
+            defaults = {}
+
+            def ask(question, default, choice=choice, defaults=defaults):
+                defaults[question] = default
+                if question == provider_menu():
+                    return choice
+                return "llama3.3" if question.startswith("Model ID") else ""
+
+            with self.subTest(choice=choice), _temporary_home():
+                report = run_init(InitOptions(interactive=True, timezone="UTC"), ask=ask,
+                                  ask_secret=lambda question: "", environ=environ)
+                self.assertEqual(report["base_url"], expected)
+                if choice == "5":  # the variable is only the suggestion; the question is still asked
+                    self.assertEqual(defaults["Base URL of the server"], "http://127.0.0.1:8000/v1")
+
     def test_unattended_setup_needs_an_explicit_provider_and_model(self) -> None:
         for options, environ, code in (
             (_options(), {}, "provider_required"),
@@ -364,8 +395,8 @@ Choose 1-6""")
                 with self.assertRaises(InitError) as caught:
                     run_init(options, environ=environ)
                 self.assertEqual(caught.exception.code, code)
-                self.assertIn("LIFECONTEXT_PROVIDER" if code == "provider_required" else "LIFECONTEXT_MODEL",
-                              caught.exception.message)
+                for variable in ("LIFECONTEXT_PROVIDER", "LIFECONTEXT_MODEL"):
+                    self.assertIn(variable, caught.exception.message)
                 self.assertFalse(LifeContextPaths.current().config_path.exists())
         with _temporary_home():
             report = run_init(_options(), environ={"LIFECONTEXT_PROVIDER": "anthropic",
@@ -378,7 +409,7 @@ Choose 1-6""")
                 with self.assertRaises(InitError) as caught:
                     run_init(_anthropic(model=model))
                 self.assertEqual(caught.exception.code, "model_unsupported")
-                for words in ("strict structured output", "forces a named tool", "claude-sonnet-5 or claude-haiku"):
+                for words in ("strict structured output", "forced tool call", "claude-sonnet-5 or claude-haiku"):
                     self.assertIn(words, caught.exception.message)
                 self.assertFalse(LifeContextPaths.current().config_path.exists())
 
@@ -504,6 +535,32 @@ class FirstRetainTests(unittest.TestCase):
 
 
 class InitCommandTests(unittest.TestCase):
+    def test_at_a_terminal_init_checks_the_model_and_shows_the_result(self) -> None:
+        from lifecontext import cli
+
+        failed = {"status": "fail", "cause": "key_rejected", "message": "the provider rejected the key",
+                  "fix": "lifecontext llm set --api-key-stdin < FILE", "reflect": {"status": "skipped"}}
+        answers = {provider_menu(): "1"}
+        for as_json in (False, True):
+            out, err = io.StringIO(), io.StringIO()
+            with self.subTest(as_json=as_json), _temporary_home(), \
+                    patch.object(sys.stdin, "isatty", return_value=True), \
+                    patch.object(cli, "_ask", side_effect=lambda question, default: answers.get(question, "")), \
+                    patch.object(cli, "_ask_secret", return_value=KEY), \
+                    patch("lifecontext.hindsight.model_probe", return_value=failed) as probe, \
+                    redirect_stdout(out), redirect_stderr(err):
+                code = cli.main(["init", "--timezone", "UTC", *(["--json"] if as_json else [])])
+                self.assertEqual(code, 0, err.getvalue())
+                probe.assert_called_once()
+                if as_json:
+                    report = json.loads(out.getvalue())
+                    self.assertEqual(report["model_probe"], failed)
+                    self.assertNotIn("error", report)
+                else:
+                    self.assertIn("Model check failed: the provider rejected the key.\n"
+                                  "Fix it with: lifecontext llm set --api-key-stdin < FILE", out.getvalue())
+                self.assertNotIn(KEY, out.getvalue() + err.getvalue())
+
     def test_command_reads_the_key_from_stdin_and_prints_json_without_it(self) -> None:
         with tempfile.TemporaryDirectory(prefix="lifecontext-init-cli.", dir=scratch_root()) as temporary:
             home = Path(temporary).resolve(strict=True)

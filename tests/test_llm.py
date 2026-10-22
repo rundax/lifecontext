@@ -167,6 +167,15 @@ class LlmSetTests(unittest.TestCase):
                     self.assertEqual((code, json.loads(out)["error"]), (1, error))
                     self.assertEqual((paths.config_path.read_bytes(), paths.credentials_path.read_bytes()), before)
 
+    def test_a_new_provider_without_a_model_says_to_add_one(self) -> None:
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            code, out, _ = _run("set", "--provider", "anthropic", "--json", restart=None)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "model_required"))
+            self.assertIn("add --model", failure["message"])
+            self.assertNotIn("LIFECONTEXT_MODEL", failure["message"])
+
     def test_set_needs_something_to_change_and_an_existing_setup(self) -> None:
         with _home():
             code, out, _ = _run("set", "--model", "m", "--json", restart=None)
@@ -193,7 +202,7 @@ class LlmSetTests(unittest.TestCase):
             code, out, _ = _run("set", "--provider", "anthropic", "--model", "claude-opus-5-5", "--json", restart=None)
             failure = json.loads(out)
             self.assertEqual((code, failure["error"]), (1, "model_unsupported"))
-            self.assertIn("forces a named tool", failure["message"])
+            self.assertIn("forced tool call", failure["message"])
             code, _, err = _run("set", "--provider", "anthropic", "--model", "claude-opus-5-5", restart=None)
             self.assertIn("Use claude-sonnet-5 or claude-haiku-5-5", err)
             self.assertEqual(paths.config_path.read_bytes(), before)

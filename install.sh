@@ -516,7 +516,7 @@ ask_anthropic_model() {
 		ask "Model ID (claude-haiku-5-5 costs less)" "claude-sonnet-5"
 		case "$reply" in
 		claude-sonnet-5-5 | claude-opus-5-5 | claude-fable-5-1 | claude-mythos-5-1)
-			warn "$reply does not work with LifeContext yet: retain uses strict structured output and reflect forces a named tool, and this model refuses a forced tool choice; use claude-sonnet-5 or claude-haiku-5-5"
+			warn "$reply does not work with LifeContext yet: retain uses strict structured output, which on Anthropic is a forced tool call, and this model refuses a forced tool choice; use claude-sonnet-5 or claude-haiku-5-5"
 			;;
 		*) return 0 ;;
 		esac
@@ -560,14 +560,16 @@ configure_interactive() {
 	set -- init --non-interactive --json --provider "$provider" --model "$model" --vault "$vault"
 	[ -z "$base_url" ] || set -- "$@" --base-url "$base_url"
 	[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
+	# Every answer is a flag: a LIFECONTEXT_BASE_URL left in the environment must not
+	# attach a URL to a provider chosen without one.
 	if [ -n "$api_key" ]; then
 		key_file="$tmp/api-key"
 		(umask 077 && printf '%s\n' "$api_key" >"$key_file")
 		api_key=""
-		report=$(LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" "$@" </dev/null) || true
+		report=$(unset LIFECONTEXT_BASE_URL && LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" "$@" </dev/null) || true
 		rm -f "$key_file"
 	else
-		report=$("$lc" "$@" </dev/null) || true
+		report=$(unset LIFECONTEXT_BASE_URL && "$lc" "$@" </dev/null) || true
 	fi
 	printf '%s' "$report" | print_init_report || die "setup did not finish; run the installer again with other answers"
 }
@@ -688,6 +690,15 @@ capture_installed() {
 	fi
 }
 
+# The service command: capture too when it was chosen now or is already installed.
+service_command() {
+	if [ "$capture" -eq 1 ] || capture_installed; then
+		printf '%s\n' "service install --maintenance --capture"
+	else
+		printf '%s\n' "service install --maintenance"
+	fi
+}
+
 # Problems doctor reports that keep the service from starting.
 setup_problems() {
 	"$lc" doctor --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
@@ -733,10 +744,8 @@ wait_for_api() {
 
 start_service() {
 	service_state="not installed"
-	set -- service install --maintenance
-	if [ "$capture" -eq 1 ] || capture_installed; then
-		set -- "$@" --capture
-	fi
+	# shellcheck disable=SC2046 # the words of service_command, none with spaces
+	set -- $(service_command)
 	if [ "$no_service" -eq 1 ]; then
 		start_stopped_service
 		say "Skipped (--no-service). Run the API in a terminal with: lifecontext serve"
@@ -1002,6 +1011,12 @@ main() {
 	"$lc" doctor </dev/null || doctor_status=$?
 
 	step "Done"
+	finish
+}
+
+# The summary, then the next steps when the model answered, then what failed: a
+# failed model check comes last, with its fix. Exits 3 when either check failed.
+finish() {
 	say "LifeContext: $("$lc" --version </dev/null) in $venv"
 	say "Command: $link"
 	say "Model check: $model_state"

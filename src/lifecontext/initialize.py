@@ -44,22 +44,27 @@ MODEL_LISTS = {
     "openrouter": "https://openrouter.ai/models",
 }
 # The model the Anthropic choice suggests, and the cheaper alternative. The newest
-# Claude models refuse the forced tool choice that Hindsight 0.9.2's strict retain and
-# reflect use, so they are refused with provider anthropic.
+# Claude models refuse forced tool choice, which is how Hindsight 0.9.2's strict retain
+# gets structured output from Anthropic, so they are refused with provider anthropic.
 SUGGESTED_ANTHROPIC_MODEL = "claude-sonnet-5"
 LOWER_COST_ANTHROPIC_MODEL = "claude-haiku-5-5"
 FORCED_TOOL_REJECTING_MODELS = frozenset({
     "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1",
 })
+_CHOOSE = ("set LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (or pass --provider and --model), for example "
+           "anthropic and claude-sonnet-5; the provider can also be openai, gemini, openrouter or "
+           "openai_compatible with LIFECONTEXT_BASE_URL")
 MESSAGES = {
-    "provider_required": ("No model provider was chosen: pass --provider or set LIFECONTEXT_PROVIDER "
-                          "(for example anthropic, openai, gemini, openrouter or openai_compatible)."),
-    "model_required": ("No model was chosen: pass --model or set LIFECONTEXT_MODEL to the exact model ID "
-                       "your provider lists."),
+    "provider_required": f"No model provider was chosen: {_CHOOSE}.",
+    "model_required": f"No model was chosen: {_CHOOSE}. The model ID must be exactly the one your provider lists.",
     "model_unsupported": (
         f"{', '.join(sorted(FORCED_TOOL_REJECTING_MODELS))} do not work with LifeContext yet: its retain step "
-        "uses strict structured output and reflect forces a named tool, and these models refuse a forced tool "
-        f"choice. Use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL} (it costs less)."),
+        "uses strict structured output, which on Anthropic is a forced tool call, and these models refuse a "
+        f"forced tool choice. Use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL} (it costs less)."),
+}
+# llm set changes one setting at a time and reads no LIFECONTEXT_* variables.
+_LLM_SET_MESSAGES = {
+    "model_required": "A new provider needs its model too: add --model with the exact ID your provider lists.",
 }
 _FORCED_TOOL_WARNING = ("Warning: {model} refuses the forced tool choice that retain and reflect use, so they "
                         f"will fail; use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL}.")
@@ -77,10 +82,10 @@ _LLM_ORDER = ("provider", "model", "base_url", "reasoning_effort")
 class InitError(RuntimeError):
     """A stable setup failure that never includes key material."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, message: str | None = None):
         super().__init__(code)
         self.code = code
-        self.message = MESSAGES.get(code)
+        self.message = message or MESSAGES.get(code)
 
 
 def rejects_forced_tool(llm: Mapping[str, Any]) -> bool:
@@ -249,16 +254,27 @@ def _choose_endpoint(given: Mapping[str, str | None], configured: Mapping[str, A
         raise InitError("invalid_llm_settings")
     same = configured if provider == configured.get("provider") else {}
     base_url = given["base_url"]
-    if base_url is None and ask is not None and (choice in (5, 6) or provider in _PROVIDERS_REQUIRING_BASE_URL):
+    if choice in (1, 2, 3, 4):
+        # These use the provider's own endpoint; a LIFECONTEXT_BASE_URL left in the
+        # environment must not attach a URL to them.
+        base_url = ""
+    elif ask is not None and (choice in (5, 6) or (base_url is None and provider in _PROVIDERS_REQUIRING_BASE_URL)):
         question = ("Base URL of the server" if choice == 5 else
                     "API base URL (the API root, for example https://api.example.com/v1)")
-        base_url = _ask_until(ask, question, same.get("base_url") or (LOCAL_MODEL_SERVER if choice == 5 else ""))
+        suggested = base_url or same.get("base_url") or (LOCAL_MODEL_SERVER if choice == 5 else "")
+        base_url = _ask_until(ask, question, suggested)
     if base_url is None:
         base_url = same.get("base_url", "")
     model = given["model"]
     if model is None and ask is not None:
         suggested = same.get("model") or (SUGGESTED_ANTHROPIC_MODEL if provider == "anthropic" else "")
-        model = _ask_until(ask, model_question(provider, choice), suggested)
+        question = model_question(provider, choice)
+        for _ in range(_ATTEMPTS):
+            model = _ask_until(ask, question, suggested)
+            if not (provider == "anthropic" and model in FORCED_TOOL_REJECTING_MODELS):
+                break
+            question = (f"{model} refuses the forced tool choice retain needs, so it does not work yet; "
+                        f"{model_question(provider, choice)}")
     model = model or same.get("model")
     if not model:
         raise InitError("model_required")
@@ -592,10 +608,15 @@ def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str]
     before = show_llm()
     key_file = environ.get(KEY_FILE_VARIABLE)
     key_given = options.api_key_stdin or bool(key_file)
-    run_init(
-        replace(options, vault=None, timezone=None, force=True, interactive=False, replace_key=key_given),
-        key_stream=key_stream, environ={KEY_FILE_VARIABLE: key_file} if key_file else {},
-    )
+    try:
+        run_init(
+            replace(options, vault=None, timezone=None, force=True, interactive=False, replace_key=key_given),
+            key_stream=key_stream, environ={KEY_FILE_VARIABLE: key_file} if key_file else {},
+        )
+    except InitError as exc:
+        if exc.code in _LLM_SET_MESSAGES:
+            raise InitError(exc.code, _LLM_SET_MESSAGES[exc.code]) from None
+        raise
     report = {**show_llm(), "api_key_updated": key_given, "warnings": []}
     if report["provider"] != before["provider"] and not key_given and report["api_key"] == "set":
         report["warnings"].append("provider_changed_key_kept")

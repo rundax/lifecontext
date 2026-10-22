@@ -310,6 +310,7 @@ class InstallEndpointPromptTests(unittest.TestCase):
                              "credentials_state": "stored", "vault_root": "/v", "timezone": "UTC", "warnings": []})
         _stub(venv_bin / "lifecontext",
               f'echo "$*" >> "{self.calls}"\n'
+              f'[ -z "${{LIFECONTEXT_BASE_URL:-}}" ] || echo "LIFECONTEXT_BASE_URL reached init" >> "{self.calls}"\n'
               'if [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ]; then\n'
               f'  echo "key=$(cat "$LIFECONTEXT_API_KEY_FILE") $(ls -l "$LIFECONTEXT_API_KEY_FILE" | cut -c1-10) '
               f'$(dirname "$LIFECONTEXT_API_KEY_FILE")" >> "{self.calls}"\nfi\n'
@@ -321,9 +322,9 @@ class InstallEndpointPromptTests(unittest.TestCase):
                          "choose_provider", "ask_anthropic_model", "print_init_report", "configure_interactive")
             + '\nconfigure_interactive\necho "capture=$capture"\n')
 
-    def converse(self, answers: list[tuple[str, str]]) -> tuple[int, str]:
+    def converse(self, answers: list[tuple[str, str]], **environ: str) -> tuple[int, str]:
         """Answer each prompt once it appears; the hidden key only after the terminal stopped echoing."""
-        env = {"PATH": os.defpath, "HOME": str(self.home)}
+        env = {"PATH": os.defpath, "HOME": str(self.home), **environ}
         pid, descriptor = pty.fork()
         if pid == 0:  # the child: a shell with this pseudo-terminal as its controlling terminal
             os.execve("/bin/sh", ["sh", str(self.harness)], env)
@@ -398,10 +399,12 @@ class InstallEndpointPromptTests(unittest.TestCase):
     def test_anthropic_suggests_a_model_and_refuses_the_ones_that_cannot_work(self) -> None:
         from lifecontext.initialize import model_question
 
+        # A LIFECONTEXT_BASE_URL left over in the environment must not reach init.
         code, transcript = self.converse([
             ("Choose 1-6: ", "1"), (f"{model_question('anthropic')} [claude-sonnet-5]", "claude-opus-5-5"),
             # Enter at the model prompt asked again takes the suggestion.
-            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "")])
+            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "")],
+            LIFECONTEXT_BASE_URL="http://127.0.0.1:8000/v1")
         self.assertEqual(code, 0, transcript)
         self.assertNotIn("URL", transcript)
         self.assertEqual(self.calls.read_text().splitlines(), [
@@ -420,6 +423,91 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.assertEqual(set(refused.split(" | ")), FORCED_TOOL_REJECTING_MODELS)
         for provider in MODEL_LISTS:
             self.assertIn(f'ask_required "{model_question(provider)}" ""', script)
+
+
+class InstallEndingTests(unittest.TestCase):
+    """configure on a re-run, service_command and finish, with `lifecontext` stubbed."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="lifecontext-ending-test.")
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.home = root / "home"
+        self.home.mkdir()
+        self.tmp = root / "tmp"
+        self.tmp.mkdir()
+        self.calls = root / "calls.log"
+        self.root = root
+        venv_bin = root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        os.symlink(sys.executable, venv_bin / "python")
+        report = json.dumps({"home": "/h/.lifeweave", "config_state": "kept", "provider": "p", "model": "m",
+                             "credentials_state": "kept", "vault_root": "/v", "timezone": "UTC", "warnings": [],
+                             "next_steps": ["Open /v in Obsidian as a vault (\"Open folder as vault\").",
+                                            "Import a document: lifecontext documents import ~/path/to/lease.pdf"]})
+        _stub(venv_bin / "lifecontext", f'echo "$*" >> "{self.calls}"\n'
+              f"""case "$1" in --version) echo "lifecontext 9.9" ;; init) printf '%s' '{report}' ;; esac\n""")
+
+    def run_functions(self, body: str, *names: str, **environ: str) -> subprocess.CompletedProcess[str]:
+        harness = self.root / "harness.sh"
+        harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{self.root / "venv"}"\n'
+            'lc="$venv/bin/lifecontext"\nlink="$HOME/.local/bin/lifecontext"\nos=Linux\n'
+            'interactive=no\ncapture=${CAPTURE:-0}\nkey_changed=0\nservice_state="running"\nocr_state="ready"\n'
+            'backup_archive=""\nmodel_state=${MODEL:-passed}\ndoctor_status=${DOCTOR:-0}\n'
+            + _functions("say", "warn", "die", "sha256_of", *names) + "\n" + body)
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": os.defpath, **environ}, stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+    def test_a_rerun_runs_init_on_the_kept_settings_for_the_next_steps(self) -> None:
+        (self.home / ".lifeweave").mkdir()
+        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+        result = self.run_functions("configure\n", "print_init_report", "configure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text(), "init --non-interactive --json\n")
+        self.assertIn("Existing settings in ~/.lifeweave kept", result.stdout)
+        self.assertEqual((self.tmp / "next-steps").read_text().splitlines()[1],
+                         "  2. Import a document: lifecontext documents import ~/path/to/lease.pdf")
+
+    def test_capture_is_added_when_chosen_or_already_installed(self) -> None:
+        body = "service_command\n"
+        self.assertEqual(self.run_functions(body, "capture_installed", "service_command").stdout,
+                         "service install --maintenance\n")
+        self.assertEqual(self.run_functions(body, "capture_installed", "service_command", CAPTURE="1").stdout,
+                         "service install --maintenance --capture\n")
+        timer = self.home / ".config" / "systemd" / "user" / "lifecontext-capture.timer"
+        timer.parent.mkdir(parents=True)
+        timer.write_text("[Timer]\n")
+        self.assertEqual(self.run_functions(body, "capture_installed", "service_command").stdout,
+                         "service install --maintenance --capture\n")
+
+    def finish(self, **environ: str) -> subprocess.CompletedProcess[str]:
+        (self.tmp / "next-steps").write_text('  1. Open /v in Obsidian as a vault ("Open folder as vault").\n')
+        (self.tmp / "model-check").write_text("The model check failed: the provider rejected the key.\n"
+                                              "Fix it with: lifecontext llm set --api-key-stdin < FILE\n")
+        return self.run_functions("finish\n", "finish", **environ)
+
+    def test_a_good_install_ends_with_the_next_steps_and_exit_0(self) -> None:
+        result = self.finish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Model check: passed\n", result.stdout)
+        self.assertTrue(result.stdout.endswith('Next steps:\n  1. Open /v in Obsidian as a vault '
+                                               '("Open folder as vault").\n'))
+        self.assertEqual(result.stderr, "")
+
+    def test_a_failed_model_check_comes_last_without_next_steps_and_exits_3(self) -> None:
+        result = self.finish(MODEL="failed")
+        self.assertEqual(result.returncode, 3)
+        self.assertNotIn("Next steps", result.stdout)
+        self.assertTrue(result.stdout.endswith("The model check failed: the provider rejected the key.\n"
+                                               "Fix it with: lifecontext llm set --api-key-stdin < FILE\n"))
+        self.assertNotIn("doctor reported a problem", result.stderr)
+
+    def test_a_doctor_problem_keeps_the_next_steps_and_exits_3(self) -> None:
+        result = self.finish(DOCTOR="1")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("Next steps:", result.stdout)
+        self.assertIn("lifecontext doctor reported a problem", result.stderr)
 
 
 class InstallModelCheckTests(unittest.TestCase):
