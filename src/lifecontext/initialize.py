@@ -85,7 +85,8 @@ class InitError(RuntimeError):
 
 def rejects_forced_tool(llm: Mapping[str, Any]) -> bool:
     """A Claude model that refuses forced tool choice, by its Anthropic ID, behind any provider."""
-    return llm.get("provider") in {"anthropic", "openai_compatible"} and llm.get("model") in FORCED_TOOL_REJECTING_MODELS
+    return (llm.get("provider") in {"anthropic", "openai_compatible"}
+            and llm.get("model") in FORCED_TOOL_REJECTING_MODELS)
 
 
 @dataclass(frozen=True)
