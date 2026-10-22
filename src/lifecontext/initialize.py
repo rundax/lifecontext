@@ -19,21 +19,51 @@ from lifecontext.credentials import (
 )
 from lifecontext.hindsight import (
     _PROVIDERS,
+    _PROVIDERS_REQUIRING_BASE_URL,
     HindsightStartupError,
     _validated_profile_settings,
     llm_key_required,
 )
 from lifecontext.paths import LifeContextPaths, atomic_write
 
-DEFAULT_PROVIDER = "anthropic"
-# Sonnet-class default and the cheaper Haiku-class alternative. The current Claude
-# Sonnet 5.5 (and Opus 5.5) reject the forced tool call that Hindsight 0.9.2 uses
-# for structured fact extraction, so retain would fail with them.
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+# There is no default provider or model: a terminal gets this menu, every other run
+# names both. install.sh shows the same menu (tests/test_install_script.py compares them).
+PROVIDER_QUESTION = "Which model should LifeContext use? The text of your documents and notes is sent to it."
+PROVIDER_MENU = (
+    ("Anthropic (API key)", "anthropic"),
+    ("OpenAI (API key)", "openai"),
+    ("Google Gemini (API key)", "gemini"),
+    ("OpenRouter (API key)", "openrouter"),
+    ("A local model server (Ollama, vLLM, LM Studio)", "openai_compatible"),
+    ("Another OpenAI-compatible endpoint", "openai_compatible"),
+)
+LOCAL_MODEL_SERVER = "http://127.0.0.1:11434/v1"
+MODEL_LISTS = {
+    "openai": "https://platform.openai.com/docs/models",
+    "gemini": "https://ai.google.dev/gemini-api/docs/models",
+    "openrouter": "https://openrouter.ai/models",
+}
+# The model the Anthropic choice suggests, and the cheaper alternative. The newest
+# Claude models refuse the forced tool choice that Hindsight 0.9.2's strict retain and
+# reflect use, so they are refused with provider anthropic.
+SUGGESTED_ANTHROPIC_MODEL = "claude-sonnet-5"
 LOWER_COST_ANTHROPIC_MODEL = "claude-haiku-5-5"
-_FORCED_TOOL_REJECTING_MODELS = frozenset({
+FORCED_TOOL_REJECTING_MODELS = frozenset({
     "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1",
 })
+MESSAGES = {
+    "provider_required": ("No model provider was chosen: pass --provider or set LIFECONTEXT_PROVIDER "
+                          "(for example anthropic, openai, gemini, openrouter or openai_compatible)."),
+    "model_required": ("No model was chosen: pass --model or set LIFECONTEXT_MODEL to the exact model ID "
+                       "your provider lists."),
+    "model_unsupported": (
+        f"{', '.join(sorted(FORCED_TOOL_REJECTING_MODELS))} do not work with LifeContext yet: its retain step "
+        "uses strict structured output and reflect forces a named tool, and these models refuse a forced tool "
+        f"choice. Use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL} (it costs less)."),
+}
+_FORCED_TOOL_WARNING = ("Warning: {model} refuses the forced tool choice that retain and reflect use, so they "
+                        f"will fail; use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL}.")
+_ATTEMPTS = 3
 _API_KEY = re.compile(r"[\x21-\x7e]{1,4096}\Z")
 _MAX_KEY_INPUT = 4096 + 2
 # Unattended input for install.sh and containers; a flag wins over its variable.
@@ -50,6 +80,12 @@ class InitError(RuntimeError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+        self.message = MESSAGES.get(code)
+
+
+def rejects_forced_tool(llm: Mapping[str, Any]) -> bool:
+    """A Claude model that refuses forced tool choice, by its Anthropic ID, behind any provider."""
+    return llm.get("provider") in {"anthropic", "openai_compatible"} and llm.get("model") in FORCED_TOOL_REJECTING_MODELS
 
 
 @dataclass(frozen=True)
@@ -157,6 +193,75 @@ def _vault_root(value: str, paths: LifeContextPaths) -> Path:
     if root == Path("/") or root.is_relative_to(lifeweave) or lifeweave.is_relative_to(root):
         raise InitError("invalid_vault")
     return root
+
+
+def _vault_directories(root: Path, journal: Path) -> tuple[Path, ...]:
+    """The private folders init makes: the vault, the journal, entries/ (the service lists it
+    before it writes the first entry) and Inbox/ (where capture picks up notes)."""
+    return root, journal, journal / "entries", journal / "Inbox"
+
+
+def _ask_until(ask: Callable[[str, str], str], question: str, default: str,
+               accept: Callable[[str], bool] = bool) -> str:
+    """The first accepted answer (Enter takes ``default``); empty after a few refused ones."""
+    for _ in range(_ATTEMPTS):
+        answer = ask(question, default).strip() or default
+        if accept(answer):
+            return answer
+    return ""
+
+
+def provider_menu() -> str:
+    lines = [PROVIDER_QUESTION, *(f"  {number}) {label}" for number, (label, _) in enumerate(PROVIDER_MENU, 1))]
+    return "\n".join([*lines, f"Choose 1-{len(PROVIDER_MENU)}"])
+
+
+def model_question(provider: str, choice: int | None = None) -> str:
+    if provider == "anthropic":
+        return f"Model ID ({LOWER_COST_ANTHROPIC_MODEL} costs less)"
+    if provider in MODEL_LISTS:
+        return f"Model ID (see {MODEL_LISTS[provider]})"
+    if choice == 5:
+        return "Model ID (as your server lists it, for example in ollama list)"
+    return "Model ID (exactly as your endpoint names it)"
+
+
+def _choose_endpoint(given: Mapping[str, str | None], configured: Mapping[str, Any],
+                     ask: Callable[[str, str], str] | None) -> tuple[str, str, str]:
+    """Provider, model and base URL from the flags and variables, else from the menu with ``ask``.
+
+    Without ``ask`` (no terminal) a missing provider or model is an error, unless a
+    config being updated (``--force``, ``llm set``) already names it.
+    """
+    choice = None
+    provider = given["provider"]
+    if provider is None and ask is not None:
+        numbers = [str(number) for number in range(1, len(PROVIDER_MENU) + 1)]
+        answer = _ask_until(ask, provider_menu(), "", lambda text: text in numbers)
+        if answer:
+            choice = int(answer)
+            provider = PROVIDER_MENU[choice - 1][1]
+    provider = provider or configured.get("provider")
+    if not provider:
+        raise InitError("provider_required")
+    if provider not in _PROVIDERS:
+        raise InitError("invalid_llm_settings")
+    same = configured if provider == configured.get("provider") else {}
+    base_url = given["base_url"]
+    if base_url is None and ask is not None and (choice in (5, 6) or provider in _PROVIDERS_REQUIRING_BASE_URL):
+        question = ("Base URL of the server" if choice == 5 else
+                    "API base URL (the API root, for example https://api.example.com/v1)")
+        base_url = _ask_until(ask, question, same.get("base_url") or (LOCAL_MODEL_SERVER if choice == 5 else ""))
+    if base_url is None:
+        base_url = same.get("base_url", "")
+    model = given["model"]
+    if model is None and ask is not None:
+        suggested = same.get("model") or (SUGGESTED_ANTHROPIC_MODEL if provider == "anthropic" else "")
+        model = _ask_until(ask, model_question(provider, choice), suggested)
+    model = model or same.get("model")
+    if not model:
+        raise InitError("model_required")
+    return provider, model, base_url
 
 
 def render_config(llm: Mapping[str, str], root: Path, journal: Path, timezone: str | None,
@@ -277,31 +382,26 @@ def run_init(
             report["warnings"].append("flags_ignored")
             report["ignored"] = ignored
         report["config_state"] = "kept"
-        for directory in (root, journal, journal / "entries"):
+        for directory in _vault_directories(root, journal):
             _directory_state(directory)
     else:
-        base = dict(existing.get("llm") or {})
-        provider = value(given["provider"], "Model provider", base.get("provider") or DEFAULT_PROVIDER)
-        if provider not in _PROVIDERS:
-            raise InitError("invalid_llm_settings")
-        # Same provider: start from its settings. Another one: start from its defaults.
-        if provider != base.get("provider"):
-            base = {"model": DEFAULT_ANTHROPIC_MODEL if provider == "anthropic" else ""}
-        model = value(given["model"], "Model ID" + (
-            f" ({LOWER_COST_ANTHROPIC_MODEL} costs less)" if provider == "anthropic" else ""), base.get("model", ""))
-        needs_url = provider in {"openai_compatible", "volcano"}
-        base_url = value(given["base_url"], "API base URL" + (
-            " (required)" if needs_url else " (empty for the default)"), base.get("base_url", ""))
+        configured = dict(existing.get("llm") or {})
+        provider, model, base_url = _choose_endpoint(
+            given, configured, ask if options.interactive else None)
+        # Same provider: start from its settings. Another one: from nothing.
+        base = configured if provider == configured.get("provider") else {}
         llm_input = {**base, "provider": provider, "model": model}
         llm_input.pop("base_url", None)
         if base_url:
             llm_input["base_url"] = base_url
-        if not model:
-            raise InitError("model_required")
         try:
             llm = _validated_profile_settings({"llm": llm_input})
         except HindsightStartupError:
             raise InitError("invalid_llm_settings") from None
+        # A config that already names one of these models is kept as it is (doctor warns).
+        if (provider == "anthropic" and model in FORCED_TOOL_REJECTING_MODELS
+                and (configured.get("provider"), configured.get("model")) != (provider, model)):
+            raise InitError("model_unsupported")
         root = _vault_root(value(given["vault"], "Vault folder", existing_vault.get("root") or str(default_root)),
                            paths)
         # A custom journal folder keeps its place inside the vault.
@@ -314,7 +414,7 @@ def run_init(
             timezone = value(given["timezone"], "Time zone", existing.get("timezone") or detect_timezone(environ))
             if not valid_timezone(timezone):
                 raise InitError("invalid_timezone")
-        for directory in (root, journal, journal / "entries"):
+        for directory in _vault_directories(root, journal):
             _directory_state(directory)
         kept = {name: block for name, block in existing.items() if name not in {"llm", "vault", "timezone"}}
         if "relationship_roots" in existing_vault:
@@ -326,14 +426,12 @@ def run_init(
             _put_back(paths.config_path, previous)
             raise InitError("invalid_config") from None
         report["config_state"] = "updated" if config_exists else "written"
-    if llm["provider"] == "anthropic" and llm["model"] in _FORCED_TOOL_REJECTING_MODELS:
+    if rejects_forced_tool(llm):
         report["warnings"].append("model_rejects_forced_tool_use")
 
     try:
-        vault_state = _private_directory(root)
-        journal_state = _private_directory(journal)
-        # The service lists entries/ before it writes the first entry.
-        _private_directory(journal / "entries")
+        vault_state, journal_state, *_ = [_private_directory(directory)
+                                          for directory in _vault_directories(root, journal)]
     except BaseException:
         if report["config_state"] != "kept":
             _put_back(paths.config_path, previous)
@@ -371,7 +469,8 @@ def run_init(
             report["warnings"].append("existing_key_kept")
     else:
         report["credentials_state"] = "missing" if required else "not_required"
-    report["next_steps"] = _next_steps(report)
+    report["setup_steps"] = _setup_steps(report)
+    report["next_steps"] = next_steps(report["vault_root"])
     return report
 
 
@@ -386,7 +485,17 @@ def _put_back(path: Path, previous: bytes | None) -> None:
         pass
 
 
-def _next_steps(report: Mapping[str, Any]) -> list[str]:
+def next_steps(vault_root: str) -> list[str]:
+    """For people, after the setup: from an open vault to a first cited answer."""
+    return [
+        f'Open {vault_root} in Obsidian as a vault ("Open folder as vault").',
+        "Import a document: lifecontext documents import ~/path/to/lease.pdf",
+        'Ask your agent: "What does my lease say about the deposit?"',
+    ]
+
+
+def _setup_steps(report: Mapping[str, Any]) -> list[str]:
+    """What a source install still has to run; install.sh has done all of it."""
     steps = []
     if report["credentials_state"] == "missing":
         steps.append("lifecontext init --api-key-stdin < FILE  (or run lifecontext init in a terminal to type the key)")
@@ -415,8 +524,7 @@ def render(report: Mapping[str, Any]) -> str:
         f"- Time zone: {report['timezone'] or 'the service local time'}",
     ]
     if "model_rejects_forced_tool_use" in report["warnings"]:
-        lines.append(f"Warning: {report['model']} rejects the forced tool call Hindsight uses to extract facts, "
-                     f"so retain will fail; use {DEFAULT_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL}.")
+        lines.append(_FORCED_TOOL_WARNING.format(model=report["model"]))
     if "existing_key_kept" in report["warnings"]:
         lines.append("Warning: the key you gave was not saved because .env already has one; "
                      "add --replace-key to replace it (that changes only .env).")
@@ -427,8 +535,25 @@ def render(report: Mapping[str, Any]) -> str:
         names = ", ".join("--" + name.replace("_", "-") for name in report["ignored"])
         lines.append(f"Warning: config.yaml already exists, so {names} did not change it; add --force to apply "
                      "them (every other setting is kept).")
-    lines.append("Next steps:")
+    probe = report.get("model_probe")
+    if probe is not None:
+        lines.append(render_model_probe(probe))
+    lines.append("To finish the setup:")
+    lines += [f"  {number}. {step}" for number, step in enumerate(report["setup_steps"], 1)]
+    lines.append("Then:")
     lines += [f"  {number}. {step}" for number, step in enumerate(report["next_steps"], 1)]
+    return "\n".join(lines)
+
+
+def render_model_probe(probe: Mapping[str, Any]) -> str:
+    """The model check in one or a few lines; ``probe`` is ``hindsight.model_probe``'s report."""
+    if probe["status"] == "pass":
+        lines = ["Model check: passed (the model answered with the structured output retain needs)."]
+    else:
+        lines = [f"Model check failed: {probe['message']}.", f"Fix it with: {probe['fix']}"]
+    reflect = probe.get("reflect") or {}
+    if reflect.get("status") == "warn":
+        lines.append(f"Warning: {reflect['message']}.")
     return "\n".join(lines)
 
 
@@ -473,7 +598,7 @@ def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str]
     report = {**show_llm(), "api_key_updated": key_given, "warnings": []}
     if report["provider"] != before["provider"] and not key_given and report["api_key"] == "set":
         report["warnings"].append("provider_changed_key_kept")
-    if report["provider"] == "anthropic" and report["model"] in _FORCED_TOOL_REJECTING_MODELS:
+    if rejects_forced_tool(report):
         report["warnings"].append("model_rejects_forced_tool_use")
     return report
 
@@ -493,6 +618,5 @@ def render_llm(report: Mapping[str, Any]) -> str:
         lines.append("Warning: the provider changed but the stored key was kept; if it belongs to the old "
                      "provider, replace it with: lifecontext llm set --api-key-stdin < FILE")
     if "model_rejects_forced_tool_use" in report.get("warnings", ()):
-        lines.append(f"Warning: {report['model']} rejects the forced tool call Hindsight uses to extract facts, "
-                     f"so retain will fail; use {DEFAULT_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL}.")
+        lines.append(_FORCED_TOOL_WARNING.format(model=report["model"]))
     return "\n".join(lines)
