@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pillow==13.0.0"]
+# dependencies = ["pillow==12.3.0"]  # the version pyproject.toml pins
 # ///
 """Render the landing page's link-card images and the GitHub social preview.
 
@@ -13,7 +13,8 @@ repository's Settings, General, Social preview). The text is in EN and UK
 below; change it there and run the script again. The same Pillow version and
 font files give byte-identical images. Fonts: DejaVu Sans, DejaVu Sans Mono
 and Liberation Serif (Debian and Ubuntu packages fonts-dejavu-core,
-fonts-dejavu-mono and fonts-liberation).
+fonts-liberation and, on Debian 13 and Ubuntu 24.04 or later,
+fonts-dejavu-mono).
 """
 from __future__ import annotations
 
@@ -39,10 +40,10 @@ UK = {
     "hero": ("Ваші документи, зведені у вікі.", "Кожне твердження має джерело."),
     "path": "wiki/Topics/Оренда квартири.md · приклад",
     # No-break spaces keep "22 000" and "с. 3" on one line.
-    "quote": "«Орендна плата становить 22 000 гривень на місяць і сплачується авансом першого (1-го) числа кожного місяця».",
-    "chip": "договір-оренди-2024.pdf v1 · с. 3",
+    "quote": "«Орендна плата становить 22\u00a0000 гривень на місяць і сплачується авансом першого (1-го) числа кожного місяця».",
+    "chip": "договір-оренди-2024.pdf v1 · с.\u00a03",
     "verified": "цитату знайдено в джерелі",
-    "address": "rundax.github.io/lifecontext/uk/",
+    "address": "rundax.github.io/lifecontext/uk",
 }
 IMAGES = (
     ("site/og.png", (1200, 630), EN),
@@ -50,7 +51,7 @@ IMAGES = (
     (".github/social-preview.png", (1280, 640), EN),
 )
 
-# Dark-theme tokens from site/assets/site.css.
+# Dark-theme tokens from site/assets/site.css, and GRID for the ruled background.
 BG = "#0c1110"
 GRID = "#131c1a"
 SURFACE = "#131a18"
@@ -76,13 +77,18 @@ FONT_DIRS = (
 
 
 @functools.cache
-def font(name: str, size: int) -> ImageFont.FreeTypeFont:
+def font_path(name: str) -> Path:
     for root in FONT_DIRS:
         found = sorted(root.rglob(name)) if root.is_dir() else []
         if found:
-            # The basic layout needs no libraqm, so the result does not depend on it.
-            return ImageFont.truetype(str(found[0]), size, layout_engine=ImageFont.Layout.BASIC)
+            return found[0]
     raise SystemExit(f"font {name} not found under {', '.join(map(str, FONT_DIRS))}")
+
+
+@functools.cache
+def font(name: str, size: int) -> ImageFont.FreeTypeFont:
+    # The basic layout needs no libraqm, so the result does not depend on it.
+    return ImageFont.truetype(str(font_path(name)), size, layout_engine=ImageFont.Layout.BASIC)
 
 
 def wrap(text: str, face: ImageFont.FreeTypeFont, width: int) -> list[str]:
@@ -123,12 +129,16 @@ def render(width: int, height: int, text: dict) -> Image.Image:
     chip_right = quote_x + 24 + mono.getlength(text["chip"])
 
     size = 60
-    while max(font("DejaVuSans-Bold.ttf", size).getlength(line) for line in text["hero"]) > CONTENT_WIDTH:
+    while size > 40 and max(font("DejaVuSans-Bold.ttf", size).getlength(line) for line in text["hero"]) > CONTENT_WIDTH:
         size -= 1
     hero = font("DejaVuSans-Bold.ttf", size)
     cap = -hero.getbbox("H", anchor="ls")[1]
     hero_leading = round(size * 1.22)
     hero_baseline = round((tile_top + tile + card_top - cap - hero_leading) / 2) + cap
+    descent = hero.getbbox("gy", anchor="ls")[3]
+    too_wide = max(hero.getlength(line) for line in text["hero"]) > CONTENT_WIDTH
+    if too_wide or hero_baseline + hero_leading + descent + 24 > card_top:
+        raise SystemExit(f"{text['address']}: the hero or the quote is too long for the image")
 
     # Shapes, drawn at SS times the size.
     shapes = Image.new("RGB", (width * SS, height * SS), BG)
@@ -151,7 +161,7 @@ def render(width: int, height: int, text: dict) -> Image.Image:
             fill=ACCENT_INK,
         )
     cx, cy, r = left + 23.5 * u, tile_top + 10 * u, 2.5 * u
-    d.ellipse(box(cx - r, cy - r, cx + r, cy + r), fill=ACCENT_INK)
+    d.ellipse(box(cx - r, cy - r, cx + r, cy + r), fill=mix(ACCENT, ACCENT_INK, 0.6))  # .mark-dot, opacity 0.6
 
     # The card: a title bar, the numbered claim and its citation.
     d.rounded_rectangle(box(left, card_top, right, card_bottom), radius=12 * SS, fill=SURFACE, outline=LINE, width=3)
