@@ -2,13 +2,14 @@
 #
 #   mkdir -p secrets
 #   (umask 077 && printf '%s\n' 'YOUR-PROVIDER-KEY' > secrets/lifecontext_api_key)
-#   LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
+#   LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
 #   docker compose exec lifecontext lifecontext doctor
 #
 # No port is published: the API listens on 127.0.0.1 inside the container. Use
 # `docker compose exec`, or bin/lifecontext-docker for agents on the host.
 # Settings come from the shell or a .env file next to this file:
-# LIFECONTEXT_PROVIDER, LIFECONTEXT_MODEL, LIFECONTEXT_BASE_URL,
+# LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (both required; there is no default
+# and the container waits until they are set), LIFECONTEXT_BASE_URL,
 # LIFECONTEXT_TIMEZONE (used on the first start only), LIFECONTEXT_API_KEY_FILE,
 # LIFECONTEXT_IMAGE, LIFECONTEXT_CONTAINER, LIFECONTEXT_MEMORY_LIMIT.
 

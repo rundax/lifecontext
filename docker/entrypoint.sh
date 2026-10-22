@@ -7,7 +7,8 @@
 #   anything else: run that lifecontext command instead, for example
 #     docker compose run --rm lifecontext backup
 #
-# Environment: LIFECONTEXT_PROVIDER, LIFECONTEXT_MODEL, LIFECONTEXT_BASE_URL,
+# Environment: LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (both required on the
+# first start; without them the container waits), LIFECONTEXT_BASE_URL,
 # LIFECONTEXT_TIMEZONE (first start only); the key comes from
 # LIFECONTEXT_API_KEY_FILE (default /run/secrets/lifecontext_api_key, one line)
 # or, less privately, LIFECONTEXT_API_KEY, and is stored on every start. The
@@ -60,14 +61,27 @@ print("lifecontext-entrypoint: %s %s, config %s, key %s, vault %s" % (
 '
 }
 
+missing=""
+[ -n "${LIFECONTEXT_PROVIDER:-}" ] || missing="LIFECONTEXT_PROVIDER"
+[ -n "${LIFECONTEXT_MODEL:-}" ] || missing="${missing:+$missing and }LIFECONTEXT_MODEL"
+
 if [ ! -f "$lifeweave/config.yaml" ]; then
-	if [ -z "${LIFECONTEXT_PROVIDER:-}${LIFECONTEXT_MODEL:-}${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ]; then
-		log "not set up yet: set LIFECONTEXT_MODEL (and LIFECONTEXT_PROVIDER, LIFECONTEXT_BASE_URL) and the key file, or run"
+	if [ -n "$missing" ]; then
+		# There is no default model. Wait rather than exit, which restart: unless-stopped
+		# would turn into a restart loop.
+		case "$missing" in
+		*" and "*) log "not set up yet: $missing are not set" ;;
+		*) log "not set up yet: $missing is not set" ;;
+		esac
+		log "set LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (and LIFECONTEXT_BASE_URL for openai_compatible)"
+		log "and the key file, then recreate the container; or run"
 		log "  docker exec -it CONTAINER lifecontext init --vault /data/vault"
 		log "waiting for ~/.lifeweave/config.yaml"
+		trap 'exit 0' TERM INT
 		until [ -f "$lifeweave/config.yaml" ]; do
 			sleep 5
 		done
+		trap - TERM INT
 	else
 		set -- --non-interactive --json --vault /data/vault
 		[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
