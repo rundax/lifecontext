@@ -11,7 +11,8 @@
 # first start; without them the container waits), LIFECONTEXT_BASE_URL,
 # LIFECONTEXT_TIMEZONE (first start only); the key comes from
 # LIFECONTEXT_API_KEY_FILE (default /run/secrets/lifecontext_api_key, one line)
-# or, less privately, LIFECONTEXT_API_KEY, and is stored on every start. The
+# or, less privately, LIFECONTEXT_API_KEY, and is stored on every start; without
+# a stored key (unless the endpoint needs none) the container waits for one. The
 # vault is always /data/vault.
 
 set -eu
@@ -38,6 +39,12 @@ if [ -f "$key_file" ] && [ -s "$key_file" ]; then
 	fi
 	export LIFECONTEXT_API_KEY_FILE="$key_file"
 fi
+
+# Whether a key comes with this start: a key file with content, or LIFECONTEXT_API_KEY.
+key_given() {
+	{ [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ] && [ -s "$LIFECONTEXT_API_KEY_FILE" ]; } ||
+		[ -n "${LIFECONTEXT_API_KEY:-}" ]
+}
 
 run_init() {
 	if [ -z "${LIFECONTEXT_API_KEY_FILE:-}" ] && [ -n "${LIFECONTEXT_API_KEY:-}" ]; then
@@ -74,20 +81,40 @@ except (ValueError, AttributeError):
 }
 
 # There is no default model. Wait for the setup rather than exit, which
-# restart: unless-stopped would turn into a restart loop: for config.yaml, and
-# then, without a key secret, for `lifecontext init` in the container to store the key.
+# restart: unless-stopped would turn into a restart loop.
 wait_for_setup() {
 	log "set LIFECONTEXT_PROVIDER and LIFECONTEXT_MODEL (and LIFECONTEXT_BASE_URL for openai_compatible)"
 	log "and the key file, then recreate the container; or run"
 	log "  docker exec -it CONTAINER lifecontext init --vault /data/vault"
 	log "waiting for ~/.lifeweave/config.yaml"
 	trap 'exit 0' TERM INT
-	waiting_for_key=0
-	until [ -f "$lifeweave/config.yaml" ] &&
-		{ [ -n "${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ] || key_stored; }; do
-		if [ -f "$lifeweave/config.yaml" ] && [ "$waiting_for_key" -eq 0 ]; then
-			log "waiting for the model key (lifecontext init asks for it; or lifecontext llm set --api-key-stdin)"
-			waiting_for_key=1
+	until [ -f "$lifeweave/config.yaml" ]; do
+		sleep 5
+	done
+	trap - TERM INT
+}
+
+# serve fails without a key unless the endpoint needs none, and a restart would not
+# bring one: wait for it, on every start. A key file that gets content meanwhile (the
+# host file behind the secret) is stored as soon as it does.
+wait_for_key() {
+	key_stored && return 0
+	if [ -n "${LIFECONTEXT_API_KEY:-}" ]; then
+		log "no model key is stored: LIFECONTEXT_API_KEY was not accepted (see above)"
+	elif [ -f "$key_file" ]; then
+		log "no model key is stored: the key file $key_file is empty"
+	else
+		log "no model key is stored, and there is no key file at $key_file"
+	fi
+	log "put the key in the secret file (one line), or run"
+	log "  docker exec -it CONTAINER lifecontext llm set --api-key-stdin"
+	log "waiting for the model key"
+	trap 'exit 0' TERM INT
+	until key_stored; do
+		if [ -z "${LIFECONTEXT_API_KEY_FILE:-}" ] && [ -s "$key_file" ] && [ -r "$key_file" ]; then
+			export LIFECONTEXT_API_KEY_FILE="$key_file"
+			report=$(run_init --non-interactive --replace-key --json) || true
+			printf '%s' "$report" | report_init || true
 		fi
 		sleep 5
 	done
@@ -98,7 +125,7 @@ missing=""
 [ -n "${LIFECONTEXT_PROVIDER:-}" ] || missing="LIFECONTEXT_PROVIDER"
 [ -n "${LIFECONTEXT_MODEL:-}" ] || missing="${missing:+$missing and }LIFECONTEXT_MODEL"
 
-key_stored_by_init=0
+init_ran=0
 if [ ! -f "$lifeweave/config.yaml" ]; then
 	if [ -n "$missing" ]; then
 		case "$missing" in
@@ -111,18 +138,20 @@ if [ ! -f "$lifeweave/config.yaml" ]; then
 		[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
 		report=$(run_init "$@") || true
 		if printf '%s' "$report" | report_init; then
-			key_stored_by_init=1
+			# With or without a key: wait_for_key below checks.
+			init_ran=1
 		else
 			wait_for_setup
 		fi
 	fi
 fi
-if [ "$key_stored_by_init" -eq 0 ] && [ -n "${LIFECONTEXT_API_KEY_FILE:-}${LIFECONTEXT_API_KEY:-}" ]; then
+if [ "$init_ran" -eq 0 ] && key_given; then
 	# The secret is the key: store it on every start, so a restore (backups never
 	# hold the key) or a changed secret takes effect.
 	report=$(run_init --non-interactive --replace-key --json) || true
 	printf '%s' "$report" | report_init
 fi
+wait_for_key
 unset LIFECONTEXT_API_KEY
 
 # The tokenizer file Hindsight would otherwise download on the first start.

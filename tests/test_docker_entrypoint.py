@@ -35,9 +35,11 @@ class EntrypointTests(unittest.TestCase):
         self.init_report.write_text(json.dumps(REPORT))
         self.key_state = root / "llm.json"
         lifecontext = stubs / "lifecontext"
+        # `init --replace-key` stores the key it is given.
         lifecontext.write_text(
             f'#!/bin/sh\ncase "$1" in llm) cat "{self.key_state}" 2>/dev/null; exit 0 ;; esac\n'
             f'echo "$*" >> "{self.calls}"\n'
+            f"""case "$*" in *--replace-key*) echo '{{"api_key": "set"}}' > "{self.key_state}" ;; esac\n"""
             f"""case "$1" in init) cat "{self.init_report}" ;; hindsight) echo '{{}}' ;; esac\n""")
         lifecontext.chmod(0o755)
         os.symlink(sys.executable, stubs / "python")
@@ -118,8 +120,52 @@ class EntrypointTests(unittest.TestCase):
                 self.assertEqual(process.wait(timeout=30), 0)
                 self.assertEqual(self.logged(), [])
 
-    def test_with_provider_and_model_the_first_start_runs_init(self) -> None:
-        process = self.start(LIFECONTEXT_PROVIDER="anthropic", LIFECONTEXT_MODEL="claude-sonnet-5")
+    def test_with_provider_model_and_key_the_first_start_runs_init_and_serves(self) -> None:
+        self.secret.write_text("sk-secret\n")
+        self.key_state.write_text('{"api_key": "set"}')  # what init stored from the secret
+        process = self.start(LIFECONTEXT_PROVIDER="anthropic", LIFECONTEXT_MODEL="claude-sonnet-5",
+                             LIFECONTEXT_API_KEY_FILE=str(self.secret))
+        self.assertEqual(process.wait(timeout=30), 0, process.stderr.read())
+        self.assertEqual(self.logged(), ["init --non-interactive --json --vault /data/vault",
+                                         "serve --port 8765", "hindsight stop --json"])
+
+    def test_without_a_key_it_waits_instead_of_serving_also_after_a_restart(self) -> None:
+        self.key_state.write_text('{"api_key": "missing"}')
+        native = {"LIFECONTEXT_PROVIDER": "anthropic", "LIFECONTEXT_MODEL": "claude-sonnet-5"}
+        for start, expected_calls in (("first", ["init --non-interactive --json --vault /data/vault"]),
+                                      ("restart", [])):  # config.yaml is there now: no init, still no serve
+            with self.subTest(start=start):
+                self.calls.unlink(missing_ok=True)
+                if start == "restart":
+                    self.write_config()
+                process = self.start(**native)
+                log = self.read_until(process, "waiting for the model key")
+                self.assertIn("no model key is stored, and there is no key file at", log)
+                time.sleep(1)
+                self.assertIsNone(process.poll())
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=30), 0)
+                self.assertEqual(self.logged(), expected_calls)
+
+    def test_an_empty_key_file_is_no_key_and_is_stored_once_it_has_content(self) -> None:
+        self.key_state.write_text('{"api_key": "missing"}')
+        self.secret.write_text("")
+        process = self.start(LIFECONTEXT_PROVIDER="anthropic", LIFECONTEXT_MODEL="claude-sonnet-5",
+                             LIFECONTEXT_API_KEY_FILE=str(self.secret))
+        log = self.read_until(process, "waiting for the model key")
+        self.assertIn(f"the key file {self.secret} is empty", log)
+        time.sleep(1)
+        self.assertIsNone(process.poll())
+        self.secret.write_text("sk-secret\n")
+        self.assertEqual(process.wait(timeout=30), 0)
+        self.assertEqual(self.logged(), ["init --non-interactive --json --vault /data/vault",
+                                         "init --non-interactive --replace-key --json",
+                                         "serve --port 8765", "hindsight stop --json"])
+
+    def test_a_loopback_endpoint_that_needs_no_key_serves_without_one(self) -> None:
+        self.key_state.write_text('{"api_key": "not_required"}')
+        process = self.start(LIFECONTEXT_PROVIDER="openai_compatible", LIFECONTEXT_MODEL="llama3.3",
+                             LIFECONTEXT_BASE_URL="http://127.0.0.1:11434/v1")
         self.assertEqual(process.wait(timeout=30), 0, process.stderr.read())
         self.assertEqual(self.logged(), ["init --non-interactive --json --vault /data/vault",
                                          "serve --port 8765", "hindsight stop --json"])
