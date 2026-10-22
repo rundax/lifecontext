@@ -556,7 +556,7 @@ lifecontext doctor</code></pre>
           <li>Installs into your home directory. Running LifeContext never needs root.</li>
           <li>Installs Tesseract with English, Ukrainian and Russian through Homebrew on macOS, or through apt, dnf or pacman when sudo works without a password. It never asks for a password; otherwise it prints the command to run.</li>
           <li>Asks which model to use, with no default, and checks with a short probe that it answers. Your API key is read with a hidden prompt, never passed on the command line.</li>
-          <li>Runs <code>init</code>, <code>service install --maintenance</code>, <code>skills install</code> and <code>doctor</code>, and ends with three next steps.</li>
+          <li>Runs <code>init</code>, <code>service install --maintenance</code>, <code>skills install</code> and <code>doctor</code>, and, when the model answered, ends with three next steps.</li>
           <li>Run it again to upgrade: it stops the service, backs up your data, installs, and starts the service again.</li>
           <li>Leaves vision off.</li>
         </ul>

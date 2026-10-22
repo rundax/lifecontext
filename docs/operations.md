@@ -25,7 +25,7 @@ Which model should LifeContext use? The text of your documents and notes is sent
 Choose 1-6:
 ```
 
-and Enter without a choice asks again. Choices 1 to 4 select the native
+and anything but a number from 1 to 6 asks again, up to three times. Choices 1 to 4 select the native
 providers `anthropic`, `openai`, `gemini` and `openrouter`. Choice 5 selects
 `openai_compatible` and suggests `http://127.0.0.1:11434/v1`, Ollama's address
 (vLLM and LM Studio listen on other ports); a server on this machine needs no
@@ -163,10 +163,13 @@ see [Engine access](#engine-access-token-port-and-postgres)), `engine_port_taken
 (something else listens on the profile's port), `postgres_tcp` (Postgres
 listens on TCP or the profile is set up for it), `postgres_files_unsafe` (the
 socket directory is not `0700` or not `~/.lifeweave/postgres`, or
-`instance.json` is not a private file of yours), `engine_profile_unsafe`.
-`warnings` do not change the exit code: `service_not_running`,
+`instance.json` is not a private file of yours), `engine_profile_unsafe`, and
+with `--model-probe`, `model_probe_failed` (the report's `model_probe` says
+why). `warnings` do not change the exit code: `service_not_running`,
 `service_not_ready`, `tesseract_missing`, `tesseract_languages_missing`,
-`models_not_cached` (normal before the first start), `disk_low` (under 2 GB).
+`models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
+`model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
+that do not work yet) and, with `--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 
@@ -374,12 +377,17 @@ lifecontext preflight --retain-smoke
 same structured-output path that retain uses for your provider, with a
 60-second limit (one retry on a rate limit), plus a check of the named tool
 call that reflect uses, which can only warn. It does not start the memory
-engine. It prints `{"model_probe": {"status": ..., "cause": ...}}` and exits 0
-on a pass and 3 on a failure; the causes are that the provider rejected the
-key, the model was not found, the model does not support the structured output
-LifeContext needs, or the endpoint did not answer. It never prints the
-provider's own error text. `doctor --model-probe` adds the same check to the
-doctor report.
+engine. It prints `{"model_probe": {...}}` with `status` (`pass` or `fail`),
+a `cause`, a `message` and the `fix` command for a failure, and `reflect`
+(`pass`, `warn` or `skipped`), and exits 0 on a pass and 3 on a failure. The
+causes: the provider rejected the key (`key_rejected`), no key is stored
+(`key_missing`), the model was not found (`model_not_found`), the model does
+not support the structured output LifeContext needs
+(`structured_output_unsupported`), the provider is rate limiting the key
+(`rate_limited`), the endpoint did not answer (`unreachable`), the settings
+are not valid (`invalid_config`), or another failure (`failed`). It never
+prints the provider's own error text. `doctor --model-probe` adds the same
+check to the doctor report.
 
 Plain `preflight` checks the configuration and that a key is stored, then
 starts the local memory engine and checks that it answers. It does not check

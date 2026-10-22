@@ -98,11 +98,12 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    [`lifecontext llm set`](#change-the-model-or-endpoint-later).
 8. Checks the model with `lifecontext preflight --model-probe`: a short
    check, at most 60 seconds, also on a re-run that keeps the existing
-   settings. If it fails, it prints the cause (the provider rejected the key,
-   the model was not found, the model does not support the structured output
-   LifeContext needs, or the endpoint did not answer) and the
-   `lifecontext llm set` command that fixes it, carries on with the next steps,
-   and exits with status 3 at the end.
+   settings; it is skipped while the setup is not complete. If it fails, it
+   prints the cause (for example: the provider rejected the key, the model was
+   not found, the model does not support the structured output LifeContext
+   needs, or the endpoint did not answer; [all causes](operations.md#startup-checks))
+   and the command that fixes it, usually `lifecontext llm set`, carries on
+   with the next steps, and exits with status 3 at the end.
 9. When the setup is complete and a systemd user session (Linux) or launchd
    (macOS) is available, runs `lifecontext service install --maintenance`
    (with `--capture` if you said yes to `Journal/Inbox`) and waits for the API
@@ -110,8 +111,9 @@ To pass options through `curl | sh`, use `sh -s --`, for example
 10. Runs `lifecontext skills install` for the agents it finds (Claude Code,
     Codex, Gemini CLI, Hermes), also when it skipped `init` because nothing
     was set (an unattended `init` that fails stops the installer before this), then
-    `lifecontext doctor`, and ends with three next steps: open the vault in
-    Obsidian, import a document, ask your agent about it.
+    `lifecontext doctor`. Unless the model check failed, it ends with three
+    next steps: open the vault in Obsidian, import a document, ask your agent
+    about it.
 
 It ships no vision model and writes no `vision` block: vision stays off until
 you configure it ([operations](operations.md)). It never prints your key.
@@ -256,6 +258,9 @@ update the secret file and run `docker compose restart`. There is no default
 model: without `LIFECONTEXT_PROVIDER` or `LIFECONTEXT_MODEL` the container logs
 which one is missing and waits. Set both and run `docker compose up -d` again,
 or run `docker exec -it lifecontext lifecontext init --vault /data/vault`.
+Without a stored key (unless the endpoint needs none) it also waits, on every
+start, and logs how to add one: put it in the secret file, or run
+`docker exec -it lifecontext lifecontext llm set --api-key-stdin`.
 
 | Variable (shell or `.env`) | Meaning |
 |---|---|
