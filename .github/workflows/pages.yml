@@ -4,8 +4,10 @@ name: Pages
 # install commands that work only once a final release is published
 # (releases/latest skips pre-releases) and its container image is public, so
 # nothing deploys it on push and no other workflow starts it. On release day,
-# after both, the release checklist (docs/development.md, "Releasing") runs:
+# after both, it is run by hand as the release checklist (docs/development.md,
+# "Releasing") says:
 #   gh workflow run pages.yml --ref main
+# Until a final release exists, the first step fails the run.
 on:
   workflow_dispatch:
 
@@ -26,6 +28,10 @@ jobs:
       contents: read
       pages: read
     steps:
+      - name: Check that the page's install command works
+        env:
+          REPO: ${{ github.repository }}
+        run: curl -fsSL -o /dev/null "https://github.com/$REPO/releases/latest/download/install.sh"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
