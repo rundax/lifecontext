@@ -100,7 +100,8 @@ _INSTALLED = ("doctor_installed", "journal_retain", "journal_readback", "documen
 _SCENARIO = ("document_import_uk", "document_import_image", "ocr_image")
 # Providers whose CI route needs a base URL (the gateway); any other uses its own API.
 GATEWAY_PROVIDERS = {"openai_compatible"}
-_PUBLIC = ("install_sh_public", "release_signature_checked", "installed_version", "llm_settings",
+_PUBLIC = ("install_sh_public", "release_signature_checked", "installed_version", "tag_url_matches_latest",
+           "llm_settings",
            "service_running", "service_ready", "doctor_public", "model_probe_public", "image_pull", "image_signature")
 
 
@@ -484,9 +485,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     started = time.monotonic()
     code, value = cli.json("preflight", "--model-probe", timeout=180)
     probe = value.get("model_probe") if isinstance(value.get("model_probe"), dict) else {}
-    return 0 if record(f"model_probe_{args.label}", code == 0 and bool(probe),
-                       f"exit {code}, status {probe.get('status')}, cause {probe.get('cause')}",
-                       time.monotonic() - started) else 1
+    reflect = probe.get("reflect") if isinstance(probe.get("reflect"), dict) else {}
+    return 0 if record(f"model_probe_{args.label}", code == 0 and probe.get("status") == "pass",
+                       f"exit {code}, status {probe.get('status')}, cause {probe.get('cause')}, "
+                       f"reflect {reflect.get('status')}", time.monotonic() - started) else 1
 
 
 def cmd_fingerprint(args: argparse.Namespace) -> int:

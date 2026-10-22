@@ -3,8 +3,9 @@
 # named by $1 (mode 0600), and mask them in the job log: every CI model key, the
 # gateway URL, its host and any distinctive path segment. Reads
 # LIFECONTEXT_CI_LLM_API_KEY, LIFECONTEXT_CI_LLM_BASE_URL and
-# LIFECONTEXT_CI_ANTHROPIC_API_KEY from the environment and leaves out any that
-# is empty: an empty line in a `grep -F -f` pattern file matches every line.
+# LIFECONTEXT_CI_ANTHROPIC_API_KEY from the environment. A value is written line
+# by line and blank lines are left out: an empty pattern in `grep -F -f` matches
+# every line.
 set -eu
 
 out=$1
@@ -23,9 +24,7 @@ path=${path%/}
 umask 077
 : >"$out"
 for value in "${LIFECONTEXT_CI_LLM_API_KEY:-}" "${LIFECONTEXT_CI_ANTHROPIC_API_KEY:-}" "$url" "$host" "$path"; do
-	if [ -n "$value" ]; then
-		printf '%s\n' "$value" >>"$out"
-	fi
+	printf '%s\n' "$value" | sed '/^[[:space:]]*$/d' >>"$out"
 done
 for value in "$host" "$path"; do
 	if [ -n "$value" ]; then

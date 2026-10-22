@@ -30,6 +30,12 @@ if [ -n "$missing" ]; then
 	echo "::error::provider $LLM_PROVIDER needs:${missing%;}"
 	exit 1
 fi
+case "$key" in
+*[[:space:]]*)
+	echo "::error::the CI key for provider $LLM_PROVIDER contains white space or a line break; store it as one line"
+	exit 1
+	;;
+esac
 
 umask 077
 mkdir -p "$dir"

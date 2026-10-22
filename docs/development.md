@@ -243,7 +243,9 @@ GitHub Actions workflows live in `.github/workflows/`:
   uninstall, and for Docker no published port, a non-root user, recreate and
   restore. The native install must end with the three next steps. A
   `wrong_key` job installs with a key the provider rejects and expects exit 3,
-  "the provider rejected the key" and the `lifecontext llm set` command.
+  "the provider rejected the key" followed by its `lifecontext llm set` fix,
+  and no doctor problem. Both checks are recorded as skipped while `install.sh`
+  has no model probe (no `--skip-model-probe` option).
   Every job takes the model from two inputs:
   - `-f provider=openai_compatible` (the default) goes through the CI gateway:
     repository secrets `LIFECONTEXT_CI_LLM_API_KEY` and
@@ -269,17 +271,19 @@ GitHub Actions workflows live in `.github/workflows/`:
     installs it, with no token, on `ubuntu-24.04` and `macos-14`: `curl -fsSL
     …/releases/download/vVERSION/install.sh | sh -s -- --non-interactive`, or
     `…/releases/latest/download/install.sh` for a final, then doctor and
-    `preflight --model-probe`. For a final it also pulls the image anonymously
-    and runs `cosign verify` on it.
+    `preflight --model-probe`. For a final it also checks that the tag's own
+    `install.sh` URL serves the same script, pulls the image anonymously and
+    runs `cosign verify` on it.
 - `release.yml`, on `v*` tags: see [Releasing](#releasing). A manual run
   (`gh workflow run release.yml --ref BRANCH`) is a dry run: it builds and
   checks the wheel, the assets and the two-platform image, and signs, pushes
   and publishes nothing.
 - `pages.yml`, manual: deploys `site/` from `main` to GitHub Pages. Nothing
   starts it on its own; on the day of a final release the maintainer runs
-  `gh workflow run pages.yml --ref main` after the release is published (step
-  12 of [Releasing](#releasing)). Before that, the site's install commands
-  would fail.
+  `gh workflow run pages.yml --ref main` after the release is published and
+  the image package is public (step 12 of [Releasing](#releasing)). Its first
+  step fails the run until `releases/latest/download/install.sh` exists, so
+  the site never shows install commands that do not work yet.
 - `.github/dependabot.yml` proposes action updates weekly.
 
 Actions are pinned to full commit SHAs; update the SHA and its version comment
@@ -316,7 +320,9 @@ version with letters in it is a pre-release.
    signs the linux/amd64 and linux/arm64 image with an SBOM and provenance:
    `:VERSION`, and `:latest` for a final, which takes up to 150 minutes. Only
    then does it create the release as a **draft**. Every release stays a
-   draft, a final too; nothing publishes it on its own.
+   draft, a final too; nothing publishes it on its own. If the image job
+   fails, there is no draft yet: re-run the failed jobs, and the draft
+   follows the image.
 8. Check the draft: `gh workflow run qualify.yml --ref main -f
    release_tag=vVERSION`. It must pass, and the `package_visibility` it records
    must be `private`: the image package stays private until a final is
@@ -333,6 +339,10 @@ version with letters in it is a pre-release.
     own URL. For a final it installs through `releases/latest` and also pulls
     and verifies the image.
 12. For a final, deploy the site: `gh workflow run pages.yml --ref main`.
+    Then set the repository's website field, About text and topics, and upload
+    `.github/social-preview.png` under Settings, General, Social preview
+    (`scripts/render_social_images.py` renders it with `site/og.png` and
+    `site/og-uk.png`).
 13. For a final, merge back into `main`: the `CHANGELOG.md` heading, and the
     versions by the rule below. A pre-release is not merged back. Its branch
     changes only the version; fixes land on `main` and go out in a new branch
