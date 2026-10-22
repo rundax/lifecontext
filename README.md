@@ -262,9 +262,9 @@ LifeContext does not need sync: open the vault on the machine that runs it.
 To read and write the vault on a phone or a second computer, the Self-hosted
 LiveSync Obsidian plugin can sync it through a CouchDB hub that
 `docker/livesync/` ships, published to your tailnet with `tailscale serve`.
-It takes Docker, Tailscale and a headless LiveSync client on the server, and
-every device must run the same LiveSync release; [docs/sync.md](docs/sync.md)
-walks through it.
+It takes Docker, Tailscale and a headless LiveSync client on the server, which
+must run the same LiveSync release as the plugin on every device;
+[docs/sync.md](docs/sync.md) walks through it.
 
 ## Privacy
 
