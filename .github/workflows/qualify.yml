@@ -67,7 +67,7 @@ jobs:
           python-version: "3.12"
       - name: Build the wheel and the synthetic fixtures
         run: |
-          python -m pip install build==1.6.1 pillow==12.3.0
+          python -m pip install build==1.6.1 pillow==13.0.0
           python -m build --wheel --outdir dist .
           python .github/scripts/qualify.py fixtures --out fixtures
           ls -l dist fixtures
