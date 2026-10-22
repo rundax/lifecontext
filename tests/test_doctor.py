@@ -68,7 +68,8 @@ def _which(name):
 
 
 def _set_up(home: Path) -> LifeContextPaths:
-    run_init(InitOptions(timezone="Europe/Vienna", api_key_stdin=True), key_stream=io.BytesIO(KEY.encode()))
+    run_init(InitOptions(provider="anthropic", model="claude-sonnet-5", timezone="Europe/Vienna", api_key_stdin=True),
+             key_stream=io.BytesIO(KEY.encode()))
     return LifeContextPaths.current()
 
 
@@ -109,6 +110,36 @@ class DoctorTests(unittest.TestCase):
                 self.assertNotIn(private, text)
             self.assertIsNone(report["operations"])
             self.assertTrue(paths.credentials_path.exists())
+
+    def test_the_model_is_called_only_with_model_probe(self) -> None:
+        failed = {"status": "fail", "cause": "key_rejected", "message": "the provider rejected the key",
+                  "fix": "lifecontext llm set --api-key-stdin < FILE", "reflect": {"status": "skipped"}}
+        with _temporary_home() as home:
+            _set_up(home)
+            with patch("lifecontext.hindsight.model_probe", side_effect=AssertionError("called")):
+                report, _ = run_doctor(port=8765, fetch=_service_up, run=_tesseract_run)
+            self.assertNotIn("model_probe", report)
+            with patch("lifecontext.hindsight.model_probe", return_value=failed) as probe:
+                report, code = run_doctor(port=8765, fetch=_service_up, run=_tesseract_run, model_probe=True)
+            probe.assert_called_once()
+            self.assertEqual((code, report["model_probe"]), (1, failed))
+            self.assertIn("model_probe_failed", report["problems"])
+            self.assertIn("Model check failed: the provider rejected the key.", render(report))
+            warned = {"status": "pass", "cause": None, "reflect": {"status": "warn", "message": "reflect may fail"}}
+            with patch("lifecontext.hindsight.model_probe", return_value=warned):
+                report, _ = run_doctor(port=8765, fetch=_service_up, run=_tesseract_run, model_probe=True)
+            self.assertNotIn("model_probe_failed", report["problems"])
+            self.assertIn("model_reflect_check_failed", report["warnings"])
+
+    def test_a_config_with_a_claude_model_that_refuses_forced_tools_is_a_warning(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            paths.config_path.write_text(paths.config_path.read_text().replace('"claude-sonnet-5"',
+                                                                               '"claude-mythos-5-1"'))
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["config"]["llm"]["model"], "claude-mythos-5-1")
+            self.assertIn("model_rejects_forced_tool_use", report["warnings"])
+            self.assertNotIn("model_rejects_forced_tool_use", report["problems"])
 
     def test_unsafe_modes_and_missing_key_are_problems(self) -> None:
         with _temporary_home() as home:

@@ -35,12 +35,13 @@ Installs LifeContext for the current user: a pinned uv and Python 3.12, the
 package and its hash-locked dependencies in ~/.local/share/lifecontext/venv
 (CPU-only PyTorch on Linux), the local models at fixed revisions, the command
 ~/.local/bin/lifecontext and Tesseract OCR with English, Russian and
-Ukrainian, then runs `lifecontext init`, `service install --maintenance`,
-`skills install` and `doctor`. Running it again upgrades in place: it stops
-the service, backs up your data, installs, and starts the service again.
+Ukrainian, then runs `lifecontext init`, a model check, `service install
+--maintenance`, `skills install` and `doctor`. Running it again upgrades in
+place: it stops the service, backs up your data, installs, and starts the
+service again.
 
 Options:
-  --version VERSION     release to install (default: 1.2.0)
+  --version VERSION     release to install (default: the release of this script)
   --assets DIR          use release assets from DIR instead of downloading them
                         (SHA256SUMS, the wheel, requirements-PLATFORM.txt and,
                         to check the signature, SHA256SUMS.sigstore.json)
@@ -50,29 +51,36 @@ Options:
   --no-service          do not install the systemd user service or launchd agent
   --no-skills           do not link the agent skill into detected agents
   --no-backup           do not back up before upgrading an existing installation
+  --skip-model-probe    do not send the one small request that checks the model
   --allow-root          allow running as root (not recommended)
   --uninstall           remove only what this script installed
   -h, --help            show this help
 
-With a terminal, the installer asks for the model endpoint (provider, base
-URL, model, a hidden key that may stay empty for a keyless loopback endpoint)
-and the vault folder; the defaults are an OpenAI-compatible proxy on
-http://127.0.0.1:8317/v1 and ~/LifeContext/vault. Change the endpoint later
-with `lifecontext llm set`.
+With a terminal, the installer asks which model to use (a menu of
+providers with nothing preselected), the model ID, the server address for a
+local or other OpenAI-compatible endpoint, a hidden key, the vault folder
+(~/LifeContext/vault unless you choose another) and whether to turn notes in
+Journal/Inbox into journal entries automatically. Change the model later with
+`lifecontext llm set`.
 
 Unattended setup, used instead of prompts when PROVIDER, MODEL or
 API_KEY_FILE is set (without a terminal and without them, init is skipped):
-  LIFECONTEXT_PROVIDER      provider ID (default: anthropic)
-  LIFECONTEXT_MODEL         exact model ID
+  LIFECONTEXT_PROVIDER      provider ID, required: anthropic, openai, gemini,
+                            openrouter, openai_compatible or another that
+                            lifecontext init accepts
+  LIFECONTEXT_MODEL         exact model ID, required
   LIFECONTEXT_BASE_URL      API root, required for openai_compatible
   LIFECONTEXT_VAULT         vault folder (default: ~/LifeContext/vault)
   LIFECONTEXT_TIMEZONE      IANA time zone (default: the system's)
   LIFECONTEXT_API_KEY_FILE  file whose single line is the provider key
-On a re-run, existing settings are kept; a key file given then replaces the
-stored key.
+  LIFECONTEXT_CAPTURE=1     also turn notes in Journal/Inbox into entries
+  LIFECONTEXT_SKIP_MODEL_PROBE=1  same as --skip-model-probe
+On a re-run, existing settings and the services installed are kept; a key
+file given then replaces the stored key.
 
-Exit status: 0 installed and `lifecontext doctor` passed; 1 failed; 2 usage
-error; 3 installed, but `lifecontext doctor` reported a problem (shown above).
+Exit status: 0 installed, the model answered and `lifecontext doctor` passed;
+1 failed; 2 usage error; 3 installed, but the model check failed or
+`lifecontext doctor` reported a problem (both shown above).
 EOF
 }
 
@@ -464,58 +472,116 @@ ask_secret() {
 	printf '\n' >/dev/tty
 }
 
+# ask_yes QUESTION: $reply is 1 unless the answer starts with n.
+ask_yes() {
+	printf '%s [Y/n]: ' "$1" >/dev/tty
+	IFS= read -r reply </dev/tty || reply=""
+	case "$reply" in
+	[Nn]*) reply=0 ;;
+	*) reply=1 ;;
+	esac
+}
+
+# The provider menu, word for word the one `lifecontext init` shows (tests compare
+# them); nothing is preselected. Sets $provider and $choice.
+choose_provider() {
+	{
+		printf '%s\n' "Which model should LifeContext use? The text of your documents and notes is sent to it."
+		printf '%s\n' "  1) Anthropic (API key)" "  2) OpenAI (API key)" "  3) Google Gemini (API key)" \
+			"  4) OpenRouter (API key)" "  5) A local model server (Ollama, vLLM, LM Studio)" \
+			"  6) Another OpenAI-compatible endpoint"
+	} >/dev/tty
+	for attempt in 1 2 3; do
+		ask "Choose 1-6" ""
+		choice=$reply
+		case "$choice" in
+		1) provider=anthropic ;;
+		2) provider=openai ;;
+		3) provider=gemini ;;
+		4) provider=openrouter ;;
+		5 | 6) provider=openai_compatible ;;
+		*)
+			warn "type a number from 1 to 6"
+			continue
+			;;
+		esac
+		return 0
+	done
+	die "no model provider was chosen; run the installer again"
+}
+
+# The Anthropic model, refusing the Claude models that refuse forced tool choice.
+ask_anthropic_model() {
+	for attempt in 1 2 3; do
+		ask "Model ID (claude-haiku-5-5 costs less)" "claude-sonnet-5"
+		case "$reply" in
+		claude-sonnet-5-5 | claude-opus-5-5 | claude-fable-5-1 | claude-mythos-5-1)
+			warn "$reply does not work with LifeContext yet: retain uses strict structured output, which on Anthropic is a forced tool call, and this model refuses a forced tool choice; use claude-sonnet-5 or claude-haiku-5-5"
+			;;
+		*) return 0 ;;
+		esac
+	done
+	die "no usable model was chosen; run the installer again"
+}
+
 # Ask for the model endpoint, then run init with the answers. The key is read hidden and
 # reaches init through a private file, never through an argument.
 configure_interactive() {
-	say "Which model should LifeContext use? Your notes' text is sent to it to be indexed."
-	say "A local OpenAI-compatible proxy (for example CLIProxyAPI on 127.0.0.1:8317) is the common case;"
-	say "you can change all of this later with: lifecontext llm set"
-	ask "Provider (openai_compatible, anthropic, openai, gemini, volcano)" "${LIFECONTEXT_PROVIDER:-openai_compatible}"
-	provider=$reply
+	choose_provider
 	base_url=""
-	case "$provider" in
-	openai_compatible | volcano)
-		default_url=${LIFECONTEXT_BASE_URL:-}
-		[ "$provider" != openai_compatible ] || default_url=${LIFECONTEXT_BASE_URL:-http://127.0.0.1:8317/v1}
-		ask_required "API base URL" "$default_url"
+	case "$choice" in
+	1) ask_anthropic_model ;;
+	2) ask_required "Model ID (see https://platform.openai.com/docs/models)" "" ;;
+	3) ask_required "Model ID (see https://ai.google.dev/gemini-api/docs/models)" "" ;;
+	4) ask_required "Model ID (see https://openrouter.ai/models)" "" ;;
+	5)
+		ask_required "Base URL of the server" "${LIFECONTEXT_BASE_URL:-http://127.0.0.1:11434/v1}"
 		base_url=$reply
+		ask_required "Model ID (as your server lists it, for example in ollama list)" ""
 		;;
-	*)
-		ask "API base URL (empty for the provider's own)" "${LIFECONTEXT_BASE_URL:-}"
+	6)
+		ask_required "API base URL (the API root, for example https://api.example.com/v1)" "${LIFECONTEXT_BASE_URL:-}"
 		base_url=$reply
+		ask_required "Model ID (exactly as your endpoint names it)" ""
 		;;
 	esac
-	default_model=${LIFECONTEXT_MODEL:-}
-	[ "$provider" != anthropic ] || default_model=${LIFECONTEXT_MODEL:-claude-sonnet-5}
-	ask_required "Model ID (exactly as your endpoint names it)" "$default_model"
 	model=$reply
-	ask_secret "API key (hidden; leave empty if the endpoint needs none, as a local proxy on loopback may)"
+	case "$choice" in
+	5 | 6) ask_secret "API key (hidden; leave empty if the server needs none)" ;;
+	*) ask_secret "API key (hidden; empty to add it later with lifecontext llm set)" ;;
+	esac
 	api_key=$reply
 	ask "Vault folder (the folder you open in Obsidian)" "${LIFECONTEXT_VAULT:-$HOME/LifeContext/vault}"
 	vault=$reply
+	ask_yes "Turn notes you put in Journal/Inbox into journal entries automatically?"
+	capture=$reply
+	say "You can change the model later with: lifecontext llm set"
 
 	set -- init --non-interactive --json --provider "$provider" --model "$model" --vault "$vault"
 	[ -z "$base_url" ] || set -- "$@" --base-url "$base_url"
 	[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
+	# Every answer is a flag: a LIFECONTEXT_BASE_URL left in the environment must not
+	# attach a URL to a provider chosen without one.
 	if [ -n "$api_key" ]; then
 		key_file="$tmp/api-key"
 		(umask 077 && printf '%s\n' "$api_key" >"$key_file")
 		api_key=""
-		report=$(LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" "$@" </dev/null) || true
+		report=$(unset LIFECONTEXT_BASE_URL && LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" "$@" </dev/null) || true
 		rm -f "$key_file"
 	else
-		report=$("$lc" "$@" </dev/null) || true
+		report=$(unset LIFECONTEXT_BASE_URL && "$lc" "$@" </dev/null) || true
 	fi
 	printf '%s' "$report" | print_init_report || die "setup did not finish; run the installer again with other answers"
 }
 
 print_init_report() {
-	# The report holds the endpoint; print everything but the URL.
+	# The report holds the endpoint; print everything but the URL. The next steps
+	# for people go to $tmp/next-steps, printed when the installer ends.
 	"$venv/bin/python" -I -c '
 import json, sys
 report = json.loads(sys.stdin.read())
 if "error" in report:
-    print("lifecontext init failed: " + report["error"].replace("_", " "))
+    print("lifecontext init failed: " + report.get("message", report["error"].replace("_", " ")))
     sys.exit(1)
 key = {"stored": "stored in .env", "replaced": "replaced in .env", "kept": "already in .env",
        "missing": "MISSING", "not_required": "not needed for this loopback endpoint"}
@@ -528,11 +594,14 @@ notes = {
     "flags_ignored": "kept the existing settings; not applied: %s (change them with lifecontext init --force)"
                      % ", ".join(report.get("ignored") or []),
     "existing_key_kept": "kept the stored key; replace it with lifecontext init --replace-key",
-    "model_rejects_forced_tool_use": "this model rejects the forced tool call Hindsight uses, so retain fails",
+    "model_rejects_forced_tool_use": "this model refuses the forced tool choice that retain and reflect use, "
+                                     "so they will fail",
 }
 for warning in report.get("warnings") or []:
     print("Note: " + notes.get(warning, warning.replace("_", " ")))
-'
+with open(sys.argv[1], "w") as steps:
+    steps.writelines("  %d. %s\n" % item for item in enumerate(report.get("next_steps") or [], 1))
+' "$tmp/next-steps"
 }
 
 configure() {
@@ -550,6 +619,12 @@ configure() {
 				key_changed=1
 				say "The key from LIFECONTEXT_API_KEY_FILE replaced the stored one"
 			fi
+		else
+			# Changes nothing in the settings; creates the folders this release expects
+			# (Journal/Inbox) and names the next steps.
+			report=$("$lc" init --non-interactive --json </dev/null) || true
+			printf '%s' "$report" | print_init_report ||
+				warn "lifecontext init reported a problem with the existing settings (above); see lifecontext doctor"
 		fi
 		return
 	fi
@@ -562,6 +637,65 @@ configure() {
 		configure_interactive
 	else
 		say "Skipped: no terminal and no LIFECONTEXT_* settings. Run lifecontext init to finish the setup."
+	fi
+}
+
+# One small request to the model the way retain sends it, after configure and on every
+# re-run (a key that stopped working shows up here). A failure does not stop the
+# installer; it exits 3 at the end.
+check_model() {
+	model_state="not checked"
+	if [ "$skip_model_probe" -eq 1 ] || [ "${LIFECONTEXT_SKIP_MODEL_PROBE:-}" = 1 ]; then
+		say "Skipped. Check it later with: lifecontext preflight --model-probe"
+		return
+	fi
+	if [ ! -e "$HOME/.lifeweave/config.yaml" ]; then
+		say "Skipped until the setup is complete"
+		return
+	fi
+	say "Sending one small request to the model (up to a minute)"
+	# stderr stays hidden: only the stable cause in the JSON is shown, never provider text.
+	report=$("$lc" preflight --model-probe </dev/null 2>/dev/null) || true
+	if printf '%s' "$report" | "$venv/bin/python" -I -c '
+import json, sys
+try:
+    probe = json.loads(sys.stdin.read())["model_probe"]
+except (ValueError, KeyError, TypeError):
+    probe = {"status": "fail", "message": "the model check did not run",
+             "fix": "lifecontext preflight --model-probe  (to see whether it runs)"}
+if probe["status"] == "pass":
+    print("The model answered with the structured output LifeContext needs.")
+    reflect = probe.get("reflect") or {}
+    if reflect.get("status") == "warn":
+        print("Warning: %s." % reflect["message"])
+    sys.exit(0)
+print("The model check failed: %s." % probe["message"])
+print("Fix it with: %s" % probe["fix"])
+print("Then check it again with: lifecontext preflight --model-probe")
+sys.exit(3)
+' >"$tmp/model-check"; then
+		model_state="passed"
+	else
+		model_state="failed"
+	fi
+	cat "$tmp/model-check"
+}
+
+# Whether an earlier run installed note capture, so that a re-run keeps it.
+capture_installed() {
+	if [ "$os" = Darwin ]; then
+		[ -e "$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.capture.plist" ]
+	else
+		[ -e "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lifecontext-capture.timer" ]
+	fi
+}
+
+# The service command: capture too when it was chosen now or is already installed.
+service_command() {
+	if [ "$capture" -eq 1 ] || capture_installed; then
+		printf '%s\n' "service install --maintenance --capture"
+	else
+		printf '%s\n' "service install --maintenance"
 	fi
 }
 
@@ -610,6 +744,8 @@ wait_for_api() {
 
 start_service() {
 	service_state="not installed"
+	# shellcheck disable=SC2046 # the words of service_command, none with spaces
+	set -- $(service_command)
 	if [ "$no_service" -eq 1 ]; then
 		start_stopped_service
 		say "Skipped (--no-service). Run the API in a terminal with: lifecontext serve"
@@ -617,19 +753,19 @@ start_service() {
 	fi
 	problems=$(setup_problems)
 	if [ -n "$problems" ]; then
-		say "Skipped until the setup is complete ($problems). Then run: lifecontext service install --maintenance"
+		say "Skipped until the setup is complete ($problems). Then run: lifecontext $*"
 		return
 	fi
 	if ! service_manager_available; then
 		if [ "$os" = Linux ]; then
 			say "No systemd user session here, so no service was installed. Run the API with: lifecontext serve"
-			say "(or log in through a systemd session, run loginctl enable-linger \"\$USER\" and then lifecontext service install --maintenance)"
+			say "(or log in through a systemd session, run loginctl enable-linger \"\$USER\" and then lifecontext $*)"
 		else
 			say "No launchd session for this user, so no agent was installed. Run the API with: lifecontext serve"
 		fi
 		return
 	fi
-	if ! "$lc" service install --maintenance </dev/null; then
+	if ! "$lc" "$@" </dev/null; then
 		start_stopped_service
 		warn "lifecontext service install failed; run the API with lifecontext serve, or see lifecontext service status"
 		return
@@ -751,6 +887,7 @@ main() {
 	no_skills=0
 	no_backup=0
 	allow_root=0
+	skip_model_probe=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--version | --assets | --wheel | --lock)
@@ -771,6 +908,7 @@ main() {
 		--no-service) no_service=1 && shift ;;
 		--no-skills) no_skills=1 && shift ;;
 		--no-backup) no_backup=1 && shift ;;
+		--skip-model-probe) skip_model_probe=1 && shift ;;
 		--allow-root) allow_root=1 && shift ;;
 		--uninstall) action=uninstall && shift ;;
 		-h | --help)
@@ -827,6 +965,9 @@ main() {
 	backup_archive=""
 	ocr_state="unknown"
 	service_state="not installed"
+	model_state="not checked"
+	capture=0
+	[ "${LIFECONTEXT_CAPTURE:-}" != 1 ] || capture=1
 
 	step "Checking the release"
 	if [ -n "$wheel" ]; then
@@ -859,6 +1000,8 @@ main() {
 	install_ocr
 	step "Setting up ~/.lifeweave, the vault and the model key"
 	configure
+	step "Checking the model"
+	check_model
 	step "Starting the API as a user service"
 	start_service
 	step "Linking the agent skill"
@@ -868,15 +1011,32 @@ main() {
 	"$lc" doctor </dev/null || doctor_status=$?
 
 	step "Done"
+	finish
+}
+
+# The summary, then the next steps when the model answered, then what failed: a
+# failed model check comes last, with its fix. Exits 3 when either check failed.
+finish() {
 	say "LifeContext: $("$lc" --version </dev/null) in $venv"
 	say "Command: $link"
+	say "Model check: $model_state"
 	say "Service: $service_state"
 	say "OCR: $ocr_state"
 	[ -z "$backup_archive" ] || say "Backup made before the upgrade: $backup_archive"
+	if [ "$model_state" != failed ] && [ -s "$tmp/next-steps" ]; then
+		say ""
+		say "Next steps:"
+		cat "$tmp/next-steps"
+	fi
 	if [ "$doctor_status" -ne 0 ]; then
 		warn "lifecontext doctor reported a problem (listed above); fix it, then run lifecontext doctor again"
+	fi
+	if [ "$model_state" = failed ]; then
+		say ""
+		cat "$tmp/model-check"
 		exit 3
 	fi
+	[ "$doctor_status" -eq 0 ] || exit 3
 }
 
 main "$@"

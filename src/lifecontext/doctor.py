@@ -3,6 +3,7 @@
 Reports versions, paths and modes, a config summary without secrets, service
 readiness, OCR, vision, the model cache and counts; never document or journal
 content. ``problems`` are broken prerequisites (non-zero exit); ``warnings`` are not.
+Only ``model_probe`` (``doctor --model-probe``) sends a request to the model.
 """
 
 from __future__ import annotations
@@ -107,7 +108,7 @@ def _credentials_report(settings: Mapping[str, Any] | None) -> dict[str, Any]:
         credentials = load_credentials(require_llm_key=False)
     except CredentialError as exc:
         return {"state": "unsafe" if "unsafe" in str(exc) else "invalid"}
-    # Without a readable config, assume the default provider, which needs a key.
+    # Without a readable config, assume a provider that needs a key.
     required = settings is None or llm_key_required(_validated_profile_settings(settings))
     llm = "present" if credentials.get("LIFEWEAVE_LLM_API_KEY") else ("missing" if required else "not_required")
     return {"state": "ok", "llm_key": llm,
@@ -245,9 +246,15 @@ def _disk(path: Path) -> int | None:
 
 def run_doctor(
     *, port: int, fetch: Callable[[str], dict] | None = None, run: Callable[..., Any] = subprocess.run,
-    environ: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None, model_probe: bool = False,
 ) -> tuple[dict[str, Any], int]:
-    from lifecontext.hindsight import model_cache_status, read_daemon_start_record
+    from lifecontext.hindsight import (
+        model_cache_status,
+        probe_failure,
+        read_daemon_start_record,
+    )
+    from lifecontext.hindsight import model_probe as run_model_probe
+    from lifecontext.initialize import rejects_forced_tool
     from lifecontext.vault import default_journal_paths
 
     fetch = fetch or http_fetcher(port)
@@ -279,6 +286,15 @@ def run_doctor(
         problems.append(f"credentials_{credentials['state']}")
     elif credentials.get("llm_key") == "missing":
         problems.append("credentials_missing")
+    if rejects_forced_tool(config.get("llm") or {}):
+        warnings.append("model_rejects_forced_tool_use")
+    probe = None
+    if model_probe:
+        probe = probe_failure("invalid_config") if settings is None else run_model_probe(settings)
+        if probe["status"] != "pass":
+            problems.append("model_probe_failed")
+        elif (probe.get("reflect") or {}).get("status") == "warn":
+            warnings.append("model_reflect_check_failed")
 
     vault = (settings or {}).get("vault")
     root, journal = (Path(vault["root"]), Path(vault["journal_path"])) if vault else default_journal_paths(paths.home)
@@ -329,6 +345,8 @@ def run_doctor(
         "operations": _operation_counts(paths.catalog_path) if home["private"] else None,
         "tesseract": tesseract, "models": models, "disk": disk,
     }
+    if probe is not None:
+        report["model_probe"] = probe
     return report, 1 if problems else 0
 
 
@@ -385,6 +403,10 @@ def render(report: Mapping[str, Any]) -> str:
     lines.append(f"Models: {cached}; next start offline: {'yes' if models['offline_next_start'] else 'no'}; "
                  f"last start offline: {record.get('hf_hub_offline', 'unknown')}; tokenizer "
                  f"{'cached' if models['tiktoken']['cached'] else 'not cached'}")
+    if "model_probe" in report:
+        from lifecontext.initialize import render_model_probe
+
+        lines.append(render_model_probe(report["model_probe"]))
     free = report["disk"]["home_free_bytes"]
     if free is not None:
         lines.append(f"Disk free: {free / 1024**3:.1f} GB")

@@ -61,7 +61,8 @@ def _as(home: Path):
 
 def _populate(home: Path) -> LifeContextPaths:
     with _as(home) as paths:
-        run_init(InitOptions(timezone="Europe/Vienna", api_key_stdin=True), key_stream=io.BytesIO(KEY.encode()))
+        run_init(InitOptions(provider="anthropic", model="claude-sonnet-5", timezone="Europe/Vienna",
+                             api_key_stdin=True), key_stream=io.BytesIO(KEY.encode()))
         LifeContextCatalog(paths).close()
         local_token(paths, create=True)
         engine_token(paths, create=True)

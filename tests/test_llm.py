@@ -24,7 +24,7 @@ from lifecontext.paths import LifeContextPaths
 
 KEY = "sk-old-private-key-0123456789"
 NEW_KEY = "sk-new-private-key-9876543210"
-LOCAL = "http://127.0.0.1:8317/v1"
+LOCAL = "http://127.0.0.1:11434/v1"
 NOT_RUNNING = {"state": "not_running", "command": ["systemctl", "--user", "restart", "lifecontext.service"]}
 
 
@@ -90,7 +90,7 @@ class LlmShowTests(unittest.TestCase):
 class LlmSetTests(unittest.TestCase):
     def test_set_changes_only_the_given_fields_and_keeps_the_rest(self) -> None:
         with _home() as home:
-            _initialize(provider="openai_compatible", model="first-model", base_url="http://127.0.0.1:11434/v1")
+            _initialize(provider="openai_compatible", model="first-model", base_url="http://127.0.0.1:8000/v1")
             paths = LifeContextPaths(home)
             paths.config_path.write_text(paths.config_path.read_text() + "vision:\n  max_pages_per_document: 5\n")
             before = load_settings()
@@ -100,7 +100,7 @@ class LlmSetTests(unittest.TestCase):
             self.assertEqual(code, 0, err)
             report = json.loads(out)
             self.assertEqual((report["provider"], report["model"], report["base_url"]),
-                             ("openai_compatible", "second-model", "http://127.0.0.1:11434/v1"))
+                             ("openai_compatible", "second-model", "http://127.0.0.1:8000/v1"))
             self.assertEqual(report["service"], NOT_RUNNING)
             after = load_settings()
             self.assertEqual(after["llm"], {**before["llm"], "model": "second-model"})
@@ -164,8 +164,17 @@ class LlmSetTests(unittest.TestCase):
             ):
                 with self.subTest(arguments=arguments):
                     code, out, _ = _run("set", *arguments, "--json", stdin=stdin, restart=None)
-                    self.assertEqual((code, json.loads(out)), (1, {"error": error}))
+                    self.assertEqual((code, json.loads(out)["error"]), (1, error))
                     self.assertEqual((paths.config_path.read_bytes(), paths.credentials_path.read_bytes()), before)
+
+    def test_a_new_provider_without_a_model_says_to_add_one(self) -> None:
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            code, out, _ = _run("set", "--provider", "anthropic", "--json", restart=None)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "model_required"))
+            self.assertIn("add --model", failure["message"])
+            self.assertNotIn("LIFECONTEXT_MODEL", failure["message"])
 
     def test_set_needs_something_to_change_and_an_existing_setup(self) -> None:
         with _home():
@@ -184,6 +193,36 @@ class LlmSetTests(unittest.TestCase):
             code, out, _ = _run("set", "--provider", "openai", "--model", "gpt-test-model", "--api-key-stdin",
                                 stdin=NEW_KEY + "\n")
             self.assertNotIn("provider changed", out)
+
+    def test_set_refuses_claude_models_that_refuse_forced_tool_choice(self) -> None:
+        with _home() as home:
+            _initialize(provider="openai", model="gpt-test-model")
+            paths = LifeContextPaths(home)
+            before = paths.config_path.read_bytes()
+            code, out, _ = _run("set", "--provider", "anthropic", "--model", "claude-opus-5-5", "--json", restart=None)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "model_unsupported"))
+            self.assertIn("forced tool call", failure["message"])
+            code, _, err = _run("set", "--provider", "anthropic", "--model", "claude-opus-5-5", restart=None)
+            self.assertIn("Use claude-sonnet-5 or claude-haiku-5-5", err)
+            self.assertEqual(paths.config_path.read_bytes(), before)
+            # Behind an OpenAI-compatible endpoint the same ID is only a warning.
+            code, out, _ = _run("set", "--provider", "openai_compatible", "--base-url", LOCAL,
+                                "--model", "claude-opus-5-5")
+            self.assertEqual(code, 0)
+            self.assertIn("Warning: claude-opus-5-5 refuses the forced tool choice", out)
+
+    def test_set_keeps_an_existing_refused_model_when_only_the_key_changes(self) -> None:
+        with _home() as home:
+            _initialize(provider="anthropic", model="claude-sonnet-5")
+            paths = LifeContextPaths(home)
+            paths.config_path.write_text(paths.config_path.read_text().replace('"claude-sonnet-5"',
+                                                                               '"claude-sonnet-5-5"'))
+            code, out, err = _run("set", "--api-key-stdin", "--json", stdin=NEW_KEY + "\n")
+            self.assertEqual(code, 0, err)
+            report = json.loads(out)
+            self.assertEqual(report["model"], "claude-sonnet-5-5")
+            self.assertIn("model_rejects_forced_tool_use", report["warnings"])
 
     def test_set_reports_what_the_service_did(self) -> None:
         with _home():

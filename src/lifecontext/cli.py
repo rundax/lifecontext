@@ -56,11 +56,13 @@ _API_ERROR_CODES = frozenset({
 class CLIError(RuntimeError):
     """Stable command failure that never includes paths or remote response text."""
 
-    def __init__(self, code: str, status: int | None = None):
+    def __init__(self, code: str, status: int | None = None, message: str | None = None):
         super().__init__(code)
         self.code = code
         # The HTTP status when the API itself answered with an error.
         self.status = status
+        # A sentence that says what to do, for the failures that have one.
+        self.message = message
 
 
 def _positive_int(value: str) -> int:
@@ -156,8 +158,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "init", help="set up ~/.lifeweave, the vault and the model key (never starts anything)"
     )
     _shared_options(init)
-    init.add_argument("--provider", help="model provider ID (default: $LIFECONTEXT_PROVIDER, else anthropic)")
-    init.add_argument("--model", help="exact model ID (default: $LIFECONTEXT_MODEL)")
+    init.add_argument("--provider",
+                      help="model provider ID, else $LIFECONTEXT_PROVIDER; a terminal gets a menu, other runs need one")
+    init.add_argument("--model", help="exact model ID, else $LIFECONTEXT_MODEL; needed without a terminal")
     init.add_argument("--base-url",
                       help="provider API root, required for openai_compatible (default: $LIFECONTEXT_BASE_URL)")
     init.add_argument("--vault", metavar="DIR",
@@ -165,7 +168,8 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument("--timezone", help="IANA time zone (default: the system's)")
     init.add_argument("--api-key-stdin", action="store_true",
                       help="read the provider key from stdin, one line (else from $LIFECONTEXT_API_KEY_FILE)")
-    init.add_argument("--non-interactive", action="store_true", help="never prompt; use flags and defaults")
+    init.add_argument("--non-interactive", action="store_true",
+                      help="never prompt; take the provider and model from flags or LIFECONTEXT_* variables")
     init.add_argument("--force", action="store_true",
                       help="apply these flags to an existing config.yaml, keeping every other setting")
     init.add_argument("--replace-key", action="store_true",
@@ -175,6 +179,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor", help="report safe diagnostics; exit 1 only for broken prerequisites"
     )
     _shared_options(doctor)
+    doctor.add_argument("--model-probe", action="store_true",
+                        help="also send one small request to the configured model (else doctor never calls it)")
 
     skills = commands.add_parser(
         "skills", help="link the agent skill into Claude Code, Codex, Gemini CLI and Hermes"
@@ -278,6 +284,11 @@ def _build_parser() -> argparse.ArgumentParser:
     preflight.add_argument(
         "--vision-probe", action="store_true",
         help="also send one generated test image to the configured vision model",
+    )
+    preflight.add_argument(
+        "--model-probe", action="store_true",
+        help=("only send one small request to the configured model, the way retain calls it, without "
+              "starting the memory engine; exit 0 when it passes, 3 when it fails"),
     )
 
     serve = commands.add_parser("serve", help="start the API on loopback")
@@ -1144,6 +1155,8 @@ def _preflight(args: argparse.Namespace) -> int:
     from lifecontext.config import ConfigError, load_settings
     from lifecontext.hindsight import HindsightStartupError, preflight, retain_smoke
 
+    if args.model_probe:
+        return _model_probe_only()
     try:
         settings = load_settings()
     except ConfigError:
@@ -1158,6 +1171,21 @@ def _preflight(args: argparse.Namespace) -> int:
         report["vision"] = _vision_report(settings, probe=args.vision_probe)
     print(json.dumps(report, sort_keys=True))
     return 0 if report.get("ready") else 1
+
+
+def _model_probe_only() -> int:
+    """``preflight --model-probe``: the model check alone; the memory engine is not started."""
+    from lifecontext.config import ConfigError, load_settings
+    from lifecontext.hindsight import model_probe, probe_failure
+
+    try:
+        settings = load_settings()
+    except ConfigError:
+        probe = probe_failure("invalid_config")
+    else:
+        probe = model_probe(settings)
+    print(json.dumps({"model_probe": probe}, sort_keys=True))
+    return 0 if probe["status"] == "pass" else 3
 
 
 def _vision_report(settings, *, probe: bool) -> dict[str, object]:
@@ -1311,16 +1339,24 @@ def _init(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
             key_stream=sys.stdin.buffer if args.api_key_stdin else None,
         )
     except initialize.InitError as exc:
-        raise CLIError(exc.code) from None
+        raise CLIError(exc.code, message=exc.message) from None
     except OSError:
         raise CLIError("setup_failed") from None
+    if options.interactive:
+        # Only a person at a terminal waits for the model; scripts and containers run
+        # `lifecontext preflight --model-probe` themselves (install.sh does).
+        from lifecontext.config import load_settings
+        from lifecontext.hindsight import model_probe
+
+        sys.stderr.write("Checking the model with one small request (up to a minute)...\n")
+        report["model_probe"] = model_probe(load_settings())
     return report, initialize.render(report), 0
 
 
 def _doctor(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     from lifecontext import doctor
 
-    report, code = doctor.run_doctor(port=args.port)
+    report, code = doctor.run_doctor(port=args.port, model_probe=args.model_probe)
     return report, doctor.render(report), code
 
 
@@ -1464,7 +1500,7 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
                                    api_key_stdin=args.api_key_stdin),
             key_stream=sys.stdin.buffer if args.api_key_stdin else None)
     except initialize.InitError as exc:
-        raise CLIError(exc.code) from None
+        raise CLIError(exc.code, message=exc.message) from None
     except OSError:
         raise CLIError("setup_failed") from None
     restart = service.restart_if_running(platform.system())
@@ -1583,9 +1619,11 @@ def _run_local(args: argparse.Namespace) -> int:
         report, text, code = _LOCAL_COMMANDS[args.command](args)
     except CLIError as exc:
         if args.as_json:
-            print(json.dumps({"error": exc.code}, sort_keys=True, separators=(",", ":")))
+            failure = {"error": exc.code, **({"message": exc.message} if exc.message else {})}
+            print(json.dumps(failure, sort_keys=True, separators=(",", ":")))
         else:
-            print(f"lifecontext {args.command} failed: {exc.code.replace('_', ' ')}.", file=sys.stderr)
+            print(f"lifecontext {args.command} failed: {exc.message or exc.code.replace('_', ' ') + '.'}",
+                  file=sys.stderr)
         return 1
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
