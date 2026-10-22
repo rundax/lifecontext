@@ -464,6 +464,206 @@ def document_compiler(settings: Mapping[str, Any]):
     return compile_document
 
 
+# Why the model check failed, as a sentence and the command that fixes it. The
+# sentences are matched by CI (.github/workflows/qualify.yml); keep them stable.
+_KEY_FIX = "lifecontext llm set --api-key-stdin < FILE  (FILE holds the key on one line)"
+_MODEL_FIX = "lifecontext llm set --model MODEL_ID"
+PROBE_CAUSES = {
+    "key_rejected": ("the provider rejected the key", _KEY_FIX),
+    "key_missing": ("no API key is stored for this provider", _KEY_FIX),
+    "model_not_found": ("the model was not found", _MODEL_FIX),
+    "structured_output_unsupported": ("this model does not support the structured output LifeContext needs",
+                                      _MODEL_FIX),
+    "rate_limited": ("the provider is rate limiting this key; try again later",
+                     "lifecontext preflight --model-probe  (once the limit resets), or lifecontext llm set"),
+    "unreachable": ("the endpoint did not answer",
+                    "lifecontext llm set --base-url URL  (or check that the server is running)"),
+    "invalid_config": ("the model settings in ~/.lifeweave/config.yaml are not valid",
+                       "lifecontext llm set --provider PROVIDER --model MODEL_ID"),
+    "failed": ("the model call failed", "lifecontext llm set  (check the provider, model and key)"),
+}
+_REFLECT_WARNING = ("the model refused a forced tool call, which reflect uses, so answers that need reflect "
+                    "may fail")
+_PROBE_LOGGERS = ("hindsight_api", "openai", "anthropic", "httpx", "httpcore", "google_genai")
+_STRUCTURED_OUTPUT_WORDS = ("tool_choice", "response_format", "json_schema")
+
+
+def _probe_status(error: BaseException) -> int | None:
+    """The HTTP status of a provider error: ``status_code`` (OpenAI, Anthropic) or ``code`` (google-genai)."""
+    for name in ("status_code", "code"):
+        value = getattr(error, name, None)
+        if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+            return value
+    return None
+
+
+def probe_cause(error: BaseException) -> str:
+    """A stable cause for a failed model call; the provider's text is read here but never returned."""
+    try:
+        import httpx
+        transport: tuple[type, ...] = (httpx.TransportError,)
+    except ImportError:
+        transport = ()
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = _probe_status(current)
+        if status is not None:
+            text = str(current).casefold()
+            if status in (401, 403) or (status == 400 and ("api key" in text or "api_key" in text)):
+                # Gemini answers a malformed key with 400 API_KEY_INVALID.
+                return "key_rejected"
+            if status == 404:
+                return "model_not_found"
+            if status == 429:
+                return "rate_limited"
+            if status == 400 and any(word in text for word in _STRUCTURED_OUTPUT_WORDS):
+                return "structured_output_unsupported"
+            return "failed"
+        if isinstance(current, json.JSONDecodeError):
+            return "structured_output_unsupported"
+        if (isinstance(current, (TimeoutError, ConnectionError, *transport))
+                or type(current).__name__ in {"APIConnectionError", "APITimeoutError"}):
+            return "unreachable"
+        current = current.__cause__ or current.__context__
+    return "failed"
+
+
+@contextmanager
+def _quiet_providers():
+    """Keep provider logs and prints out of the output: they carry raw errors, and an OpenAI 401 a masked key."""
+    import logging
+
+    loggers = [logging.getLogger(name) for name in _PROBE_LOGGERS]
+    levels = [logger.level for logger in loggers]
+    previous = logging.root.manager.disable
+    for logger in loggers:
+        logger.setLevel(logging.CRITICAL)
+    logging.disable(logging.CRITICAL)
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            yield
+    finally:
+        logging.disable(previous)
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
+
+
+def _probe_result(status: str, cause: str | None) -> dict[str, Any]:
+    if cause is None:
+        return {"status": status, "cause": None}
+    message, fix = PROBE_CAUSES[cause]
+    return {"status": status, "cause": cause, "message": message, "fix": fix}
+
+
+def probe_failure(cause: str) -> dict[str, Any]:
+    """A failed model check that never reached the reflect check."""
+    return {**_probe_result("fail", cause), "reflect": {"status": "skipped"}}
+
+
+def model_probe(settings: Mapping[str, Any], *, timeout: float = 60.0) -> dict[str, Any]:
+    """One small call through retain's own structured-output path, then a reflect-style tool call.
+
+    The retain check decides ``status`` (``pass`` or ``fail`` with a ``cause``); the
+    reflect check, a named tool choice, only warns. Builds Hindsight's ``LLMProvider``
+    in this process like ``document_compiler`` (no daemon, no bank). The result never
+    holds provider text; a 429 is retried once within ``timeout``. Never raises.
+    """
+    try:
+        required = llm_key_required(_validated_profile_settings(settings))
+        config = _validated_profile_config(settings, load_credentials(require_llm_key=required))
+    except CredentialError:
+        return probe_failure("key_missing")
+    except HindsightStartupError as exc:
+        return probe_failure("key_missing" if exc.code == "missing_credentials" else "invalid_config")
+    try:
+        with _quiet_providers():
+            return asyncio.run(_model_probe(config, timeout))
+    except Exception:  # noqa: BLE001 -- a stable cause only, never the error text
+        return probe_failure("failed")
+
+
+async def _model_probe(config: Mapping[str, str], timeout: float) -> dict[str, Any]:
+    from hindsight_api.config import get_config
+    from hindsight_api.engine.llm_interface import LLMToolChoice, OutputTooLongError
+    from hindsight_api.engine.llm_wrapper import LLMProvider
+    from pydantic import BaseModel
+
+    # Every provider call reads Hindsight's cached server config, whose first load
+    # imports the local embedding stack (torch): load it before any clock starts.
+    get_config()
+
+    class ProbeAnswer(BaseModel):
+        answer: str
+
+    messages = [{"role": "system", "content": "This is a connection check. Answer briefly."},
+                {"role": "user", "content": "Put the word ok in the field answer."}]
+    tool = {"type": "function", "function": {
+        "name": "record_answer", "description": "Record the answer.",
+        "parameters": {"type": "object", "properties": {"answer": {"type": "string"}},
+                       "required": ["answer"], "additionalProperties": False}}}
+
+    async def retain_check(provider) -> None:
+        result = await provider.call(
+            messages=messages, response_format=ProbeAnswer, strict_schema=True, max_completion_tokens=1024,
+            max_retries=0, skip_validation=True, scope="retain_extract_facts")
+        if not isinstance(result, dict):
+            raise json.JSONDecodeError("not an object", "", 0)
+
+    async def reflect_check(provider) -> None:
+        await provider.call_with_tools(
+            messages=messages, tools=[tool], tool_choice=LLMToolChoice.named("record_answer"),
+            max_completion_tokens=1024, max_retries=0, scope="reflect")
+
+    async def attempt(check) -> str | None:
+        """None when ``check`` passed, else the cause; one retry after a 429."""
+        provider = None
+        try:
+            # Built before the clock starts: the first build imports every provider SDK,
+            # which takes tens of seconds on a slow machine.
+            provider = LLMProvider(
+                provider=config["HINDSIGHT_API_LLM_PROVIDER"], api_key=config["HINDSIGHT_API_LLM_API_KEY"],
+                base_url=config.get("HINDSIGHT_API_LLM_BASE_URL", ""), model=config["HINDSIGHT_API_LLM_MODEL"],
+                reasoning_effort=config.get("HINDSIGHT_API_LLM_REASONING_EFFORT"),
+                timeout=timeout, max_retries=0)
+            async with asyncio.timeout(timeout):
+                for retry in (False, True):
+                    try:
+                        await check(provider)
+                        return None
+                    except OutputTooLongError:
+                        return None  # it answered in the schema, only too long
+                    except Exception as exc:  # noqa: BLE001 -- reduced to a cause, never shown
+                        cause = probe_cause(exc)
+                        if cause != "rate_limited" or retry:
+                            return cause
+                    await asyncio.sleep(2)
+        except TimeoutError:
+            return "unreachable"
+        except Exception as exc:  # noqa: BLE001 -- the provider could not even be built
+            return probe_cause(exc)
+        finally:
+            if provider is not None:
+                try:
+                    await provider.cleanup()
+                except Exception:  # noqa: BLE001, S110 -- cleanup must not expose provider errors
+                    pass
+        return "failed"
+
+    cause = await attempt(retain_check)
+    if cause is not None:
+        return probe_failure(cause)
+    reflect_cause = await attempt(reflect_check)
+    if reflect_cause is None:
+        reflect: dict[str, Any] = {"status": "pass"}
+    else:
+        message = (_REFLECT_WARNING if reflect_cause == "structured_output_unsupported" else
+                   f"the reflect check did not pass ({PROBE_CAUSES[reflect_cause][0]})")
+        reflect = {"status": "warn", "cause": reflect_cause, "message": message}
+    return {**_probe_result("pass", None), "reflect": reflect}
+
+
 def _ensure_private_directory(path: Path) -> None:
     created = False
     try:
