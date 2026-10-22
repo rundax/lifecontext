@@ -1033,18 +1033,28 @@ jobs:
             $Q record image_signature skip --detail "no Docker on the macOS runner"
             exit 0
           fi
-          if [ "$PRERELEASE" = true ]; then
-            $Q record image_pull skip --detail "a pre-release: the image package stays private until the final"
-            $Q record image_signature skip --detail "a pre-release: the image package stays private until the final"
-            exit 0
-          fi
           failed=0
           image="ghcr.io/rundax/lifecontext:$VERSION"
           docker logout ghcr.io > /dev/null 2>&1 || true
           status=0
-          docker pull "$image" || status=$?
-          [ "$status" -eq 0 ] && result=pass || result=fail
-          $Q record image_pull "$result" --detail "anonymous, exit $status, $(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo 'no digest')" || failed=1
+          docker pull "$image" > "$RUNNER_TEMP/pull.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/pull.log"
+          if [ "$status" -eq 0 ]; then
+            digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo 'no digest')
+            if [ "$PRERELEASE" = true ]; then
+              # Visibility is per package: once a final made it public, a pre-release image is public from its tag on.
+              echo "::warning::$image can be pulled anonymously before its release is published"
+              $Q record image_pull skip --detail "image public before the release is published: anonymous pull exit 0, $digest"
+            else
+              $Q record image_pull pass --detail "anonymous, exit 0, $digest"
+            fi
+          elif [ "$PRERELEASE" = true ] && grep -qiE 'denied|unauthorized' "$RUNNER_TEMP/pull.log"; then
+            $Q record image_pull pass --detail "image not anonymously pullable (package private)"
+            $Q record image_signature skip --detail "no anonymous pull to verify; the check of the draft verifies it with a token"
+            exit 0
+          else
+            $Q record image_pull fail --detail "anonymous pull exit $status$(grep -qiE 'manifest unknown|not found' "$RUNNER_TEMP/pull.log" && echo ', no such image tag')" || failed=1
+          fi
           status=0
           cosign verify "$image" \
             --certificate-identity "https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/$TAG" \

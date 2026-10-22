@@ -273,7 +273,11 @@ GitHub Actions workflows live in `.github/workflows/`:
     `…/releases/latest/download/install.sh` for a final, then doctor and
     `preflight --model-probe`. For a final it also checks that the tag's own
     `install.sh` URL serves the same script, pulls the image anonymously and
-    runs `cosign verify` on it.
+    runs `cosign verify` on it. For a pre-release it tries the same anonymous
+    pull. While the package is private, the pull is refused, which counts as
+    a pass. Once a final has made the package public, a pre-release image can
+    be pulled from the moment its tag is pushed; the check then records a
+    warning (a skip) and still verifies the signature.
 - `release.yml`, on `v*` tags: see [Releasing](#releasing). A manual run
   (`gh workflow run release.yml --ref BRANCH`) is a dry run: it builds and
   checks the wheel, the assets and the two-platform image, and signs, pushes
