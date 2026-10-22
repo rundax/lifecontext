@@ -1,5 +1,53 @@
 # Unreleased
 
+- **Breaking: no default model.** `lifecontext init` and `install.sh` no
+  longer default to a provider or model. With a terminal both show a provider
+  menu (Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server,
+  another OpenAI-compatible endpoint) with nothing preselected; without one,
+  `init --non-interactive` needs `--provider`/`LIFECONTEXT_PROVIDER` and
+  `--model`/`LIFECONTEXT_MODEL` and stops with `provider_required` or
+  `model_required`. Existing `config.yaml` files are kept. The Docker image
+  waits with a log line until both are set and a key is stored.
+- `lifecontext preflight --model-probe` and `doctor --model-probe` send one
+  small request through retain's structured-output path and report a stable
+  cause (the provider rejected the key, the model was not found, no structured
+  output, rate limited, the endpoint did not answer) and the command that fixes
+  it; exit 3 on a failure. `install.sh` runs it after setup and on every
+  re-run, then exits 3 at the end if it failed (`--skip-model-probe` or
+  `LIFECONTEXT_SKIP_MODEL_PROBE=1` skip it).
+- `init` and `llm set` refuse `claude-sonnet-5-5`, `claude-opus-5-5`,
+  `claude-fable-5-1` and `claude-mythos-5-1` with provider `anthropic` (they
+  refuse forced tool choice, which strict retain uses on Anthropic); use
+  `claude-sonnet-5` or `claude-haiku-5-5`. Behind `openai_compatible` they only
+  warn; `doctor` warns about an existing config that names one.
+- `init` creates `Journal/Inbox`; the interactive installer asks whether to
+  turn notes there into journal entries (`service install --capture`), and
+  unattended runs do so with `LIFECONTEXT_CAPTURE=1`. `init` reports
+  `next_steps` (open the vault in Obsidian, import a document, ask your agent)
+  and `setup_steps`; the installer ends with the next steps.
+- The README, the docs and the site lead with "Your documents, compiled. Every
+  claim cited." and one three-step quick start: install, open the vault in
+  Obsidian, import a document and ask your agent. The model reference moved
+  from the README to [docs/operations.md](docs/operations.md). The docs no
+  longer name a default provider or a local proxy endpoint, give one answer for
+  the Python version (3.12), the service command (`service install
+  --maintenance`), Tesseract (Homebrew, apt, dnf or pacman) and what
+  `preflight` checks, and say that journal entries are indexed and searchable,
+  with journal compilation planned for v1.3. Sync is described as advanced and
+  optional.
+- The landing page's link-card images (`site/og.png`, `site/og-uk.png`) show
+  `rundax.github.io/lifecontext` and the new hero;
+  `scripts/render_social_images.py` renders them and the 1280x640 GitHub
+  social preview (`.github/social-preview.png`) from text. `pages.yml` is
+  started by the release checklist, not by `release.yml`.
+- Releases: a final release stays a draft, like a pre-release, until it is
+  qualified and published by hand (`release.yml` has no publish job, and its
+  notes mention the container image only for a final). `qualify.yml` takes
+  `provider` and `model` inputs (Anthropic runs with no base URL and its own
+  key), checks the installer with a wrong and a working key, and its public-URL
+  job installs anonymously from the release's own `install.sh` and pulls and
+  verifies the image. [docs/development.md](docs/development.md) lists the
+  release steps.
 - Agents on another machine can use LifeContext over SSH through the same
   `lifecontext` command and skill: `bin/lifecontext-remote` (set
   `LIFECONTEXT_REMOTE` to an ssh destination; link it as `lifecontext`) talks
@@ -22,9 +70,8 @@
 - `lifecontext llm show` and `llm set [--provider] [--model] [--base-url]
   [--api-key-stdin]` print and change the model endpoint without touching other
   settings or printing the key, and restart the user service when it runs.
-  `install.sh` asks for the endpoint in a terminal (default
-  `openai_compatible` at `http://127.0.0.1:8317/v1`, hidden key that may stay
-  empty) and installs Tesseract with `pacman` on Arch Linux.
+  `install.sh` asks for the provider, model and key in a terminal (hidden key
+  input) and installs Tesseract with `pacman` on Arch Linux.
 - `docker/livesync/` ships a CouchDB hub for Obsidian Self-hosted LiveSync
   (image pinned by digest, `127.0.0.1` only, `require_valid_user`) and
   `init-couchdb.sh`; [docs/sync.md](docs/sync.md) describes the setup with
