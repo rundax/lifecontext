@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pillow==12.3.0"]  # the version pyproject.toml pins
+# dependencies = ["pillow==13.0.0"]  # the version pyproject.toml pins
 # ///
 """Render the landing page's link-card images and the GitHub social preview.
 

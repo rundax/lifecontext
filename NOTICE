@@ -63,7 +63,7 @@ fastapi 0.141.1             MIT
 google-genai 2.22.0         Apache-2.0
 openai 2.54.0               Apache-2.0
 openpyxl 3.1.5              MIT
-Pillow 12.3.0               MIT-CMU
+Pillow 13.0.0               MIT-CMU
 pydantic 2.13.5             MIT
 pypdf 6.19.0                BSD-3-Clause
 pypdfium2 5.14.0            BSD-3-Clause, Apache-2.0 (bundles PDFium)

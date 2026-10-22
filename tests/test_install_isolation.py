@@ -145,7 +145,7 @@ class InstallIsolationTests(unittest.TestCase):
                     "python-docx==1.2.0",
                     "openpyxl==3.1.5",
                     "python-pptx==1.0.2",
-                    "Pillow==12.3.0",
+                    "Pillow==13.0.0",
                     "defusedxml==0.7.1",
                     "anthropic==1.4.0",
                     "openai==2.54.0",
