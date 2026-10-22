@@ -11,9 +11,10 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from lifecontext.hindsight import PROBE_CAUSES, model_probe, probe_cause
+from lifecontext import hindsight
+from lifecontext.hindsight import PROBE_CAUSES, model_probe, probe_cause, probe_failure
 
 KEY = "sk-probe-private-key-0123456789"
 # What a provider puts in an error: the raw message, often with a masked key.
@@ -55,11 +56,14 @@ class _Handler(BaseHTTPRequestHandler):
             step = None
         status, answer = step if step is not None else (200, self._answer(body))
         data = json.dumps(answer).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the probe stopped waiting
 
     def _answer(self, body: dict) -> dict:
         usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -138,6 +142,10 @@ class ModelProbeTests(unittest.TestCase):
             ([_error(404)], "model_not_found"),
             ([_error(400, f"response_format json_schema is not supported {LEAK}")], "structured_output_unsupported"),
             ([_error(400, f"tool_choice is not supported {LEAK}")], "structured_output_unsupported"),
+            # OpenRouter answers a parameter no endpoint supports with 404.
+            ([_error(404, f"No endpoints found that support the provided 'tool_choice' value {LEAK}")],
+             "structured_output_unsupported"),
+            ([_error(400, f"JSON mode is not enabled for this model {LEAK}")], "structured_output_unsupported"),
             ([_error(400)], "failed"),
             ([_error(500)], "failed"),
             ([(200, {"choices": [{"index": 0, "finish_reason": "stop",
@@ -165,6 +173,22 @@ class ModelProbeTests(unittest.TestCase):
         self.assertEqual(self.probe(_error(429), _error(429))["cause"], "rate_limited")
         self.assertEqual(len(self.server.requests), 2)
 
+    def test_a_rate_limit_whose_retry_runs_out_of_time_stays_a_rate_limit(self) -> None:
+        self.assertEqual(self.probe(_error(429), 3.0, timeout=2.5)["cause"], "rate_limited")
+
+    def test_both_checks_share_one_budget(self) -> None:
+        started = time.monotonic()
+        with patch.object(hindsight, "_REFLECT_MINIMUM_SECONDS", 0.5):
+            result = self.probe(1.2, 3.0, timeout=2.5)
+        self.assertLess(time.monotonic() - started, 2.9)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual((result["reflect"]["status"], result["reflect"]["cause"]), ("warn", "unreachable"))
+        # Too little time left for the reflect check: skipped, not sent.
+        self.server.requests.clear()
+        result = self.probe(1.2, timeout=2.5)
+        self.assertEqual((result["status"], result["reflect"]), ("pass", {"status": "skipped"}))
+        self.assertEqual(len(self.server.requests), 1)
+
     def test_an_endpoint_that_does_not_answer(self) -> None:
         with socket.socket() as unused:
             unused.bind(("127.0.0.1", 0))
@@ -189,9 +213,22 @@ class ModelProbeTests(unittest.TestCase):
         # Hindsight 0.9.2's Anthropic adapter sends tools without a tool_choice; the probe sends what reflect does.
         self.assertEqual([tool["name"] for tool in reflect["body"]["tools"]], ["record_answer"])
         self.server.requests.clear()
-        result = self.probe((401, {"type": "error", "error": {"type": "authentication_error", "message": LEAK}}),
-                            provider="anthropic")
-        self.assertEqual(result["cause"], "key_rejected")
+        for script, cause in (
+            ([(401, {"type": "error", "error": {"type": "authentication_error", "message": LEAK}})], "key_rejected"),
+            ([(404, {"type": "error", "error": {"type": "not_found_error", "message": LEAK}})], "model_not_found"),
+            ([(429, {"type": "error", "error": {"type": "rate_limit_error", "message": LEAK}})] * 2, "rate_limited"),
+        ):
+            with self.subTest(cause=cause):
+                self.assertEqual(self.probe(*script, provider="anthropic")["cause"], cause)
+
+    def test_a_provider_endpoint_that_does_not_answer_suggests_the_network_not_a_url(self) -> None:
+        settings = {"llm": {"provider": "anthropic", "model": "claude-sonnet-5"}}
+        with patch("lifecontext.hindsight.load_credentials", return_value=CREDENTIALS), \
+                patch("lifecontext.hindsight._model_probe", return_value=probe_failure("unreachable")):
+            result = model_probe(settings)
+        self.assertEqual((result["cause"], result["message"]), ("unreachable", "the endpoint did not answer"))
+        self.assertNotIn("--base-url", result["fix"])
+        self.assertIn("--base-url", self.probe(port=1)["fix"])
 
     def test_no_key_and_bad_settings_fail_without_a_request(self) -> None:
         settings = {"llm": {"provider": "openai", "model": "gpt-test"}}
@@ -223,6 +260,21 @@ class ProbeCauseTests(unittest.TestCase):
             self.assertEqual(probe_cause(outer), "rate_limited")
         self.assertEqual(probe_cause(TimeoutError()), "unreachable")
         self.assertEqual(probe_cause(ConnectionRefusedError()), "unreachable")
+        self.assertEqual(probe_cause(GenaiError(400, "JSON mode is not enabled for models/x")),
+                         "structured_output_unsupported")
+
+    def test_connection_failures_of_aiohttp_which_google_genai_uses(self) -> None:
+        import aiohttp
+
+        try:
+            try:
+                raise socket.gaierror(-3, "Temporary failure in name resolution")
+            except socket.gaierror as dns:
+                raise aiohttp.ClientConnectorError(Mock(), dns) from dns
+        except aiohttp.ClientConnectorError as error:
+            self.assertEqual(probe_cause(error), "unreachable")
+        self.assertEqual(probe_cause(aiohttp.ServerDisconnectedError()), "unreachable")
+        self.assertEqual(probe_cause(socket.gaierror(-2, "Name or service not known")), "unreachable")
         self.assertEqual(probe_cause(ValueError("something else")), "failed")
 
 
