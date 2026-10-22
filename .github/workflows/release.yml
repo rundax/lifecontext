@@ -206,8 +206,8 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
-          prerelease=()
-          if [ "$PRERELEASE" = true ]; then prerelease=(--prerelease); fi
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags=(--prerelease); fi
           {
             echo "LifeContext $VERSION, source-available under the Business Source License 1.1."
             echo
@@ -220,5 +220,5 @@ jobs:
             echo "Verify: [docs/install.md](https://github.com/rundax/lifecontext/blob/$GITHUB_REF_NAME/docs/install.md#verifying-a-release)."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"
+            --title "LifeContext $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
 
