@@ -86,6 +86,40 @@ class DocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(by_version[f"src:{sid}:v1"]), 1)
         self.assertEqual(len(self.provider.scope_tags), len(self.provider.calls))
 
+    async def test_an_unknown_declared_type_is_guessed_from_the_filename(self):
+        cases = (("notes.csv", "application/octet-stream", "text/csv"),
+                 ("notes.txt", None, "text/plain"),
+                 ("notes.txt", "text/x-custom", "text/x-custom"),
+                 ("notes", "application/octet-stream", "application/octet-stream"))
+        for index, (filename, declared, expected) in enumerate(cases):
+            with self.subTest(filename=filename, declared=declared):
+                result = await self.service.import_document(
+                    b"hello world", filename, declared, {}, f"mime-{index}"
+                )
+                document = result["document"]
+                metadata = self.catalog.get_document_metadata(document["source_id"], document["source_version"])
+                self.assertEqual(metadata["mime_type"], expected)
+
+    async def test_documents_stored_as_octet_stream_replay_and_restore_unchanged(self):
+        import mimetypes
+        from unittest.mock import patch
+
+        # What earlier releases stored for an import without --mime.
+        with patch.object(mimetypes, "guess_type", return_value=(None, None)):
+            first = await self.service.import_document(b"hello world", "notes.txt", "application/octet-stream", {}, "legacy")
+        sid, version = first["document"]["source_id"], first["document"]["source_version"]
+        self.assertEqual(self.catalog.get_document_metadata(sid, version)["mime_type"], "application/octet-stream")
+        # The same key replays to the same operation instead of conflicting.
+        replay = await self.service.import_document(b"hello world", "notes.txt", "application/octet-stream", {}, "legacy")
+        self.assertEqual(replay["operation_id"], first["operation_id"])
+        # A bundle restore re-imports the version with its recorded type.
+        restored = await self.service.import_document(
+            b"hello world", "notes.txt", "application/octet-stream", {}, "bundle-restore",
+            source_id=sid, source_version=version, _allow_existing=True,
+        )
+        self.assertEqual(restored["state"], "completed")
+        self.assertEqual(self.catalog.get_document_metadata(sid, version)["mime_type"], "application/octet-stream")
+
     async def test_invalid_replacement_has_no_custody_effects(self):
         manifest = self.custody.write_version("journal_fixture", 1, b"Journal", provenance={})
         self.catalog.register_manifest(manifest)

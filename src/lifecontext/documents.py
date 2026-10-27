@@ -103,11 +103,13 @@ class DocumentService:
             self.limits.max_original_bytes, self.custody.max_bytes
         ):
             raise CatalogError("invalid document bytes or size")
-        mime = (
-            declared_mime
-            or mimetypes.guess_type(filename)[0]
-            or "application/octet-stream"
-        )
+        guessed = mimetypes.guess_type(filename)[0] if isinstance(filename, str) else None
+        # The request digest keeps the type earlier releases recorded, so an existing
+        # import key or a bundle restore keeps its identity.
+        declared = declared_mime or guessed or "application/octet-stream"
+        # Clients send application/octet-stream when they do not know the type (the
+        # CLI and API defaults); the filename says more.
+        mime = guessed if declared == "application/octet-stream" and guessed else declared
         if (
             not isinstance(filename, str)
             or not filename
@@ -117,10 +119,11 @@ class DocumentService:
             or len(filename.encode()) > 255
         ):
             raise CatalogError("invalid document filename")
-        if (
-            not isinstance(mime, str)
-            or len(mime.encode()) > 255
-            or not re.fullmatch(r"[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*", mime)
+        if any(
+            not isinstance(value, str)
+            or len(value.encode()) > 255
+            or not re.fullmatch(r"[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*", value)
+            for value in (declared, mime)
         ):
             raise CatalogError("invalid document MIME")
         if (source_id is None) != (source_version is None):
@@ -139,7 +142,7 @@ class DocumentService:
             "sha256": checksum,
             "size_bytes": len(original_bytes),
             "filename": filename,
-            "mime_type": mime,
+            "mime_type": declared,
             "title": title,
             "provenance": manifest.to_dict()["provenance"],
             "source_id": source_id,
@@ -190,6 +193,9 @@ class DocumentService:
                 **({"vision": False} if not vision else {}),
                 "request_digest": digest,
             }
+            # A version already on record (a bundle restore) keeps the type it has.
+            existing = self.catalog.get_document_metadata(identity, version) if source_id is not None else None
+            intent["mime_type"] = existing["mime_type"] if existing else mime
             operation = self.catalog.set_operation_intent(
                 operation["operation_id"], self._envelope(intent)
             )
