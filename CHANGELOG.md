@@ -297,6 +297,22 @@
   cover vision reading and its capability probe.
 - Very long extraction ledgers are compacted into page lists and ranges so a
   large illustrated document stays within the catalog's 1000-entry bound.
+- Garbled OCR text is flagged (`ocr_text_suspect:N`): Latin and Cyrillic
+  look-alikes inside words, or words that alternate scripts in a PDF whose
+  text layer up to that page is almost all Latin, as English headings and
+  figure labels do when read with Cyrillic language data. The text is kept,
+  listed under "Not read" in the source note, and settled by a vision
+  reading. Ukrainian scans and scan-only bilingual forms are not flagged; a
+  bilingual form after English text pages can be. Extraction revisions made
+  after this change have a new `config_identity`.
+- The source note's coverage line ends with "; N pages with unread parts"
+  (each page counted once) or "; complete".
+- A document's own wiki page no longer quotes copyright notices, ISBNs or
+  "all rights reserved" lines; a document that is all front matter keeps one.
+- `documents import` without `--mime`, and API clients that send
+  `application/octet-stream`, get the stored type guessed from the filename, so
+  a PDF is recorded as `application/pdf`. Earlier import keys and bundle
+  restores of documents stored as octet-stream are unaffected.
 
 - Name every journal entry `YYYY-MM-DD - Title`. The date now also comes from
   a date line among the entry's opening lines
