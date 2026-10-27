@@ -18,6 +18,7 @@ from lifecontext.custody import SourceManifest
 from lifecontext.derived import DerivedStore
 from lifecontext.paths import LifeContextPaths
 from lifecontext.wiki import (
+    COMPILE_INSTRUCTIONS,
     MAX_PAGE_CLAIMS,
     MAX_PATCH_BYTES,
     MAX_SOURCE_CLAIMS,
@@ -492,6 +493,75 @@ class WikiTests(unittest.TestCase):
         self.assertEqual(keys, [{"target", "example_patch", "evidence"}] * 40 + [{"document", "claims"}, {"document", "claims", "pages", "existing_claims"}])
         self.assertEqual({c.citations[0].passage_start for c in patch.claims}, set(range(40)))
 
+    def windowed(self, texts):
+        """Store one passage per window, and answer each window with its first 20 characters."""
+        segments, offset = [], 0
+        for index, text in enumerate(texts):
+            text = text + " " + "x" * 22_000
+            segments.append({"text": text, "start": offset, "end": offset + len(text),
+                             "locator": {"kind": "lines", "start": index + 1, "end": index + 1,
+                                         "container": None, "schema_version": 1}})
+            offset += len(text)
+        stored = self.derived.write("doc_1", 1, 2, {**self.payload, "extraction_revision": 2, "segments": segments})
+        self.catalog.record_extraction("doc_1", 1, 2, original_sha256=self.digest, extractor="text",
+                                      extractor_version="1", config_sha256="c" * 64,
+                                      artifact_path=str(stored.path.relative_to(self.paths.lifeweave_home)),
+                                      artifact_sha256=stored.sha256, status="completed", passage_count=len(texts))
+        self.catalog.record_provider_chunk("chunk_book", "doc_1", 1, 2, passage_start=0, passage_end=len(texts), content_sha256="b" * 64)
+        self.catalog.update_provider_chunk("chunk_book", expected_revision=1, submission_state="submitted", completion_state="completed")
+
+        async def reflect(query, **kwargs):
+            data = json.loads(query.split("UNTRUSTED_DATA=", 1)[1])
+            if "evidence" not in data:
+                return {"text": "{}"}
+            segment = data["evidence"]["segments"][0]
+            quote = segment["text"][:20]
+            citation = {**self.citation, "extraction_revision": 2, "passage_start": segment["passage_index"],
+                        "passage_end": segment["passage_index"] + 1, "quote": quote}
+            return {"text": json.dumps({**self.value, "claims": [{"text": quote, "citations": [citation]}]})}
+        self.service.hindsight = SimpleNamespace(reflect=reflect)
+
+    def test_front_matter_claims_are_dropped_unless_nothing_else_remains(self):
+        self.windowed(["Copyright © 2021 by Alex", "Profit is oxygen for it", "ISBN 978-1-7374757-0-5"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["Profit is oxygen for"])
+        self.assertIn("never a copyright notice, ISBN or publisher line", COMPILE_INSTRUCTIONS)
+
+    def test_prose_about_publishing_or_copyright_law_stays_on_the_page(self):
+        self.windowed(["The study was published by WHO", "A guide to copyright law"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["The study was publis", "A guide to copyright"])
+
+    def test_a_front_matter_window_with_a_contradiction_keeps_its_claims(self):
+        self.windowed(["Copyright © 2021 by Alex", "Copyright © 2019 by Alex"])
+        inner = self.service.hindsight.reflect
+
+        async def reflect(query, **kwargs):
+            reply = await inner(query, **kwargs)
+            if "evidence" not in json.loads(query.split("UNTRUSTED_DATA=", 1)[1]):
+                return reply
+            value = json.loads(reply["text"])
+            claim = value["claims"][0]
+            value["contradictions"] = [{"left": claim, "right": claim, "left_date": "2021-01-01", "right_date": "2019-01-01"}]
+            return {"text": json.dumps(value)}
+        self.service.hindsight = SimpleNamespace(reflect=reflect)
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertTrue(patch.claims)
+        self.assertTrue(patch.contradictions)
+
+    def test_a_document_of_only_front_matter_keeps_its_first_claim(self):
+        self.windowed(["Copyright © 2021 by Alex", "All rights reserved here"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["Copyright © 2021 by "])
+
     def book(self, passages, size=22_000):
         segments, offset = [], 0
         for index in range(passages):
@@ -897,12 +967,14 @@ class WikiTests(unittest.TestCase):
                       "claims": [{"text": "© 2021 Видавництво «Знання».", "citations": [citation]},
                                  {"text": "Небо синє.", "citations": [citation]}]}
         asyncio.run(self.service.update_for_document("doc_2", 1))
+        # The copyright line never reaches the page, so the index cannot pick it either.
+        self.assertEqual([claim.text for claim in self.current(second).claims], ["Небо синє."])
         index = self.current("index")
         self.assertEqual([claim.text for claim in index.claims], ["Небо синє."])
         self.assertEqual(index.summary, ())
         managed = self.service.show("index")["managed"]
         self.assertIn(f"1. Original ({second}) — Небо синє. [doc_2 v1/e1 passages 0:1]", managed)
-        self.summary = [{"text": "Книга про колір неба.", "claims": [2]}, {"text": "Друге речення.", "claims": [1]}]
+        self.summary = [{"text": "Книга про колір неба.", "claims": [1]}, {"text": "Друге речення.", "claims": [1]}]
         self.value["expected_revision"] = 1
         asyncio.run(self.service.update_for_document("doc_2", 1))
         index = self.current("index")

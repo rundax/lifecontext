@@ -567,6 +567,18 @@ def _boilerplate(text: str) -> bool:
     return bool(_BOILERPLATE.search(text))
 
 
+# Only the unmistakable notices: a page drops these claims, so prose that mentions a
+# publisher, a printer or copyright law must not match.
+_FRONT_MATTER = re.compile(
+    r"©|\(c\)\s*\d{4}|\bcopyright\s+(?:©|\(c\)|\d{4})|\bisbn\b|all rights reserved"
+    r"|\bусі права захищені|\bвсі права захищені|\bвсе права защищены",
+    re.IGNORECASE)
+
+
+def _front_matter(text: str) -> bool:
+    return bool(_FRONT_MATTER.search(text))
+
+
 SUMMARY_INSTRUCTIONS = (
     "Summarize one document's wiki page from its numbered claims. Every claim is a literal quote already checked "
     "against the document. Return only a JSON object {\"summary\":[{\"text\":\"...\",\"claims\":[1,2]}]} with one to "
@@ -586,7 +598,8 @@ COMPILE_INSTRUCTIONS = (
     "windows. Every claim text must be a literal substring of one cited quote; paraphrased unsupported prose is "
     "rejected. Claims require text and citations (source_id,source_version,extraction_revision,passage_start,"
     "passage_end,original_sha256,quote). Use example_patch for the exact JSON structure and source identity; select a "
-    "meaningful short quote from the evidence, not merely the example text. Leave links empty: links between pages "
+    "meaningful short quote about the document's content from the evidence, not merely the example text and never a "
+    "copyright notice, ISBN or publisher line. Leave links empty: links between pages "
     "are computed later. Use an empty array for contradictions when none apply. Use each segment's GLOBAL "
     "passage_index, not its position in the window; passage_end is exclusive. A long segment may appear as multiple "
     "text fragments with the same global passage_index. Contradictions require left/right claims and "
@@ -1651,7 +1664,7 @@ class WikiService:
                 # Each compile replaces this document's claims; nothing accumulates.
                 previous = replace(previous, claims=tuple(c for c in previous.claims if not _cites(c, source_id)))
             budget = min(24_000, MAX_QUERY_BYTES - len(COMPILE_INSTRUCTIONS.encode()) - len(_canonical(target).encode()) - 4000)
-            merged = None
+            merged = fallback = None
             for window in _sample(list(self._evidence_windows(evidence, budget)), MAX_SOURCE_CLAIMS):
                 window_count += 1
                 segment = window["segments"][0]
@@ -1664,12 +1677,21 @@ class WikiService:
                 query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "example_patch": example, "evidence": window},
                                                           ensure_ascii=False, separators=(",", ":"))
                 patch = await self._compile_window(query, target, source_id, version, extraction_revision)
+                substantive = tuple(claim for claim in patch.claims if not _front_matter(claim.text))
+                if substantive:
+                    patch = replace(patch, claims=substantive)
+                elif not patch.contradictions:
+                    # A front-matter window gave only a copyright or ISBN line; it is
+                    # kept only if no window yields anything else.
+                    fallback = fallback or patch
+                    continue
                 combined = patch if merged is None else self._combine(merged, patch)
                 if len(combined.claims) > MAX_PAGE_CLAIMS or len(_patch_json(combined).encode()) > MAX_PATCH_BYTES:
                     # Claims fill the page: keep what fits and stop asking the model.
                     logging.getLogger(__name__).warning("Wiki page %s full after evidence window %s", own_id, window_count)
                     break
                 merged = combined
+            merged = merged or fallback
             if merged is None:
                 raise WikiError("wiki evidence window limit")
             patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id, MAX_SOURCE_CLAIMS)
