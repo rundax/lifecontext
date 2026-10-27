@@ -75,14 +75,22 @@ def _segment_heading(locator):
 
 def _readable_extraction(payload):
     """Render the extraction as headed sections with a coverage summary first."""
-    from .extraction import coverage_summary, ledger_items
+    from .extraction import PARTIAL_CODES, coverage_summary, ledger_items
 
     coverage = coverage_summary(payload)
     lines = [""]
     if coverage["unit"]:
+        # Resolved pages can still have unread figures or garbled text; count each page once.
+        partly = {item for warning in payload.get("warnings", ())
+                  for code, items, _ in (ledger_items(warning),) if code in PARTIAL_CODES
+                  for item in items if item.isdigit()}
+        noun = coverage["unit"] + ("" if len(partly) == 1 else "s")
+        state = (f"; {len(partly)} {noun} with unread parts" if partly
+                 else "; some content not read" if coverage["partial"]
+                 else "; complete" if coverage["complete"] else "")
         lines.append(f"Coverage: {coverage['resolved']} of {coverage['total']} {coverage['unit']}s resolved "
                      f"({coverage['text']} text layer, {coverage['ocr']} OCR, {coverage['vision']} model-read, "
-                     f"{coverage['blank']} blank)")
+                     f"{coverage['blank']} blank){state}")
     else:
         lines.append("Coverage: " + ("complete" if coverage["complete"] else "some content was not read"))
     unread = []

@@ -663,7 +663,7 @@ class ReadableSourceNoteTests(unittest.TestCase):
             _readable_extraction(payload),
             [
                 "",
-                "Coverage: 3 of 3 pages resolved (1 text layer, 0 OCR, 1 model-read, 1 blank)",
+                "Coverage: 3 of 3 pages resolved (1 text layer, 0 OCR, 1 model-read, 1 blank); 1 page with unread parts",
                 "", "## Not read", "", "- page 1: images or drawings not read",
                 "", "## Page 1", "", "First page",
                 "", "## Page 2", "", "[Model-read page 2 by m; verify against the original]\nNotes",
@@ -681,6 +681,34 @@ class ReadableSourceNoteTests(unittest.TestCase):
             "warnings": ["ocr_frame:1; OCR may contain errors", "ocr_text_suspect:1; the OCR text may be garbled"],
         })
         self.assertIn("- frame 1: OCR text may be garbled", frames)
+        complete = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "Only page\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": [],
+        })
+        self.assertEqual(complete[1], "Coverage: 1 of 1 pages resolved (1 text layer, 0 OCR, 0 model-read, 0 blank); complete")
+        unresolved = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "First\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["ocr_no_text_page:2; page content unresolved"],
+        })
+        self.assertEqual(unresolved[1], "Coverage: 1 of 2 pages resolved (1 text layer, 0 OCR, 0 model-read, 0 blank)")
+        # One page with three kinds of partial entry, and a compacted range, count once per page.
+        partial = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": f"Page {n}\n", "locator": {"kind": "page", "start": n, "end": n, "container": None}}
+                         for n in range(1, 6)],
+            "warnings": ["figure_not_read:1; images or drawings on this page were not read",
+                         "text_layer_suspect:1; the text layer may be garbled",
+                         "figure_not_read:3-5; images or drawings on this page were not read"],
+        })
+        self.assertTrue(partial[1].endswith("; 4 pages with unread parts"), partial[1])
+        document_level = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "Only\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["figure_check_unavailable; pages could not be rendered or checked for images"],
+        })
+        self.assertTrue(document_level[1].endswith("; some content not read"), document_level[1])
 
 
 class IndexProjectionTests(unittest.TestCase):
