@@ -95,6 +95,7 @@ additional worker/resource limits. Inspect `documents show.extraction_warnings`:
 | `ocr_no_text_page:N`, `ocr_failed_page:N; <reason>`, `ocr_unavailable_page:N` (and `_frame` forms) | Page N remains unresolved; never treat it as read. |
 | `figure_not_read:N` | Page N's text was read, but its images or drawings were not. |
 | `text_layer_suspect:N` | Page N's text layer may be garbled (broken glyphs, mixed scripts). |
+| `ocr_text_suspect:N` | Page or frame N was OCR'd, but the result looks garbled: Latin and Cyrillic look-alikes inside words, or words that alternate scripts in a PDF whose text layer up to that page is almost all Latin (a genuine bilingual form there is flagged too). The text is kept but not trusted; a vision reading settles it. |
 | `embedded_image_not_read:picture:N`, `chart_not_read:...` | A picture or chart in a DOCX, PPTX or XLSX was not read. |
 | `vision_page:N`, `vision_figure:N`, `vision_frame:N`, `vision_picture:N` | The owner's vision model read the item. Its text starts with a `[Model-read ...; verify against the original]` label. |
 | `vision_skipped:...`, `vision_refused:...`, `vision_failed:...`, `vision_blocked; <code>` | Vision was configured but did not read the item; the original warning stays. |

@@ -898,8 +898,12 @@ tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr`). The Python
 image and PDF rendering support. Check `tesseract --version` and
 `tesseract --list-langs`; the current extraction command uses Tesseract's
 installed English/Russian/Ukrainian language data (`tesseract-ocr-rus` and
-`tesseract-ocr-ukr` provide the latter two). Restart `lifecontext serve` after
-installation because executable availability is discovered at startup.
+`tesseract-ocr-ukr` provide the latter two). OCR text with Latin and Cyrillic
+look-alikes inside words, or with words that alternate scripts in a PDF whose
+text layer up to that page is almost all Latin, is kept but flagged
+`ocr_text_suspect`. Restart
+`lifecontext serve` after installation because executable availability is
+discovered at startup.
 Native PDF text is preferred; blank-text PDF pages and images use local OCR.
 
 Use `lifecontext wiki rebuild --source-id SOURCE_ID --version VERSION

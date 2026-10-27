@@ -675,6 +675,12 @@ class ReadableSourceNoteTests(unittest.TestCase):
             "warnings": [],
         })
         self.assertEqual(sheet[-3:], ["## Sheet Budget", "", "A1: Salary"])
+        frames = _readable_extraction({
+            "format": "tiff",
+            "segments": [{"text": "Зестон How\n", "locator": {"kind": "image", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["ocr_frame:1; OCR may contain errors", "ocr_text_suspect:1; the OCR text may be garbled"],
+        })
+        self.assertIn("- frame 1: OCR text may be garbled", frames)
 
 
 class IndexProjectionTests(unittest.TestCase):

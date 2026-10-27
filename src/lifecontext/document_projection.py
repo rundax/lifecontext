@@ -41,6 +41,7 @@ _UNREAD = {
     "ocr_unavailable_frame": "needs OCR, which is not installed",
     "figure_not_read": "images or drawings not read",
     "text_layer_suspect": "text layer may be garbled",
+    "ocr_text_suspect": "OCR text may be garbled",
     "embedded_image_not_read": "picture not read",
     "chart_not_read": "chart not read",
     "figure_check_unavailable": "pages could not be checked for images",
@@ -89,9 +90,11 @@ def _readable_extraction(payload):
         code, items, _ = ledger_items(warning)
         if code not in _UNREAD:
             continue
+        # Unit-neutral codes (ocr_text_suspect) take the document's unit.
+        unit = "frame" if code.endswith("_frame") else "page" if code.endswith("_page") else coverage["unit"] or "page"
         for item in items or ["document"]:
             if item.isdigit():
-                item = ("frame " if code.endswith("_frame") else "page ") + item
+                item = f"{unit} {item}"
             unread.append(f"- {item.replace(':', ' ', 1)}: {_UNREAD[code]}")
     if unread:
         lines.extend(["", "## Not read", "", *unread])
