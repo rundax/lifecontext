@@ -221,6 +221,39 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "data", path)
 
 
+class FetchReleaseTests(unittest.TestCase):
+    """fetch_release with curl stubbed: a release that does not exist is named, with where to look."""
+
+    def run_fetch(self, head_status: str) -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-fetch-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        stubs = root / "stubs"
+        stubs.mkdir()
+        # The download fails as curl -f does on an HTTP error; the HEAD request reports the status.
+        _stub(stubs / "curl", 'for argument in "$@"; do [ "$argument" = -I ] && { printf %s '
+              f'"{head_status}"; exit 0; }}; done\necho "curl: (22) The requested URL returned error" >&2\nexit 22\n')
+        harness = root / "harness.sh"
+        harness.write_text(f'set -eu\nREPOSITORY="rundax/lifecontext"\nversion=9.9.9\nplatform=linux-x86_64\n'
+                           f'tmp="{root}"\n' + _functions("say", "warn", "die", "download", "download_failed",
+                                                           "fetch_release") + "\nfetch_release\n")
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": f"{stubs}:{os.defpath}"}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_a_missing_release_says_where_the_releases_are(self) -> None:
+        result = self.run_fetch("404")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error: release v9.9.9 not found; see https://github.com/rundax/lifecontext/releases "
+                      "or pass --version\n", result.stderr)
+
+    def test_another_download_failure_names_the_file(self) -> None:
+        result = self.run_fetch("503")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not download SHA256SUMS from github.com/rundax/lifecontext", result.stderr)
+        self.assertNotIn("not found", result.stderr)
+
+
 class InstallOcrTests(unittest.TestCase):
     """install_ocr on a system whose only package manager is pacman, with every command stubbed."""
 
