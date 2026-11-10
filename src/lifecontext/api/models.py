@@ -271,6 +271,8 @@ class VaultReadiness(APIModel):
     ready: bool
     permissions: bool
     error: Literal["unsafe_path", "unsafe_permissions", "vault_unavailable"] | None = None
+    # Vault-relative path of the last file or folder refused on disk; never in an error body.
+    refused_path: str | None = Field(default=None, max_length=4096)
 
 
 class CatalogReadiness(APIModel):

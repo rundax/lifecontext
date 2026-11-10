@@ -8,10 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lifecontext.api.models import StatusResponse
 from lifecontext.application import JournalApplication
 from lifecontext.hindsight_adapter import LifeContextHindsightAdapter
 from lifecontext.paths import LifeContextPaths
-from lifecontext.vault import ManagedVault
+from lifecontext.vault import ManagedVault, VaultError
 from local_paths import scratch_root
 from test_application import ControlledClient
 
@@ -70,6 +71,37 @@ class VaultReadinessTests(unittest.TestCase):
                     folder.chmod(0o700)
                 self.assertFalse(vault["ready"])
                 self.assertEqual(vault["error"], "unsafe_permissions")
+                self.assertEqual(vault["refused_path"], "." if folder == self.vault_root else "Journal")
+
+    def test_status_names_a_refused_file_until_a_write_to_it_succeeds(self) -> None:
+        outside = self.base / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        (self.wiki / "Lease.md").symlink_to(outside)
+        with self.assertRaises(VaultError) as raised:
+            self.vault.safe_write_bytes("wiki/Lease.md", b"page", expected_hash=None, artifact_id="page")
+        self.assertEqual((raised.exception.code, str(raised.exception)), ("unsafe_path", "unsafe_path"))
+        self.assertEqual(raised.exception.path, "Journal/wiki/Lease.md")
+
+        vault = self.app.readiness()["dependencies"]["vault"]
+        self.assertTrue(vault["ready"])
+        self.assertEqual(vault["refused_path"], "Journal/wiki/Lease.md")
+        self.assertNotIn(str(self.base), repr(vault))
+        StatusResponse.model_validate(self.app.readiness())
+
+        # A write elsewhere does not clear it; a successful write to that path does.
+        self.vault.safe_write_bytes("wiki/Other.md", b"other", expected_hash=None, artifact_id="other")
+        self.assertEqual(self.app.readiness()["dependencies"]["vault"]["refused_path"], "Journal/wiki/Lease.md")
+        (self.wiki / "Lease.md").unlink()
+        self.vault.safe_write_bytes("wiki/Lease.md", b"page", expected_hash=None, artifact_id="page")
+        self.assertIsNone(self.app.readiness()["dependencies"]["vault"]["refused_path"])
+
+    def test_a_refused_request_is_not_named(self) -> None:
+        with self.assertRaises(VaultError) as raised:
+            self.vault.safe_write_text("../outside.md", "x")
+        self.assertIsNone(raised.exception.path)
+        with self.assertRaises(VaultError):
+            self.vault.safe_write_text(".obsidian/app.json", "x")
+        self.assertIsNone(self.app.readiness()["dependencies"]["vault"]["refused_path"])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import json
 import os
@@ -45,12 +46,26 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class VaultError(ValueError):
-    """Stable managed-vault failure without exposing filesystem contents."""
+    """Stable managed-vault failure without exposing filesystem contents.
+
+    ``path`` is the vault-relative path a check refused on disk, for ``status``
+    and ``doctor``; the API error body never carries it.
+    """
+
+    on_disk = False
+    path: str | None = None
 
     def __init__(self, code: str, *, retryable: bool = False):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+def _refused(code: str) -> VaultError:
+    """A refusal caused by what is on disk at a target's path (not by the request)."""
+    error = VaultError(code)
+    error.on_disk = True
+    return error
 
 
 def default_journal_paths(home: PathLike) -> tuple[Path, Path]:
@@ -219,12 +234,14 @@ def _read_target(parent_fd: int, name: str) -> tuple[int, os.stat_result, bytes]
         raise VaultError("not_found") from exc
     except OSError as exc:
         code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise VaultError(code) from exc
+        raise _refused(code) from exc
     try:
         info = _check_file_fd(descriptor)
         return descriptor, info, _read_fd(descriptor)
-    except Exception:
+    except Exception as exc:
         os.close(descriptor)
+        if isinstance(exc, VaultError):
+            exc.on_disk = True
         raise
 
 
@@ -232,13 +249,17 @@ def _open_subdirectory(parent_fd: int, name: str) -> int:
     """Open one folder below ``Journal`` without following a symlink, then check it."""
     try:
         descriptor = os.open(name, _directory_flags(), dir_fd=parent_fd)
+    except FileNotFoundError as exc:
+        raise VaultError("unsafe_path") from exc
     except OSError as exc:
         code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise VaultError(code) from exc
+        raise _refused(code) from exc
     try:
         _check_subdirectory_fd(descriptor)
-    except BaseException:
+    except BaseException as exc:
         os.close(descriptor)
+        if isinstance(exc, VaultError):
+            exc.on_disk = True
         raise
     return descriptor
 
@@ -381,6 +402,20 @@ class VaultWriterLock:
         return False
 
 
+def _names_refusals(to_path=lambda target: target):
+    """Record the vault-relative path of a target a check refused on disk."""
+
+    def decorate(method):
+        @functools.wraps(method)
+        def wrapper(self, target, *args, **kwargs):
+            with self._refusal_scope(to_path(target)):
+                return method(self, target, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
 class ManagedVault:
     """Pinned authority for writes below one disposable Journal directory."""
 
@@ -398,6 +433,10 @@ class ManagedVault:
         self._root_fd = -1
         self._journal_fd = -1
         self._closed = False
+        self._journal_prefix = journal_parts[len(root_parts) :]
+        # The last target refused on disk ({"path", "error"}), for status; cleared
+        # when a later call on the same path succeeds.
+        self.last_refusal: dict[str, str] | None = None
         self._transaction_lock = threading.RLock()
         self._transaction_state = threading.local()
         try:
@@ -455,9 +494,35 @@ class ManagedVault:
         exact path, so a stray file elsewhere never blocks a write.
         """
         self._ensure_open()
-        _check_directory_fd(self._root_fd)
-        _check_directory_fd(self._journal_fd)
+        for descriptor, path in ((self._root_fd, "."), (self._journal_fd, "/".join(self._journal_prefix))):
+            try:
+                _check_directory_fd(descriptor)
+            except VaultError as exc:
+                exc.path = path
+                raise
         return True
+
+    def _vault_relative(self, relative_path: PathLike) -> str | None:
+        try:
+            parts = _raw_relative(relative_path)
+        except VaultError:
+            return None
+        return "/".join((*self._journal_prefix, *parts))
+
+    @contextmanager
+    def _refusal_scope(self, relative_path: PathLike):
+        try:
+            yield
+        except VaultError as exc:
+            if exc.on_disk:
+                exc.path = self._vault_relative(relative_path)
+                if exc.path is not None:
+                    self.last_refusal = {"path": exc.path, "error": exc.code}
+            raise
+        else:
+            refusal = self.last_refusal
+            if refusal is not None and refusal["path"] == self._vault_relative(relative_path):
+                self.last_refusal = None
 
     def writer_lock(self, timeout: float = 10.0) -> AbstractContextManager:
         self._ensure_open()
@@ -593,6 +658,7 @@ class ManagedVault:
             fields[key.strip()] = value.strip().strip("'\"")
         return fields
 
+    @_names_refusals(lambda edge_id: f"relationships/{edge_id}.md")
     def safe_write_relationship_text(
         self,
         edge_id: str,
@@ -823,6 +889,7 @@ class ManagedVault:
         """Read catalog-addressed projection bytes, without Markdown ownership rules."""
         return self.read_artifact_identity(relative_path)[0]
 
+    @_names_refusals()
     def read_artifact_identity(self, relative_path: PathLike, *, staged_name=None):
         self._ensure_open()
         try:
@@ -844,6 +911,7 @@ class ManagedVault:
         finally:
             os.close(parent)
 
+    @_names_refusals()
     def safe_write_bytes(self, relative_path: PathLike, content: bytes, *,
                          expected_hash: str | None, artifact_id: str,
                          max_bytes: int = 64 * 1024 * 1024,
@@ -950,6 +1018,7 @@ class ManagedVault:
                             pass
                 os.close(parent)
 
+    @_names_refusals()
     def safe_remove_artifact(self, relative_path: PathLike, *, expected_hash: str,
                              artifact_id: str, allow_missing: bool = False,
                              expected_identity=None, staged_name=None) -> bool:
@@ -998,6 +1067,7 @@ class ManagedVault:
             finally:
                 os.close(parent)
 
+    @_names_refusals()
     def safe_write_text(
         self,
         relative_path: PathLike,
@@ -1137,6 +1207,7 @@ class ManagedVault:
                     pass
                 os.close(parent_fd)
 
+    @_names_refusals()
     def safe_remove_projection(
         self,
         relative_path: PathLike,
