@@ -58,7 +58,6 @@ from vision for good.
 - LifeContext sets `LITELLM_LOCAL_MODEL_COST_MAP=True` for the service and
   Hindsight, so the litellm library uses its bundled model price list instead of
   fetching one from raw.githubusercontent.com on every start.
-  <!-- verify at release -->
 - The embedded PostgreSQL is bundled in the `pg0` package and unpacked locally;
   it is not downloaded at run time.
 

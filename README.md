@@ -294,7 +294,6 @@ must run the same LiveSync release as the plugin on every device;
   model price list from raw.githubusercontent.com and a tokenizer table from
   openaipublic.blob.core.windows.net. LifeContext v1.2 turns both off once they
   are cached.
-  <!-- verify at release -->
 - No telemetry. The API listens on loopback only and requires its local token.
 
 Details, including what agents and vault sync do with your data:

@@ -244,8 +244,9 @@ GitHub Actions workflows live in `.github/workflows/`:
   restore. The native install must end with the three next steps. A
   `wrong_key` job installs with a key the provider rejects and expects exit 3,
   "the provider rejected the key" followed by its `lifecontext llm set` fix,
-  and no doctor problem. Both checks are recorded as skipped while `install.sh`
-  has no model probe (no `--skip-model-probe` option).
+  and no doctor problem. `install.sh` has the model probe, so both checks run;
+  they are recorded as skipped only for an older script without the
+  `--skip-model-probe` option.
   Every job takes the model from two inputs:
   - `-f provider=openai_compatible` (the default) goes through the CI gateway:
     repository secrets `LIFECONTEXT_CI_LLM_API_KEY` and
