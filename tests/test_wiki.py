@@ -875,7 +875,7 @@ class WikiTests(unittest.TestCase):
                          [{"n": 1, "text": "The sky is blue."}])
         managed = self.service.show(PAGE)["managed"]
         label = "> Model summary, generated from the numbered claims below; verify before relying on it."
-        self.assertIn(label + "\n>\n> The page says the sky is blue. [1]\n\n1. The sky is blue. [doc_1 v1/e1 passages 0:1]", managed)
+        self.assertIn(label + "\n>\n> The page says the sky is blue. [1]\n\n1. The sky is blue. [Original, line 1]", managed)
         self.assertEqual(self.service.status()["summary_model_generated"], True)
         self.assertFalse(self.service.status()["semantic_support_verified"])
         self.assertNotIn("summary_missing", self.lint_codes())
@@ -973,7 +973,7 @@ class WikiTests(unittest.TestCase):
         self.assertEqual([claim.text for claim in index.claims], ["Небо синє."])
         self.assertEqual(index.summary, ())
         managed = self.service.show("index")["managed"]
-        self.assertIn(f"1. Original ({second}) — Небо синє. [doc_2 v1/e1 passages 0:1]", managed)
+        self.assertIn(f"1. Original ({second}) — Небо синє. [Original, line 1]", managed)
         self.summary = [{"text": "Книга про колір неба.", "claims": [1]}, {"text": "Друге речення.", "claims": [1]}]
         self.value["expected_revision"] = 1
         asyncio.run(self.service.update_for_document("doc_2", 1))

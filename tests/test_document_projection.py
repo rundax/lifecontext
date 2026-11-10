@@ -521,8 +521,8 @@ raise AssertionError('kill point was not reached')
         self.assertIn("\nstate: current\n", text.split("---", 2)[1])
         self.assertNotIn(STALE_CALLOUT, text)
         self.assertIn("\n> [!note] Contradiction (2026-01-01 / 2026-02-01)\n"
-                      "> - The sky is blue. (doc_1 v1/e1 passages 0:1)\n"
-                      "> - sky is blue (doc_1 v1/e1 passages 0:1)\n", text)
+                      "> - The sky is blue. (Original, line 1)\n"
+                      "> - sky is blue (Original, line 1)\n", text)
         user = f"{USER_START}\nMy notes — kept byte for byte.\r\n<!-- life-context:user:end -->\n".encode()
         page.write_bytes(page.read_bytes().replace(f"{USER_START}\n\n<!-- life-context:user:end -->\n".encode(), user))
         fixture.catalog.mark_dependent_wiki_stale("doc_1", 1)
@@ -549,14 +549,14 @@ raise AssertionError('kill point was not reached')
                                                 desired_hash="a" * 64, state="projected", last_projected_hash="a" * 64)
         self.publish(fixture, source_page_id("doc_2"), "Grass", [{"text": "Grass is green.", "citations": [citation]}])
         self.publish(fixture, source_page_id("doc_1"), "Sky", [{"text": "The sky is blue.", "citations": [fixture.citation]}])
-        for page_id, line in ((source_page_id("doc_2"), "1. Grass is green. ([doc_2 v1/e1 passages 0:1](../documents/inbox/doc_2-v1.md#Page%203))"),
-                              (source_page_id("doc_1"), "1. The sky is blue. (doc_1 v1/e1 passages 0:1)")):
+        for page_id, line in ((source_page_id("doc_2"), "1. Grass is green. ([Grass, p. 3](../documents/inbox/doc_2-v1.md#Page%203))"),
+                              (source_page_id("doc_1"), "1. The sky is blue. (Sky, line 1)")):
             with self.subTest(page_id=page_id):
                 self.assertEqual(projection.project_wiki(page_id)["state"], "completed")
                 receipt = fixture.catalog.get_artifact_projection("wiki", page_id, 1)
                 self.assertIn("\n" + line + "\n", (self.journal / receipt["projection_path"]).read_text())
         # The plain text shown by the CLI and API keeps the bracketed citation.
-        self.assertIn("1. Grass is green. [doc_2 v1/e1 passages 0:1]", fixture.service.show(source_page_id("doc_2"))["managed"])
+        self.assertIn("1. Grass is green. [Grass, p. 3]", fixture.service.show(source_page_id("doc_2"))["managed"])
 
     def test_wiki_related_links_resolve_once_the_target_is_projected(self):
         from test_wiki import PAGE
@@ -618,19 +618,20 @@ raise AssertionError('kill point was not reached')
     def test_a_page_written_by_the_previous_renderer_is_rewritten_without_a_review(self):
         from test_wiki import PAGE
 
-        import lifecontext.wiki as wiki
+        from lifecontext.wiki import WikiService
         fixture, projection = self.wiki_fixture()
         fixture.update()
-        self.assertEqual(projection.project_wiki(PAGE)["state"], "completed")
+        # Projected by v1.2.0rc1, which labelled citations with source ID and passages.
+        with patch.object(WikiService, "_citation_labels", lambda service: None):
+            self.assertEqual(projection.project_wiki(PAGE)["state"], "completed")
         receipt = fixture.catalog.get_artifact_projection("wiki", PAGE, 1)
         page = self.journal / receipt["projection_path"]
         history = self.journal / fixture.catalog.get_artifact_projection("wiki", PAGE + "_history", 1)["projection_path"]
-        self.assertIn("(doc_1 v1/e1 passages 0:1)", page.read_text())
+        self.assertIn("1. The sky is blue. (doc_1 v1/e1 passages 0:1)", page.read_text())
         user = f"{USER_START}\nMy notes.\n<!-- life-context:user:end -->\n"
         page.write_text(page.read_text().replace(f"{USER_START}\n\n<!-- life-context:user:end -->\n", user))
-        # The next renderer writes another citation label for the same stored revision.
-        with patch.object(wiki, "_citation_label", lambda citation: "Original, line 1"):
-            result = projection.project_wiki(PAGE)
+        # This renderer writes people's label for the same stored revision.
+        result = projection.project_wiki(PAGE)
         self.assertEqual(result["state"], "completed", result)
         self.assertEqual([review["code"] for review in fixture.catalog.list_wiki_reviews(PAGE)], [])
         self.assertIn("1. The sky is blue. (Original, line 1)", page.read_text())

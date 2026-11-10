@@ -293,8 +293,45 @@ def _line(text: str) -> str:
 
 
 def _citation_label(citation: Citation) -> str:
+    """The machine label, as pages showed citations before people's labels; the stored
+    citation keeps these fields either way."""
     return (f"{citation.source_id} v{citation.source_version}/e{citation.extraction_revision} "
             f"passages {citation.passage_start}:{citation.passage_end}")
+
+
+# How people count each kind of extraction locator: one and several.
+_PLACE_UNITS = {"page": ("p.", "pp."), "slide": ("slide", "slides"), "lines": ("line", "lines"),
+                "paragraph": ("para.", "paras."), "table_cell": ("table cell", "table cells"),
+                "image": ("image", "images")}
+MAX_LABEL_TITLE_CHARACTERS = 60
+
+
+def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | None:
+    """Where a cited passage range sits in the original, from the locators of its first
+    and last passage: ``p. 3``, ``pp. 3–4``, ``slide 2``, ``sheet Budget``; None when unknown."""
+    kind = first.get("kind")
+    if kind == "sheet_cell":
+        sheet = str(first.get("container") or "").rsplit("!", 1)[0]
+        return f"sheet {sheet}" if sheet else None
+    start = first.get("start")
+    end = last.get("end") if last.get("kind") == kind else first.get("end")
+    if kind not in _PLACE_UNITS or not isinstance(start, int) or isinstance(start, bool):
+        return None
+    one, several = _PLACE_UNITS[kind]
+    if not isinstance(end, int) or isinstance(end, bool) or end <= start:
+        return f"{one} {start}"
+    return f"{several} {start}–{end}"
+
+
+def citation_label(title: str, place: str | None, version: int | None = None) -> str:
+    """A citation as people read it: ``Title, p. 3``; ``Title v2, p. 3`` when the
+    document has more than one version. Long titles are shortened."""
+    title = _line(title)
+    if len(title) > MAX_LABEL_TITLE_CHARACTERS:
+        title = title[:MAX_LABEL_TITLE_CHARACTERS - 1].rstrip() + "…"
+    if version is not None:
+        title = f"{title} v{version}"
+    return f"{title}, {place}" if place else title
 
 
 def _link_label(text: str) -> str:
@@ -316,7 +353,7 @@ def render_managed_v11(patch: WikiPatch) -> str:
 
 
 def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None, state: str | None = None,
-                   page_link=None, citation_link=None, withdrawn: str | None = None) -> str:
+                   page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None) -> str:
     """Render immutable managed content only; projection must preserve user bytes/CAS.
 
     Claims are numbered; a model summary is labelled and names the claims it rests
@@ -324,16 +361,20 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     document page. ``titles`` names linked pages. For the vault, a ``stale`` state
     opens the page with a callout, and ``page_link(page_id)`` and
     ``citation_link(citation)`` return a relative link target, or None while the
-    target is not projected (the text then stays plain). A ``withdrawn`` page
-    ("forgotten" or "retired") shows one fixed line instead of claims.
+    target is not projected (the text then stays plain). ``citation_label(citation)``
+    names a citation for people (``WikiService.show`` passes title and page); without
+    it the machine label is shown. A ``withdrawn`` page ("forgotten" or "retired")
+    shows one fixed line instead of claims.
     """
     if withdrawn:
         return "\n".join([MANAGED_START, f"# {_line(patch.title)}", "", WITHDRAWN_LINES[withdrawn], MANAGED_END, ""])
     titles = titles or {}
+    labels = citation_label or _citation_label
 
     def cite(citation: Citation) -> str:
         target = citation_link(citation) if citation_link else None
-        return f"[{_citation_label(citation)}]({target})" if target else _citation_label(citation)
+        label = _link_label(labels(citation))
+        return f"[{label}]({target})" if target else label
 
     def cited(c: Claim) -> str:
         refs = "; ".join(cite(r) for r in c.citations)
@@ -634,6 +675,7 @@ class WikiService:
         # host's local time, as for briefs.
         self.timezone = timezone
         self.store = WikiRevisionStore(paths)
+        self._locator_cache: dict = {}
 
     def source_withdrawn(self, source_id: str, version: int | None = None) -> bool:
         """The document version (by default the current one) was forgotten or deleted:
@@ -808,6 +850,50 @@ class WikiService:
                           summary=() if dropped else patch.summary)
         return visible, None if kept else ("forgotten" if gone else "retired")
 
+    def _locators(self, source_id: str, version: int, extraction_revision: int) -> list | None:
+        """The locator of each passage of one stored extraction, or None when it cannot be read.
+
+        Extraction artifacts are immutable, so a few are kept per checksum across renders.
+        """
+        rows = [row for row in self.catalog.list_extractions(source_id, version)
+                if row["extraction_revision"] == extraction_revision and row["artifact_sha256"]]
+        if not rows:
+            return None
+        key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
+        cache = self._locator_cache
+        if key not in cache:
+            try:
+                payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
+                cache[key] = [segment.get("locator") or {} for segment in payload.get("segments", [])]
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                return None
+            if len(cache) > 8:
+                cache.pop(next(iter(cache)))
+        return cache[key]
+
+    def _citation_labels(self):
+        """People's label for each citation: the document's page title (else its
+        metadata title), ``v2`` when the document has more than one version, and the
+        page, slide or sheet of the cited passages. Only the label is read here; the
+        stored citation keeps source, version, extraction revision and passages."""
+        titles, versions = {}, {}
+
+        def label(citation: Citation) -> str:
+            source = citation.source_id
+            if source not in titles:
+                page = self.catalog.get_wiki_page(source_page_id(source))
+                title = page["title"] if page and page["title"] != WITHDRAWN_TITLE else None
+                titles[source] = title or self._title(source, citation.source_version)
+                current = self.catalog.get_current_manifest(source)
+                versions[source] = current.source_version if current is not None else 1
+            locators = self._locators(source, citation.source_version, citation.extraction_revision) or []
+            place = None
+            if citation.passage_end <= len(locators):
+                place = citation_place(locators[citation.passage_start], locators[citation.passage_end - 1])
+            several = max(versions[source], citation.source_version) > 1
+            return citation_label(titles[source], place, citation.source_version if several else None)
+        return label
+
     def show(self, page_id: str, revision: int | None = None, **render: Any) -> dict | None:
         """A page, one revision and its managed text; ``render`` passes the vault's state and link resolvers.
 
@@ -832,7 +918,8 @@ class WikiService:
             # Page titles never change, so naming linked pages keeps a revision's text stable;
             # links to withdrawn pages are gone already.
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
-            managed = render_managed(visible, titles=titles, withdrawn=withdrawn, **render)
+            managed = render_managed(visible, titles=titles, withdrawn=withdrawn,
+                                     citation_label=self._citation_labels(), **render)
         return {"page": {**page, "title": title}, "revision": row, "managed": managed, "title": title,
                 "title_withdrawn": neutral,
                 "withdrawn": withdrawn, "reviews": [review for review in self.catalog.list_wiki_reviews(page_id)
