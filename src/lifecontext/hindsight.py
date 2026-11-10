@@ -466,7 +466,8 @@ def document_compiler(settings: Mapping[str, Any]):
 
 # Why the model check failed, as a sentence and the command that fixes it. The
 # sentences are matched by CI (.github/workflows/qualify.yml); keep them stable.
-_KEY_FIX = "lifecontext llm set --api-key-stdin < FILE  (FILE holds the key on one line)"
+_KEY_FIX = ("lifecontext llm set  (asks for the key; in scripts: lifecontext llm set --api-key-stdin < FILE, "
+            "FILE holds the key on one line)")
 _MODEL_FIX = "lifecontext llm set --model MODEL_ID"
 PROBE_CAUSES = {
     "key_rejected": ("the provider rejected the key", _KEY_FIX),

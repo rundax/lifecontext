@@ -1484,6 +1484,7 @@ def _capture(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
 
 
 def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
+    import io
     import platform
 
     from lifecontext import initialize, service
@@ -1492,13 +1493,18 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         if args.llm_command == "show":
             report = initialize.show_llm()
             return report, initialize.render_llm(report), 0
+        key_stream = sys.stdin.buffer if args.api_key_stdin else None
         if (args.provider is None and args.model is None and args.base_url is None and not args.api_key_stdin
                 and not os.environ.get(initialize.KEY_FILE_VARIABLE)):
-            raise CLIError("nothing_to_change")
+            # At a terminal the bare command asks for the key, hidden; elsewhere there is nothing to change.
+            entered = _ask_secret("API key for this provider (input hidden)").strip() if sys.stdin.isatty() else ""
+            if not entered:
+                raise CLIError("nothing_to_change")
+            key_stream = io.StringIO(entered + "\n")
         report = initialize.set_llm(
             initialize.InitOptions(provider=args.provider, model=args.model, base_url=args.base_url,
-                                   api_key_stdin=args.api_key_stdin),
-            key_stream=sys.stdin.buffer if args.api_key_stdin else None)
+                                   api_key_stdin=key_stream is not None),
+            key_stream=key_stream)
     except initialize.InitError as exc:
         raise CLIError(exc.code, message=exc.message) from None
     except OSError:

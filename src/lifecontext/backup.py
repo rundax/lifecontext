@@ -841,7 +841,8 @@ def restore(archive: str, *, port: int, vault: str | None = None,
             "lifecontext_version": manifest.get("lifecontext_version"), "catalog_schema_version": version,
             "files": len(files), "vault_root": str(root), "journal_path": str(journal),
             "next_steps": [
-                "lifecontext init --api-key-stdin < FILE  (or lifecontext init in a terminal): the key was not in the backup",
+                ("lifecontext llm set  (asks for the key; in scripts: lifecontext llm set --api-key-stdin < FILE): "
+                 "the key was not in the backup"),
                 "lifecontext preflight  (regenerates the Hindsight profile; downloads the models if they are missing)",
                 "lifecontext doctor",
             ]}

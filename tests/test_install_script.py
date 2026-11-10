@@ -396,6 +396,37 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
         self.assertIn("capture=1", transcript)
 
+    def test_a_rerun_that_finds_no_key_asks_for_it_hidden_at_a_terminal(self) -> None:
+        key = "sk-typed-again-0123456789"
+        (self.home / ".lifeweave").mkdir()
+        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+        common = {"home": "/h/.lifeweave", "config_state": "kept", "provider": "p", "model": "m", "vault_root": "/v",
+                  "timezone": "UTC", "warnings": []}
+        missing = json.dumps({**common, "credentials_state": "missing"})
+        replaced = json.dumps({**common, "credentials_state": "replaced"})
+        venv = Path(self.temp.name) / "venv"
+        _stub(venv / "bin" / "lifecontext",
+              f'echo "$*" >> "{self.calls}"\n'
+              'if [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ]; then\n'
+              f'  echo "key=$(cat "$LIFECONTEXT_API_KEY_FILE") $(ls -l "$LIFECONTEXT_API_KEY_FILE" | cut -c1-10) '
+              f'$(dirname "$LIFECONTEXT_API_KEY_FILE")" >> "{self.calls}"\n'
+              f"  printf '%s' '{replaced}'\nelse\n  printf '%s' '{missing}'\nfi\n")
+        self.harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{venv}"\nlc="$venv/bin/lifecontext"\n'
+            'interactive=auto\nkey_changed=0\n'
+            + _functions("say", "warn", "die", "sha256_of", "tty_available", "restore_tty", "ask_secret",
+                         "print_init_report", "key_missing", "ask_key_again", "configure")
+            + '\nconfigure\necho "key_changed=$key_changed"\n')
+        code, transcript = self.converse([("API key for this provider (none is stored yet", key)])
+        self.assertEqual(code, 0, transcript)
+        self.assertNotIn(key, transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json", "init --non-interactive --replace-key --json",
+            f"key={key} -rw------- {self.tmp}"])
+        self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
+        self.assertIn("API key: replaced in .env", transcript)
+        self.assertIn("key_changed=1", transcript)
+
     def test_anthropic_suggests_a_model_and_refuses_the_ones_that_cannot_work(self) -> None:
         from lifecontext.initialize import model_question
 

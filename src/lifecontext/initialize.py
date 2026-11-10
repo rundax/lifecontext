@@ -515,7 +515,7 @@ def _setup_steps(report: Mapping[str, Any]) -> list[str]:
     """What a source install still has to run; install.sh has done all of it."""
     steps = []
     if report["credentials_state"] == "missing":
-        steps.append("lifecontext init --api-key-stdin < FILE  (or run lifecontext init in a terminal to type the key)")
+        steps.append("lifecontext llm set  (asks for the key; in scripts: lifecontext llm set --api-key-stdin < FILE)")
     steps += [
         ("lifecontext preflight  (checks the model key and starts the local memory engine; "
          "the first start downloads several hundred MB of models)"),
@@ -634,11 +634,12 @@ def render_llm(report: Mapping[str, Any]) -> str:
              f"- Base URL: {report['base_url'] or 'the provider default'}",
              f"- API key: {key}"]
     if report["api_key"] == "missing":
-        lines.append("Add it with: lifecontext llm set --api-key-stdin < FILE  "
-                     "(or run lifecontext llm set with LIFECONTEXT_API_KEY_FILE=FILE)")
+        lines.append("Add it with: lifecontext llm set  (asks for the key; in scripts: "
+                     "lifecontext llm set --api-key-stdin < FILE)")
     if "provider_changed_key_kept" in report.get("warnings", ()):
         lines.append("Warning: the provider changed but the stored key was kept; if it belongs to the old "
-                     "provider, replace it with: lifecontext llm set --api-key-stdin < FILE")
+                     "provider, replace it with: lifecontext llm set  (asks for the key; in scripts: "
+                     "lifecontext llm set --api-key-stdin < FILE)")
     if "model_rejects_forced_tool_use" in report.get("warnings", ()):
         lines.append(_FORCED_TOOL_WARNING.format(model=report["model"]))
     return "\n".join(lines)

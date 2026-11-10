@@ -548,7 +548,7 @@ configure_interactive() {
 	model=$reply
 	case "$choice" in
 	5 | 6) ask_secret "API key (hidden; leave empty if the server needs none)" ;;
-	*) ask_secret "API key (hidden; empty to add it later with lifecontext llm set)" ;;
+	*) ask_secret "API key (hidden; empty to add it later with lifecontext llm set, which asks for it)" ;;
 	esac
 	api_key=$reply
 	ask "Vault folder (the folder you open in Obsidian)" "${LIFECONTEXT_VAULT:-$HOME/LifeContext/vault}"
@@ -604,6 +604,36 @@ with open(sys.argv[1], "w") as steps:
 ' "$tmp/next-steps"
 }
 
+# key_missing: the init report on stdin says the provider needs a key and none is stored.
+key_missing() {
+	"$venv/bin/python" -I -c '
+import json, sys
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if report.get("credentials_state") == "missing" else 1)
+'
+}
+
+# A re-run that finds settings without a key asks for it, hidden; the key reaches init
+# only through a private file, as in configure_interactive.
+ask_key_again() {
+	ask_secret "API key for this provider (none is stored yet; hidden; empty to add it later with lifecontext llm set)"
+	api_key=$reply
+	[ -n "$api_key" ] || return 0
+	key_file="$tmp/api-key"
+	(umask 077 && printf '%s\n' "$api_key" >"$key_file")
+	api_key=""
+	report=$(LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" init --non-interactive --replace-key --json </dev/null) || true
+	rm -f "$key_file"
+	if printf '%s' "$report" | print_init_report; then
+		key_changed=1
+	else
+		warn "the key was not stored; add it later with lifecontext llm set"
+	fi
+}
+
 configure() {
 	# init reads LIFECONTEXT_PROVIDER, _MODEL, _BASE_URL, _VAULT and the key file
 	# LIFECONTEXT_API_KEY_FILE itself; only the time zone is passed as a flag.
@@ -625,6 +655,9 @@ configure() {
 			report=$("$lc" init --non-interactive --json </dev/null) || true
 			printf '%s' "$report" | print_init_report ||
 				warn "lifecontext init reported a problem with the existing settings (above); see lifecontext doctor"
+			if [ "$interactive" != no ] && tty_available && printf '%s' "$report" | key_missing; then
+				ask_key_again
+			fi
 		fi
 		return
 	fi

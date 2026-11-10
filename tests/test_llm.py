@@ -42,10 +42,13 @@ def _initialize(**values) -> None:
              key_stream=io.BytesIO((KEY + "\n").encode()), environ={})
 
 
-def _run(*arguments: str, stdin: str | None = None, restart=NOT_RUNNING) -> tuple[int, str, str]:
-    """Run `lifecontext llm ...` in this process; ``restart=None`` makes any attempt to restart a failure."""
+def _run(*arguments: str, stdin: str | None = None, restart=NOT_RUNNING, tty: bool = False) -> tuple[int, str, str]:
+    """Run `lifecontext llm ...` in this process; ``restart=None`` makes any attempt to restart a failure.
+
+    ``tty`` says whether stdin is a terminal.
+    """
     out, err = io.StringIO(), io.StringIO()
-    fake_stdin = SimpleNamespace(buffer=io.BytesIO(stdin.encode())) if stdin is not None else sys.stdin
+    fake_stdin = SimpleNamespace(buffer=io.BytesIO((stdin or "").encode()), isatty=lambda: tty)
     outcome = {"return_value": restart} if restart is not None else {"side_effect": AssertionError("restarted")}
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), patch.object(sys, "stdin", fake_stdin), \
             patch("lifecontext.service.restart_if_running", **outcome):
@@ -182,6 +185,28 @@ class LlmSetTests(unittest.TestCase):
             self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
             _initialize(provider="openai", model="gpt-test-model")
             code, out, _ = _run("set", "--json", restart=None)
+            self.assertEqual((code, json.loads(out)), (1, {"error": "nothing_to_change"}))
+            # At a terminal, an empty answer to the key question changes nothing either.
+            with patch.object(cli, "_ask_secret", return_value="") as asked:
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            self.assertEqual((code, json.loads(out), asked.call_count), (1, {"error": "nothing_to_change"}, 1))
+
+    def test_set_alone_at_a_terminal_asks_for_the_key_hidden_and_stores_it(self) -> None:
+        with _home() as home:
+            _initialize(provider="openai", model="gpt-test-model")
+            paths = LifeContextPaths(home)
+            config = paths.config_path.read_bytes()
+            with patch.object(cli, "_ask_secret", return_value=f"  {NEW_KEY}  ") as asked:
+                code, out, err = _run("set", tty=True)
+            self.assertEqual(code, 0, err)
+            self.assertIn("hidden", asked.call_args.args[0])
+            self.assertNotIn(NEW_KEY, out + err)
+            self.assertIn(f"LIFEWEAVE_LLM_API_KEY={NEW_KEY}", paths.credentials_path.read_text())
+            self.assertEqual(paths.config_path.read_bytes(), config)
+            self.assertIn("Model settings updated.", out)
+            # Not at a terminal nothing is asked.
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None)
             self.assertEqual((code, json.loads(out)), (1, {"error": "nothing_to_change"}))
 
     def test_changing_the_provider_warns_when_the_old_key_stays(self) -> None:
