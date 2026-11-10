@@ -218,41 +218,6 @@ def _validate_write_path(value: PathLike) -> tuple[tuple[str, ...], str]:
     return parts[:-1], parts[-1]
 
 
-def _check_managed_tree(directory_fd: int) -> None:
-    try:
-        names = os.listdir(directory_fd)
-    except OSError as exc:
-        raise VaultError("unsafe_path") from exc
-    for name in names:
-        try:
-            child_fd = os.open(name, _FILE_FLAGS, dir_fd=directory_fd)
-        except OSError as exc:
-            code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-            raise VaultError(code) from exc
-        try:
-            info = os.fstat(child_fd)
-            if stat.S_ISDIR(info.st_mode):
-                _check_owner_and_mode(info, directory=True)
-                _check_managed_tree(child_fd)
-            elif stat.S_ISREG(info.st_mode):
-                if ".sync-conflict-" not in name:
-                    _check_owner_and_mode(info, directory=False)
-            else:
-                raise VaultError("unsafe_path")
-        finally:
-            os.close(child_fd)
-
-
-def _open_file_at(directory_fd: int, name: str) -> int:
-    try:
-        return os.open(name, _FILE_FLAGS, dir_fd=directory_fd)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise VaultError(code) from exc
-
-
 def _open_absolute_parts(components: tuple[str, ...]) -> int:
     descriptor = -1
     try:
@@ -430,31 +395,15 @@ class ManagedVault:
             raise VaultError("unsafe_path")
 
     def verify_permissions(self) -> bool:
+        """Check that the vault root and ``Journal`` are private (0700, this user).
+
+        Those two folders keep other users out of the whole tree. Files and
+        folders below them are checked only when a call reads or writes that
+        exact path, so a stray file elsewhere never blocks a write.
+        """
         self._ensure_open()
         _check_directory_fd(self._root_fd)
         _check_directory_fd(self._journal_fd)
-        for name in _MANAGED_DIRECTORIES:
-            try:
-                directory_fd = os.open(name, _directory_flags(), dir_fd=self._journal_fd)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-                raise VaultError(code) from exc
-            try:
-                _check_directory_fd(directory_fd)
-                _check_managed_tree(directory_fd)
-            finally:
-                os.close(directory_fd)
-        try:
-            readme_fd = _open_file_at(self._journal_fd, "README.md")
-        except FileNotFoundError:
-            pass
-        else:
-            try:
-                _check_file_fd(readme_fd)
-            finally:
-                os.close(readme_fd)
         return True
 
     def writer_lock(self, timeout: float = 10.0) -> AbstractContextManager:
