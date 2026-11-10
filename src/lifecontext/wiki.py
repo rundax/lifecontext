@@ -33,8 +33,9 @@ MAX_SOURCE_CLAIMS = 48
 WINDOW_CLAIM_BYTES = 3000
 MAX_WINDOW_CLAIMS = 8
 MAX_SHARED_SOURCE_CLAIMS = 8
-MAX_INDEX_ENTRIES = 32
+MAX_INDEX_ENTRIES = 128
 MAX_PAGE_CLAIMS = 128
+INDEX_MORE = "And {count} more: `lifecontext documents list`"
 # After its own page, one routing request places a document's checked claims on
 # shared topic and entity pages: at most 6 routes of 8 claims, 16 pages per compile
 # with the document's own page, chosen from a catalog of at most 300 existing pages
@@ -251,7 +252,8 @@ class WikiPatch:
                        if "summary" in value else ())
             return cls(page_id, _text(value["title"], 256), _integer(value["expected_revision"], 0), claims,
                        tuple(Contradiction.parse(c) for c in _items(value["contradictions"], 8)),
-                       tuple(_id(c) for c in _items(value["links"], 32)), summary)
+                       tuple(_id(c) for c in _items(value["links"], MAX_INDEX_ENTRIES if page_id == INDEX_PAGE else 32)),
+                       summary)
         except WikiError:
             raise
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -380,7 +382,7 @@ def render_managed_v11(patch: WikiPatch) -> str:
 
 def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None, state: str | None = None,
                    page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None,
-                   coverage: str | None = None) -> str:
+                   coverage: str | None = None, index_more: int = 0) -> str:
     """Render immutable managed content only; projection must preserve user bytes/CAS.
 
     Claims are numbered; a model summary is labelled and names the claims it rests
@@ -391,7 +393,8 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     target is not projected (the text then stays plain). ``citation_label(citation)``
     names a citation for people (``WikiService.show`` passes title and page); without
     it the machine label is shown. ``coverage`` is one line under a document page's
-    title. A ``withdrawn`` page ("forgotten" or "retired") shows one fixed line instead of claims.
+    title; ``index_more`` counts the documents the index has no room for. A
+    ``withdrawn`` page ("forgotten" or "retired") shows one fixed line instead of claims.
     """
     if withdrawn:
         return "\n".join([MANAGED_START, f"# {_line(patch.title)}", "", WITHDRAWN_LINES[withdrawn], MANAGED_END, ""])
@@ -422,6 +425,8 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
         for number, (claim, link) in enumerate(zip(patch.claims, patch.links, strict=True), 1):
             entry = f"Model summary: {sentences[number]}" if number in sentences else cited(claim)
             lines.append(f"{number}. {page(link)} — {entry}")
+        if index_more > 0:
+            lines.extend(["", INDEX_MORE.format(count=index_more)])
         return "\n".join([*lines, MANAGED_END, ""])
     if coverage:
         lines.extend([_line(coverage), ""])
@@ -944,6 +949,13 @@ class WikiService:
                              [(c.passage_start, c.passage_end) for c in own
                               if (c.source_version, c.extraction_revision) == (first.source_version, first.extraction_revision)])
 
+    def _index_more(self, listed: Iterable[str], cache: dict) -> int:
+        """How many document pages with something to show the index does not list."""
+        pages = {page["page_id"] for page in self.catalog.list_wiki_pages()
+                 if page["page_id"].startswith("source_") and page["current_revision"]
+                 and not self.forgotten(page["page_id"], page["current_revision"], cache=cache)}
+        return len(pages - set(listed))
+
     def show(self, page_id: str, revision: int | None = None, **render: Any) -> dict | None:
         """A page, one revision and its managed text; ``render`` passes the vault's state and link resolvers.
 
@@ -969,7 +981,9 @@ class WikiService:
             # links to withdrawn pages are gone already.
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
             extra = {}
-            if not withdrawn and page_id.startswith("source_"):
+            if not withdrawn and page_id == INDEX_PAGE:
+                extra["index_more"] = self._index_more(visible.links, cache)
+            elif not withdrawn and page_id.startswith("source_"):
                 extra["coverage"] = self._coverage_line(visible)
             managed = render_managed(visible, titles=titles, withdrawn=withdrawn,
                                      citation_label=self._citation_labels(), **extra, **render)
@@ -1395,7 +1409,7 @@ class WikiService:
         """Rebuild the model-free table of contents; never fails a document.
 
         One entry per document page, in title order, linked to that page, for as many
-        pages as fit in 32 links and 48 KB. An entry holds the claim the page's first
+        pages as fit in 128 links and 48 KB; the page then counts the rest. An entry holds the claim the page's first
         summary sentence rests on and that sentence, or else the page's first current
         claim that is not copyright or imprint boilerplate. An index whose managed
         text was edited by hand stays untouched until resolved.
