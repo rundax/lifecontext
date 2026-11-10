@@ -103,16 +103,25 @@ def _current_uid() -> int | None:
     return getter() if getter is not None else None
 
 
-def _check_owner_and_mode(info: os.stat_result, *, directory: bool) -> None:
+def _check_owner(info: os.stat_result) -> None:
     if os.name != "posix":
         return
     owner = _current_uid()
+    if owner is not None and info.st_uid != owner:
+        raise VaultError("unsafe_permissions")
+
+
+def _check_owner_and_mode(info: os.stat_result, *, directory: bool) -> None:
+    if os.name != "posix":
+        return
+    _check_owner(info)
     expected_mode = 0o700 if directory else 0o600
-    if (owner is not None and info.st_uid != owner) or stat.S_IMODE(info.st_mode) != expected_mode:
+    if stat.S_IMODE(info.st_mode) != expected_mode:
         raise VaultError("unsafe_permissions")
 
 
 def _check_directory_fd(descriptor: int) -> os.stat_result:
+    """The vault root and ``Journal``: a real folder of this user, exactly 0700."""
     try:
         info = os.fstat(descriptor)
     except OSError as exc:
@@ -123,15 +132,47 @@ def _check_directory_fd(descriptor: int) -> os.stat_result:
     return info
 
 
+def _check_subdirectory_fd(descriptor: int) -> os.stat_result:
+    """A folder below ``Journal`` on a target's path: this user's, not group- or other-writable."""
+    try:
+        info = os.fstat(descriptor)
+    except OSError as exc:
+        raise VaultError("unsafe_path") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise VaultError("unsafe_path")
+    _check_owner(info)
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o022:
+        raise VaultError("unsafe_permissions")
+    return info
+
+
 def _check_file_fd(descriptor: int) -> os.stat_result:
+    """An existing target: a regular file of this user. Its mode is not a reason to refuse."""
     try:
         info = os.fstat(descriptor)
     except OSError as exc:
         raise VaultError("unsafe_path") from exc
     if not stat.S_ISREG(info.st_mode):
         raise VaultError("unsafe_path")
-    _check_owner_and_mode(info, directory=False)
+    _check_owner(info)
     return info
+
+
+def _tighten_own_file(descriptor: int, info: os.stat_result) -> None:
+    """Drop extra mode bits from a target this call has proved is LifeContext's own.
+
+    ``descriptor`` comes from ``_read_target`` (``O_NOFOLLOW`` below pinned,
+    checked folders) and ``_check_file_fd`` has confirmed a regular file of
+    this user, so ``fchmod`` cannot reach a symlink's target or another file.
+    """
+    if os.name != "posix":
+        return
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & ~0o600:
+        try:
+            os.fchmod(descriptor, mode & 0o600)
+        except OSError:
+            pass
 
 
 def _read_fd(descriptor: int) -> bytes:
@@ -187,23 +228,33 @@ def _read_target(parent_fd: int, name: str) -> tuple[int, os.stat_result, bytes]
         raise
 
 
+def _open_subdirectory(parent_fd: int, name: str) -> int:
+    """Open one folder below ``Journal`` without following a symlink, then check it."""
+    try:
+        descriptor = os.open(name, _directory_flags(), dir_fd=parent_fd)
+    except OSError as exc:
+        code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
+        raise VaultError(code) from exc
+    try:
+        _check_subdirectory_fd(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def _open_parent(journal_fd: int, components: tuple[str, ...]) -> int:
     descriptor = os.dup(journal_fd)
     try:
         _check_directory_fd(descriptor)
         for component in components:
-            child = os.open(component, _directory_flags(), dir_fd=descriptor)
+            child = _open_subdirectory(descriptor, component)
             os.close(descriptor)
             descriptor = child
-            _check_directory_fd(descriptor)
         return descriptor
-    except VaultError:
+    except BaseException:
         os.close(descriptor)
         raise
-    except OSError as exc:
-        os.close(descriptor)
-        code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise VaultError(code) from exc
 
 
 def _validate_write_path(value: PathLike) -> tuple[tuple[str, ...], str]:
@@ -264,7 +315,9 @@ class VaultWriterLock:
             info = os.fstat(self._handle)
             if not stat.S_ISREG(info.st_mode):
                 raise VaultError("unsafe_path")
-            if not existed and os.name == "posix":
+            _check_owner(info)
+            if os.name == "posix" and (not existed or stat.S_IMODE(info.st_mode) != 0o600):
+                # LifeContext's own lock file, opened O_NOFOLLOW in the private root.
                 os.fchmod(self._handle, 0o600)
                 info = os.fstat(self._handle)
             _check_owner_and_mode(info, directory=False)
@@ -758,7 +811,7 @@ class ManagedVault:
                         os.mkdir(component, 0o700, dir_fd=descriptor)
                     except FileExistsError:
                         pass
-                child = _open_parent(descriptor, (component,))
+                child = _open_subdirectory(descriptor, component)
                 os.close(descriptor)
                 descriptor = child
             return descriptor, name
@@ -821,11 +874,15 @@ class ManagedVault:
                     if expected_hash is not None:
                         raise VaultError("conflict") from None
                 else:
-                    os.close(descriptor)
-                    if expected_hash is None or hashlib.sha256(old).hexdigest() != expected_hash:
-                        raise VaultError("conflict")
-                    if old == content:
-                        return True
+                    try:
+                        if expected_hash is None or hashlib.sha256(old).hexdigest() != expected_hash:
+                            raise VaultError("conflict")
+                        if old == content:
+                            # The catalog's hash proves these bytes are LifeContext's own.
+                            _tighten_own_file(descriptor, info)
+                            return True
+                    finally:
+                        os.close(descriptor)
                     snapshot = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
                 if before_stage is not None:
                     before_stage(held)
@@ -989,7 +1046,7 @@ class ManagedVault:
                     raise VaultError("sync_conflict")
 
                 try:
-                    target_fd, _target_info, target_data = _read_target(parent_fd, name)
+                    target_fd, target_info, target_data = _read_target(parent_fd, name)
                 except VaultError as exc:
                     if exc.code != "not_found":
                         raise
@@ -1013,6 +1070,8 @@ class ManagedVault:
                         # replace it after a hash check that such writers cannot
                         # share.
                         if target_data == content_bytes:
+                            # Marker-owned and byte-identical to what LifeContext writes here.
+                            _tighten_own_file(target_fd, target_info)
                             return True
                         raise VaultError("conflict")
                     finally:
