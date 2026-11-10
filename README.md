@@ -65,7 +65,7 @@ the lease's wiki page holds the quote and its page.
 - **Scans read locally**: Tesseract OCR for English, Ukrainian and Russian.
   Pages it could not read are listed, not skipped. Recall reranks Ukrainian
   and Russian text too; its embedding model is English-only, so search in
-  other languages improves in a later release.
+  other languages is weaker until a later release adds a multilingual one.
 - **One memory for your agents**: one CLI and one skill for Claude Code, Codex,
   Gemini CLI and Hermes, and a read-only MCP server for Claude Desktop and
   Cursor.
