@@ -86,7 +86,7 @@
 <section class="hero" aria-labelledby="hero-h">
   <div class="wrap hero-grid">
     <div class="hero-head">
-      <p class="eyebrow">На вашій машині · source-available · v1.2</p>
+      <p class="eyebrow">На вашій машині · source-available · попередній випуск 1.2.0rc1</p>
       <h1 id="hero-h">Ваші документи, зведені у вікі. <span class="accent-line">Кожне твердження має джерело.</span></h1>
     </div>
     <div class="hero-copy">
@@ -108,7 +108,7 @@
 
     <figure class="anatomy" aria-labelledby="anatomy-cap">
       <div class="anatomy-card">
-        <div class="card-bar"><span class="path">wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад</span></div>
+        <div class="card-bar"><span class="path">Journal/wiki/Оренда квартири.md</span><span class="badge badge-example">Приклад</span></div>
         <div class="anatomy-body">
           <p class="anatomy-title">Оренда квартири</p>
           <div class="anatomy-claim">
@@ -143,7 +143,7 @@
 
     <div class="demo">
       <article class="note" aria-labelledby="note-title">
-        <div class="card-bar"><span class="path">vault/wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад · вигаданий</span></div>
+        <div class="card-bar"><span class="path">vault/Journal/wiki/Оренда квартири.md</span><span class="badge badge-example">Приклад · вигаданий</span></div>
         <div class="note-body">
           <h3 id="note-title">Оренда квартири</h3>
           <p class="note-meta">Сторінка теми · 3 джерела · ревізія r4 · зібрано 2026-10-14</p>
@@ -475,6 +475,7 @@
         <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
           <h3 class="panel-title">Docker</h3>
           <p>Образ містить Tesseract з англійською, українською та російською мовами й локальні моделі та працює від непривілейованого користувача. Порт назовні не відкривається: сервіс слухає loopback усередині контейнера, і ви звертаєтеся до нього через <code>docker exec</code>. Ключ лежить у секреті Compose і в образ не потрапляє. Решта налаштувань застосовується під час першого запуску. Вкажіть постачальника й модель, які ви обрали: типових значень немає, і без них контейнер чекає та пише в журнал, якої змінної бракує.</p>
+          <p>Поки 1.2.0rc1 лишається попереднім випуском, образ не опубліковано. Перед запуском зберіть його з клону репозиторію командою <code>docker compose build</code> (близько 3 ГБ).</p>
           <p class="step-label">compose.yaml</p>
           <div class="code">
             <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Копіювати compose.yaml" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>

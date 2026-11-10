@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EN = {
     "tagline": "self-hosted · source-available",
     "hero": ("Your documents, compiled.", "Every claim cited."),
-    "path": "wiki/Topics/Apartment lease.md · example",
+    "path": "Journal/wiki/Apartment lease.md · example",
     "quote": "“The monthly rent is EUR 950, payable in advance on the first (1st) day of each month.”",
     "chip": "lease-2024.pdf v1 · p.3",
     "verified": "quote found in source",
@@ -38,7 +38,7 @@ EN = {
 UK = {
     "tagline": "на вашій машині · source-available",
     "hero": ("Ваші документи, зведені у вікі.", "Кожне твердження має джерело."),
-    "path": "wiki/Topics/Оренда квартири.md · приклад",
+    "path": "Journal/wiki/Оренда квартири.md · приклад",
     # No-break spaces keep "22 000" and "с. 3" on one line.
     "quote": "«Орендна плата становить 22\u00a0000 гривень на місяць і сплачується авансом першого (1-го) числа кожного місяця».",
     "chip": "договір-оренди-2024.pdf v1 · с.\u00a03",
