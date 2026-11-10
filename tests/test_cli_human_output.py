@@ -317,5 +317,69 @@ class PlainRendererSnapshotTests(unittest.TestCase):
         self.assertEqual(self.plain(["wiki", "list"], {"pages": "nope"}), 'Pages: "nope"\n')
 
 
+REQUEST_ID = "0123456789abcdef0123"
+
+
+def api_error(code: str, retryable: bool) -> bytes:
+    return json.dumps({"request_id": REQUEST_ID, "error_code": code, "retryable": retryable}).encode()
+
+
+class ErrorTableTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_every_code_the_cli_can_print_has_a_message_and_a_next_step(self) -> None:
+        import inspect
+        import re
+
+        from lifecontext import cli_output, mcp_server
+
+        codes = set(cli._API_ERROR_CODES) | set(cli._TRANSIENT_API_ERRORS)
+        codes |= set(re.findall(r'CLIError\("([a-z_]+)"', inspect.getsource(cli)))
+        codes |= set(re.findall(r'_failure\("([a-z_]+)"', inspect.getsource(mcp_server)))
+        codes |= {f"{command}_failed" for command in ("backup", "restore", "hindsight")}
+        self.assertTrue({"provider_unavailable", "api_unavailable", "busy", "invalid_api_response"} <= codes)
+        missing = sorted(code for code in codes if code not in cli_output.ERRORS)
+        self.assertEqual(missing, [], "add these codes to cli_output.ERRORS")
+        for code, entry in cli_output.ERRORS.items():
+            with self.subTest(code=code):
+                message, next_step, retryable = cli_output.describe(code, port=8765)
+                self.assertTrue(message.endswith(".") and message[0].isupper(), message)
+                self.assertTrue(next_step and not next_step.endswith("."), next_step)
+                self.assertIsInstance(retryable, bool)
+                self.assertNotIn("{", message + next_step)
+
+    def test_json_errors_keep_the_code_and_add_message_next_step_retryable_and_request_id(self) -> None:
+        code, out, err = run(["recall", "--query", "rent", "--json"], status=503,
+                             raw=api_error("provider_unavailable", True))
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(json.loads(out), {
+            "error": "provider_unavailable",
+            "message": "The model did not answer.",
+            "next_step": "check the model with `lifecontext doctor --model-probe`, then re-run the command",
+            "retryable": True,
+            "request_id": REQUEST_ID,
+        })
+        # The API's own retryable flag wins over the table's.
+        code, out, _ = run(["documents", "show", DOC_ID, "--json"], status=404, raw=api_error("source_not_found", False))
+        failure = json.loads(out)
+        self.assertEqual((code, failure["error"], failure["retryable"], failure["request_id"]),
+                         (1, "source_not_found", False, REQUEST_ID))
+        # A body that is not the API's typed error stays api_error, with no request ID.
+        code, out, _ = run(["status", "--json"], status=500, raw=b"<html>oops</html>")
+        failure = json.loads(out)
+        self.assertEqual((code, failure["error"], failure["request_id"], failure["retryable"]),
+                         (1, "api_error", None, False))
+        self.assertEqual(sorted(failure), ["error", "message", "next_step", "request_id", "retryable"])
+
+    def test_plain_errors_say_what_happened_and_what_to_do(self) -> None:
+        code, out, err = run(["recall", "--query", "rent"], status=503, raw=api_error("provider_unavailable", True))
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "The model did not answer.\nNext: check the model with "
+                              "`lifecontext doctor --model-probe`, then re-run the command.\n")
+        code, _, err = run(["documents", "show", DOC_ID], status=404, raw=api_error("source_not_found", False))
+        self.assertTrue(err.startswith("No source or page has that ID.\nNext: `lifecontext documents list`"), err)
+        self.assertNotIn("a" * 64, err)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -390,14 +390,15 @@ class MCPServerTests(unittest.TestCase):
         port = _unused_port()
         text = self.error_text(self.call("status", {}, port=port))
         self.assertIn("api_unavailable", text)
-        self.assertIn(f"127.0.0.1:{port}; the owner must start the LifeContext API", text)
+        self.assertIn(f"not reachable at 127.0.0.1:{port}. Next: the owner starts the LifeContext service or "
+                      "checks it with `lifecontext service status`; do not start it yourself.", text)
 
         self.token_path.unlink()
         for name, arguments in (("status", {}), ("recall", {"query": "anything"})):
             with self.subTest(tool=name):
                 text = self.error_text(self.call(name, arguments))
                 self.assertIn("token_unavailable", text)
-                self.assertIn("token is missing", text)
+                self.assertIn("There is no LifeContext API token for this user", text)
                 self.assertNotIn(str(self.home), text)
         self.assertEqual(self.api.requests, [])
 
@@ -431,8 +432,8 @@ class MCPServerTests(unittest.TestCase):
         text = self._one_at_a_time("/v1/recall", [
             ("recall", {"query": "first"}), ("reflect", {"query": "second"}), ("recall", {"query": "third"}),
         ])
-        self.assertIn("busy: a previous recall or reflect call is still finishing; report it instead of retrying",
-                      text)
+        self.assertIn("busy: A previous recall or reflect call is still finishing. Next: report it instead of "
+                      "retrying.", text)
         self.assertEqual([json.loads(item["body"])["query"] for item in self.api.requests], ["first", "third"])
 
     def test_documents_import_runs_one_at_a_time(self) -> None:
@@ -441,7 +442,7 @@ class MCPServerTests(unittest.TestCase):
         arguments = {"path": str(original), "idempotency_key": "import-a"}
         text = self._one_at_a_time("/v1/documents", [("documents_import", arguments)] * 3,
                                    allow_writes=True, import_dirs=[str(self.inbox)])
-        self.assertIn("busy: a previous documents_import call is still finishing", text)
+        self.assertIn("busy: A previous documents_import call is still finishing", text)
         self.assertEqual(len(self.api.requests), 2)
 
     def test_locks_are_released_after_an_api_error(self) -> None:

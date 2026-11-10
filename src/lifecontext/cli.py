@@ -56,13 +56,17 @@ _API_ERROR_CODES = frozenset({
 class CLIError(RuntimeError):
     """Stable command failure that never includes paths or remote response text."""
 
-    def __init__(self, code: str, status: int | None = None, message: str | None = None):
+    def __init__(self, code: str, status: int | None = None, message: str | None = None, *,
+                 retryable: bool | None = None, request_id: str | None = None):
         super().__init__(code)
         self.code = code
         # The HTTP status when the API itself answered with an error.
         self.status = status
         # A sentence that says what to do, for the failures that have one.
         self.message = message
+        # From the API's error body, when it answered with one.
+        self.retryable = retryable
+        self.request_id = request_id
 
 
 def _positive_int(value: str) -> int:
@@ -552,13 +556,14 @@ def _json_bytes(value: object) -> bytes:
     return body
 
 
-def _typed_api_error(raw: bytes) -> str:
+def _api_failure(raw: bytes, status: int | None = None) -> CLIError:
+    """The API's typed error body as a CLIError; anything else is ``api_error``."""
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError):
-        return "api_error"
+        return CLIError("api_error", status)
     if not isinstance(value, dict) or set(value) != {"request_id", "error_code", "retryable"}:
-        return "api_error"
+        return CLIError("api_error", status)
     request_id = value.get("request_id")
     code = value.get("error_code")
     retryable = value.get("retryable")
@@ -569,8 +574,12 @@ def _typed_api_error(raw: bytes) -> str:
         or code not in _API_ERROR_CODES
         or not isinstance(retryable, bool)
     ):
-        return "api_error"
-    return code
+        return CLIError("api_error", status)
+    return CLIError(code, status, retryable=retryable, request_id=request_id)
+
+
+def _typed_api_error(raw: bytes) -> str:
+    return _api_failure(raw).code
 
 
 def _http_exchange(
@@ -641,7 +650,7 @@ def _http_request(
         max_response_bytes=max_response_bytes,
     )
     if not 200 <= status < 300:
-        raise CLIError(_typed_api_error(raw), status)
+        raise _api_failure(raw, status)
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError):
@@ -669,7 +678,7 @@ def _http_binary_response(
         max_response_bytes=maximum,
     )
     if not 200 <= status < 300:
-        raise CLIError(_typed_api_error(raw))
+        raise _api_failure(raw)
     content_type = response_headers.get("content-type", "").split(";", 1)[0].strip().casefold()
     if content_type != EXPORT_MEDIA_TYPE or not raw:
         raise CLIError("invalid_api_response")
@@ -827,7 +836,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
         _ensure_new_destination(args.destination)
         status, headers, raw = _http_exchange(args, "GET", target + "/original" + query, headers={"Accept": "application/octet-stream"}, max_response_bytes=MAX_DOCUMENT_BYTES)
         if not 200 <= status < 300:
-            raise CLIError(_typed_api_error(raw))
+            raise _api_failure(raw)
         checksum = hashlib.sha256(raw).hexdigest()
         if (
             headers.get("content-type", "").split(";", 1)[0].strip().casefold() != "application/octet-stream"
@@ -1138,28 +1147,16 @@ def _print_success(args: argparse.Namespace, value: dict[str, object]) -> None:
     print(_human_result(value) if rendered is None else rendered)
 
 
-def _print_error(args: argparse.Namespace, code: str) -> None:
+def _print_error(args: argparse.Namespace, error: CLIError) -> None:
+    """One failure, from the shared table: ``--json`` keeps ``error`` and adds the explanation."""
+    from lifecontext import cli_output
+
     if args.as_json:
-        print(json.dumps({"error": code}, sort_keys=True, separators=(",", ":")))
+        failure = cli_output.error_json(error.code, port=args.port, retryable=error.retryable,
+                                        request_id=error.request_id)
+        print(json.dumps(failure, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return
-    if code == "api_unavailable":
-        message = (
-            f"LifeContext API is unavailable at 127.0.0.1:{args.port}; "
-            f"start it with `lifecontext serve --port {args.port}`."
-        )
-    elif code in {"input_unavailable", "body_too_large", "invalid_source_text", "token_unavailable", "vault_missing"}:
-        message = {
-            "input_unavailable": "Unable to read the selected source input.",
-            "body_too_large": "Request or response exceeded the allowed size.",
-            "invalid_source_text": "Source input must be valid UTF-8 text.",
-            "token_unavailable": ("No LifeContext API token for this user: the service creates it when it starts "
-                                  "(`lifecontext serve`) under the same HOME."),
-            "vault_missing": ("The vault's Journal folder does not exist: create it with mode 0700, "
-                              "or set `vault` in ~/.lifeweave/config.yaml."),
-        }[code]
-    else:
-        message = f"LifeContext request failed: {code.replace('_', ' ')}."
-    print(message, file=sys.stderr)
+    print(cli_output.error_text(error.code, port=args.port), file=sys.stderr)
 
 
 def _preflight(args: argparse.Namespace) -> int:
@@ -1633,8 +1630,11 @@ def _run_local(args: argparse.Namespace) -> int:
             failure = {"error": exc.code, **({"message": exc.message} if exc.message else {})}
             print(json.dumps(failure, sort_keys=True, separators=(",", ":")))
         else:
-            print(f"lifecontext {args.command} failed: {exc.message or exc.code.replace('_', ' ') + '.'}",
-                  file=sys.stderr)
+            from lifecontext import cli_output
+
+            detail = exc.message or (cli_output.error_text(exc.code, port=getattr(args, "port", DEFAULT_PORT))
+                                     if exc.code in cli_output.ERRORS else exc.code.replace('_', ' ') + '.')
+            print(f"lifecontext {args.command} failed: {detail}", file=sys.stderr)
         return 1
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -1658,7 +1658,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return _serve(args)
         except CLIError as exc:
-            _print_error(args, exc.code)
+            _print_error(args, exc)
             return 1
     if args.command == "mcp":
         if args.import_dirs and not args.allow_writes:
@@ -1672,7 +1672,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         failing = _lint_failures(args, value)
         _print_success(args, value)
     except CLIError as exc:
-        _print_error(args, exc.code)
+        _print_error(args, exc)
         return 1
     return LINT_FAILED_EXIT if failing else 0
 
