@@ -1994,10 +1994,12 @@ class JournalApplication:
                 self._retained_result(operation["result"], source_id, source_version),
                 operation["operation_id"],
             )
-        if operation["state"] in {"retryable_failed", "permanent_failed"}:
+        if operation["state"] == "permanent_failed":
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if operation["state"] == "running":
             raise ApplicationError("provider_unavailable")
+        # A retryable failure with the same key and request runs again from custody.
+        retrying = operation["state"] == "retryable_failed"
         try:
             if self.catalog.list_tombstones(source_id):
                 self._fail_operation(
@@ -2024,14 +2026,18 @@ class JournalApplication:
                 "size_bytes": len(original_bytes),
             },
         }
-        try:
-            operation = self.catalog.set_operation_intent(
-                operation["operation_id"], intent_result
-            )
-        except OperationConflict:
-            raise ApplicationError("conflict") from None
-        except CatalogError:
-            raise ApplicationError("invalid_request") from None
+        if retrying:
+            if operation["result"].get("recovery_intent") != intent_result["recovery_intent"]:
+                raise ApplicationError(operation["error_code"] or "retain_failed")
+        else:
+            try:
+                operation = self.catalog.set_operation_intent(
+                    operation["operation_id"], intent_result
+                )
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("invalid_request") from None
         try:
             try:
                 manifest = self.custody.write_version(
@@ -2041,7 +2047,7 @@ class JournalApplication:
                     provenance=normalized_provenance,
                 )
             except CustodyConflict:
-                if not _allow_existing:
+                if not (_allow_existing or retrying):
                     raise
                 existing = self.custody.resolve_exact(source_id, source_version)
                 if (
@@ -2057,7 +2063,15 @@ class JournalApplication:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
             raise ApplicationError(code) from None
-        operation = self._start_admitted_operation(operation)
+        if retrying:
+            operation = self._transition_operation(
+                operation["operation_id"],
+                "retryable_failed",
+                "running",
+                result=intent_result,
+            )
+        else:
+            operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
             self.project(source_id, source_version)
