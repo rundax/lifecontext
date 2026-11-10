@@ -166,6 +166,11 @@ class JournalApplication:
         *, source_id: str | None = None, source_version: int | None = None,
         vision: bool = True,
     ) -> dict[str, Any]:
+        # limits.max_file_bytes is the one effective limit; a larger file is too large, not invalid.
+        if isinstance(original_bytes, bytes) and len(original_bytes) > min(
+            self.limits.max_file_bytes, self.documents.limits.max_original_bytes, self.custody.max_bytes
+        ):
+            raise ApplicationError("body_too_large")
         try:
             outcome = await self.documents.import_document(
                 original_bytes, filename, declared_mime, provenance, idempotency_key,

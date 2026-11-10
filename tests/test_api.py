@@ -1182,6 +1182,24 @@ class APIHTTPTests(unittest.TestCase):
         finally:
             self.application.limits = original_limits
 
+    def test_a_document_above_the_configured_file_limit_is_too_large(self) -> None:
+        original_limits = self.application.limits
+        try:
+            self.application.limits = replace(original_limits, max_file_bytes=64)
+            self._assert_error(
+                self._request(
+                    "/v1/documents",
+                    method="POST",
+                    data=b"x" * 65,
+                    headers={"Content-Type": "application/octet-stream", "Idempotency-Key": "document-limit",
+                             "X-Document-Filename": "large.txt"},
+                ),
+                413,
+                "body_too_large",
+            )
+        finally:
+            self.application.limits = original_limits
+
     def test_relationship_decision_is_revision_guarded_and_note_bytes_are_unchanged(self) -> None:
         note = self.notes / "plan.md"
         note_bytes = b"---\nnote_id: plan-note\ntitle: Plan\n---\nordinary private note body\n"

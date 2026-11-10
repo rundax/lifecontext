@@ -761,13 +761,15 @@ async def import_document(
     except (ValueError, UnicodeError, ValidationError):
         raise PublicAPIError(422, "invalid_request") from None
     application = _application(request)
+    # The configured file limit applies, never above the 32 MiB upload ceiling.
+    limit = min(DOCUMENT_MAX_BYTES, application.limits.max_file_bytes)
     # TemporaryFile is private and unlinked; disconnect/cancellation closes it.
     with tempfile.TemporaryFile(mode="w+b") as staged:
         size = 0
         try:
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > DOCUMENT_MAX_BYTES:
+                if size > limit:
                     raise PublicAPIError(413, "body_too_large")
                 staged.write(chunk)
         except ClientDisconnect:
