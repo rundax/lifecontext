@@ -3,7 +3,8 @@
 This page sets up one personal arrangement end to end. LifeContext runs on one
 always-on computer (the server, which can be a small home machine). You write
 in Obsidian on your phone and laptop; the notes reach the server, LifeContext
-turns them into journal entries and a wiki, and the result comes back to every
+turns them into journal entries that are indexed and searchable (compiling
+them into wiki pages comes in v1.3), and the result comes back to every
 device. Agents on the server use the same data through the CLI, the skill or
 MCP.
 
@@ -14,7 +15,7 @@ MCP.
         | HTTPS, tailnet only              |  | LiveSync headless client
         +--------> tailscale serve --------+  v
                                            vault folder  <--  lifecontext capture
-                                           (Journal/Inbox -> Journal/entries, wiki)
+                                           (Journal/Inbox -> Journal/entries)
                                                 ^
                                                 |  CLI, skill, MCP (agents)
 ```
