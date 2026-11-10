@@ -296,8 +296,9 @@ must run the same LiveSync release as the plugin on every device;
   cached, later starts make no Hugging Face calls. When Hindsight starts, its
   libraries may fetch public reference files that contain none of your data: a
   model price list from raw.githubusercontent.com and a tokenizer table from
-  openaipublic.blob.core.windows.net. LifeContext v1.2 turns both off once they
-  are cached.
+  openaipublic.blob.core.windows.net. LifeContext v1.2 makes litellm use its
+  bundled price list, and keeps the tokenizer file in a local cache after its
+  first download.
 - No telemetry. The API listens on loopback only and requires its local token.
 
 Details, including what agents and vault sync do with your data:
