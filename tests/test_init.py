@@ -443,13 +443,14 @@ Choose 1-6""")
             self.assertEqual(report["next_steps"], [
                 f'Open {vault} in Obsidian as a vault ("Open folder as vault").',
                 "Import a document: lifecontext documents import ~/path/to/lease.pdf",
-                'Ask your agent: "What does my lease say about the deposit?"'])
+                'Start a new agent session (it loads the skill at start), then ask: '
+                '"What does my lease say about the deposit?"'])
             self.assertEqual([step.split("  ")[0] for step in report["setup_steps"]], [
                 "lifecontext preflight", "lifecontext service install --maintenance",
                 "lifecontext skills install", "lifecontext doctor"])
             text = render(report)
             self.assertLess(text.index("To finish the setup:"), text.index("Then:"))
-            self.assertIn("  3. Ask your agent:", text)
+            self.assertIn("  3. Start a new agent session", text)
 
     def test_timezone_detection(self) -> None:
         with tempfile.TemporaryDirectory(dir=scratch_root()) as temporary:

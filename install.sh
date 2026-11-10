@@ -405,7 +405,20 @@ link_command() {
 	fi
 	case ":$PATH:" in
 	*":$bin_dir:"*) ;;
-	*) say "Add $bin_dir to PATH to run lifecontext by name, for example in ~/.profile:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+	*)
+		# The file the login shell reads: zsh reads ~/.zprofile, not ~/.profile; bash on macOS ~/.bash_profile.
+		case "${SHELL:-}" in
+		*/zsh) profile="~/.zprofile" ;;
+		*/bash) if [ "$os" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.profile"; fi ;;
+		*/fish) profile="" ;;
+		*) profile="~/.profile" ;;
+		esac
+		if [ -n "$profile" ]; then
+			say "Add $bin_dir to PATH to run lifecontext by name: add this line to $profile, then open a new terminal:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+		else
+			say "Add $bin_dir to PATH to run lifecontext by name:  fish_add_path ~/.local/bin"
+		fi
+		;;
 	esac
 }
 
@@ -875,10 +888,27 @@ start_service() {
 
 link_skills() {
 	if [ "$no_skills" -eq 1 ]; then
+		skills_state="skipped (--no-skills)"
 		say "Skipped (--no-skills). Link it later with: lifecontext skills install"
 		return
 	fi
 	"$lc" skills install </dev/null || warn "lifecontext skills install failed; see lifecontext skills check"
+	# For the summary: the agents whose skill link is in place now.
+	linked=$("$lc" skills check --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
+import json, sys
+names = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "hermes": "Hermes"}
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+print(", ".join(names.get(item["agent"], item["agent"]) for item in report.get("agents") or []
+                if item.get("state") == "linked"))
+') || linked="?"
+	case "$linked" in
+	"?") skills_state="unknown; see lifecontext skills check" ;;
+	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
+	*) skills_state="linked for $linked" ;;
+	esac
 }
 
 remove_units_directly() {
@@ -1047,6 +1077,7 @@ main() {
 	ocr_state="unknown"
 	service_state="not installed"
 	model_state="not checked"
+	skills_state="not linked"
 	capture=0
 	[ "${LIFECONTEXT_CAPTURE:-}" != 1 ] || capture=1
 
@@ -1103,6 +1134,7 @@ finish() {
 	say "Model check: $model_state"
 	say "Service: $service_state"
 	say "OCR: $ocr_state"
+	say "Agent skill: $skills_state"
 	[ -z "$backup_archive" ] || say "Backup made before the upgrade: $backup_archive"
 	if [ "$model_state" != failed ] && [ -s "$tmp/next-steps" ]; then
 		say ""

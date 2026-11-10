@@ -562,6 +562,7 @@ class InstallEndingTests(unittest.TestCase):
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{self.root / "venv"}"\n'
             'lc="$venv/bin/lifecontext"\nlink="$HOME/.local/bin/lifecontext"\nos=Linux\n'
             'interactive=no\ncapture=${CAPTURE:-0}\nkey_changed=0\nservice_state="running"\nocr_state="ready"\n'
+            'skills_state="linked for Claude Code"\n'
             'backup_archive=""\nmodel_state=${MODEL:-passed}\ndoctor_status=${DOCTOR:-0}\n'
             + _functions("say", "warn", "die", "sha256_of", *names) + "\n" + body)
         return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
@@ -599,6 +600,7 @@ class InstallEndingTests(unittest.TestCase):
         result = self.finish()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Model check: passed\n", result.stdout)
+        self.assertIn("Agent skill: linked for Claude Code\n", result.stdout)
         self.assertTrue(result.stdout.endswith('Next steps:\n  1. Open /v in Obsidian as a vault '
                                                '("Open folder as vault").\n'))
         self.assertEqual(result.stderr, "")
@@ -655,6 +657,44 @@ class InstallWaitTests(unittest.TestCase):
         self.assertNotIn("Still waiting", result.stdout)
         self.assertIn("The last 20 lines of the service log:\n"
                       "journalctl --user -u lifecontext.service -n 20 --no-pager\na log line\n", result.stdout)
+
+
+class InstallSkillsAndPathTests(unittest.TestCase):
+    """link_skills and link_command with `lifecontext` stubbed: what the summary and the PATH hint say."""
+
+    def run_function(self, name: str, check_output: str = "", shell: str = "/bin/bash",
+                     os_name: str = "Linux") -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-skills-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        venv_bin = root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        os.symlink(sys.executable, venv_bin / "python")
+        _stub(venv_bin / "lifecontext", f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;; esac\n""")
+        harness = root / "harness.sh"
+        harness.write_text(
+            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\n'
+            f'os={os_name}\nbin_dir="$HOME/.local/bin"\nlink="$bin_dir/lifecontext"\n'
+            + _functions("say", "warn", name) + f'\n{name}\necho "skills_state=${{skills_state:-}}"\n')
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": os.defpath, "SHELL": shell}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_the_summary_names_the_agents_that_got_the_skill_or_says_none_was_found(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}, {"agent": "codex", "state": "linked"},
+                                        {"agent": "gemini", "state": "missing"}]})
+        self.assertIn("skills_state=linked for Claude Code, Codex\n", self.run_function("link_skills", report).stdout)
+        result = self.run_function("link_skills", json.dumps({"agents": []}))
+        self.assertIn("skills_state=no agent found", result.stdout)
+
+    def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
+        for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/bash", "Linux", "~/.profile"),
+                                         ("/bin/bash", "Darwin", "~/.bash_profile"),
+                                         ("/usr/bin/fish", "Linux", "fish_add_path ~/.local/bin")):
+            with self.subTest(shell=shell, os=os_name):
+                result = self.run_function("link_command", shell=shell, os_name=os_name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
 
 
 class InstallModelCheckTests(unittest.TestCase):
