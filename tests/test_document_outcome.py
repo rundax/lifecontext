@@ -173,5 +173,31 @@ class WikiReachesVaultAfterRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["document"]["outcome"], "completed")
 
 
+class CitationLabelTests(unittest.TestCase):
+    def test_a_document_citation_carries_its_title_and_filename(self):
+        from types import SimpleNamespace
+
+        from pydantic import ValidationError
+
+        from lifecontext.api.models import Citation, RecallResponse
+        from lifecontext.api.routes import _labelled
+
+        metadata = {("doc_lease", 2): {"title": "Lease", "filename": "lease.pdf"}}
+        application = SimpleNamespace(catalog=SimpleNamespace(
+            get_document_metadata=lambda sid, version: metadata.get((sid, version))))
+        evidence = {"source_id": "doc_lease", "source_version": 2, "sha256": "a" * 64}
+        labelled = _labelled(application, evidence)
+        self.assertEqual((labelled["title"], labelled["filename"]), ("Lease", "lease.pdf"))
+        journal = {"source_id": "journal_day", "source_version": 1, "sha256": "b" * 64}
+        self.assertEqual(_labelled(application, journal), journal)
+        response = RecallResponse.model_validate({"results": [
+            {"text": "Rent is due monthly.", "evidence": labelled},
+            {"text": "A day note.", "evidence": journal}], "truncated": False})
+        self.assertEqual(response.results[0].evidence.title, "Lease")
+        self.assertIsNone(response.results[1].evidence.filename)
+        with self.assertRaises(ValidationError):
+            Citation.model_validate({**evidence, "filename": "../lease.pdf"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -143,6 +143,14 @@ class Citation(APIModel):
     source_id: SourceId
     source_version: Version
     sha256: Sha256
+    # A document's title and file name from the catalog; absent for journal sources.
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("filename")
+    @classmethod
+    def safe_citation_filename(cls, value: str | None) -> str | None:
+        return _basename(value)
 
 
 class RecallResult(APIModel):

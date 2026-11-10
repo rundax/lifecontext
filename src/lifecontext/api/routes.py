@@ -59,6 +59,7 @@ from lifecontext.api.models import (
     WikiReviewResolveRequest, BriefResponse,
 )
 from lifecontext.categories import CategoryClassification
+from lifecontext.catalog import CatalogError
 from lifecontext.documents import document_outcome
 from lifecontext.api.app import DOCUMENT_MAX_BYTES
 from starlette.concurrency import run_in_threadpool
@@ -234,6 +235,17 @@ async def retain(
     return value
 
 
+def _labelled(application, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Add a document's title and file name to a citation; journal sources have neither."""
+    try:
+        metadata = application.catalog.get_document_metadata(evidence["source_id"], evidence["source_version"])
+    except (AttributeError, CatalogError, KeyError, TypeError):
+        return evidence
+    if not metadata:
+        return evidence
+    return {**evidence, "title": metadata["title"], "filename": metadata["filename"]}
+
+
 @router.post("/v1/recall", response_model=RecallResponse)
 async def recall(payload: RecallRequest, request: Request) -> RecallResponse:
     application = _application(request)
@@ -256,7 +268,7 @@ async def recall(payload: RecallRequest, request: Request) -> RecallResponse:
                     {
                         "text": item["text"],
                         "type": item.get("type"),
-                        "evidence": item["evidence"],
+                        "evidence": _labelled(application, item["evidence"]),
                     }
                     for item in value["results"]
                 ],
@@ -282,6 +294,8 @@ async def reflect(payload: ReflectRequest, request: Request) -> ReflectResponse:
         budget=payload.budget,
     )
     try:
+        if isinstance(value, dict) and isinstance(value.get("evidence"), list):
+            value = {**value, "evidence": [_labelled(application, item) for item in value["evidence"]]}
         return ReflectResponse.model_validate(value)
     except ValidationError:
         raise ApplicationError("invalid_provider_response") from None
