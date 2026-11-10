@@ -475,7 +475,7 @@
         <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
           <h3 class="panel-title">Docker</h3>
           <p>The image includes Tesseract with English, Ukrainian and Russian and the local models, and runs as an unprivileged user. No port is published: the service listens on loopback inside the container, and you talk to it with <code>docker exec</code>. Your key goes in a Compose secret, never into the image; the other settings apply on the first start. Set the provider and model you chose: there is no default, and without them the container waits and logs which one is missing.</p>
-          <p>While 1.2.0rc1 is a pre-release, the image is not published: build it from a checkout with <code>docker compose build</code> (about 3 GB) before you start it.</p>
+          <p>While 1.2.0rc1 is a pre-release, the image is not published: in a clone of the repository, run <code>docker compose build</code> first (about 3 GB) and start it with the repository’s compose.yaml.</p>
           <p class="step-label">compose.yaml</p>
           <div class="code">
             <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Copy compose.yaml" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
