@@ -42,6 +42,49 @@ def _entry(path: Path, *, directory: bool) -> dict[str, Any]:
     return {"path": str(path), "exists": True, "mode": f"{mode:04o}", "private": private}
 
 
+def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: int = 200_000) -> dict[str, Any]:
+    """Read-only scan of Journal's managed folders for paths a vault write would refuse.
+
+    Lists symlinks, special files, entries owned by another user and folders that
+    group or others can write, as vault-relative paths. Only ``lstat`` and
+    directory listings are used: no file is opened, changed or followed.
+    """
+    from lifecontext.vault import MANAGED_DIRECTORIES
+
+    uid = os.geteuid()
+    try:
+        prefix = journal.relative_to(root).as_posix()
+    except ValueError:
+        prefix = journal.name
+    paths: list[str] = []
+    count = scanned = 0
+    pending = [(journal / "README.md", f"{prefix}/README.md")]
+    pending += [(journal / name, f"{prefix}/{name}") for name in reversed(MANAGED_DIRECTORIES)]
+    while pending and scanned < max_entries:
+        path, relative = pending.pop()
+        scanned += 1
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        directory = stat.S_ISDIR(info.st_mode)
+        if (
+            info.st_uid != uid
+            or not (directory or stat.S_ISREG(info.st_mode))
+            or (directory and stat.S_IMODE(info.st_mode) & 0o022)
+        ):
+            count += 1
+            if len(paths) < limit:
+                paths.append(relative)
+        if directory:
+            try:
+                names = sorted(os.listdir(path), reverse=True)
+            except OSError:
+                continue
+            pending += [(path / name, f"{relative}/{name}") for name in names]
+    return {"paths": paths, "count": count, "truncated": bool(pending) or count > len(paths)}
+
+
 def _tesseract(run: Callable[..., Any]) -> dict[str, Any]:
     path = shutil.which("tesseract")
     if path is None:
@@ -303,6 +346,9 @@ def run_doctor(
         problems.append("vault_missing")
     elif not all(item["private"] for item in vault_entries.values()):
         problems.append("vault_unsafe")
+    refusals = _vault_refusals(root, journal) if all(item["private"] for item in vault_entries.values()) else None
+    if refusals and refusals["count"]:
+        warnings.append("vault_files_refused")
 
     vision = _vision_report(settings, credentials) if settings is not None else {"configured": None, "status": "unknown"}
     if vision["status"] == "blocked":
@@ -340,6 +386,7 @@ def run_doctor(
         "paths": {"home": home, "config": _entry(paths.config_path, directory=False),
                   "credentials": _entry(paths.credentials_path, directory=False), **{
                       f"vault_{name}": value for name, value in vault_entries.items()}},
+        "vault_refusals": refusals,
         "config": config, "credentials": credentials, "vision": vision,
         "service": service, "engine": engine,
         "operations": _operation_counts(paths.catalog_path) if home["private"] else None,
@@ -385,6 +432,11 @@ def render(report: Mapping[str, Any]) -> str:
         f"Service on port {report['command']['port']}: {service['state']}"
         + (f", ready: {'yes' if service.get('ready') else 'no'}" if service["state"] == "running" else ""),
     ]
+    refused = report.get("vault_refusals") or {}
+    if refused.get("count"):
+        more = refused["count"] - len(refused["paths"])
+        lines.append("Vault paths LifeContext would refuse to write through: " + ", ".join(refused["paths"])
+                     + (f" and {more} more" if more > 0 else ""))
     lines.append(_render_engine(report.get("engine") or {}))
     if "lint" in service:
         lint = service["lint"]

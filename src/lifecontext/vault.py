@@ -25,7 +25,7 @@ _WRITABLE_DIRECTORIES = frozenset(
 )
 _READ_ONLY_DIRECTORIES = frozenset({"expectations"})
 _READ_ONLY_PATHS = frozenset({("wiki", "SCHEMA.md")})
-_MANAGED_DIRECTORIES = (
+MANAGED_DIRECTORIES = (
     "entries",
     "relationships",
     "indices",
