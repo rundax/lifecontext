@@ -170,6 +170,23 @@ class LlmSetTests(unittest.TestCase):
                     self.assertEqual((code, json.loads(out)["error"]), (1, error))
                     self.assertEqual((paths.config_path.read_bytes(), paths.credentials_path.read_bytes()), before)
 
+    def test_each_refused_setting_says_why(self) -> None:
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            compatible = ("--provider", "openai_compatible", "--model", "m", "--base-url")
+            for arguments, words in (
+                ((*compatible, "http://192.168.1.5:11434/v1"), "http only with localhost, 127.0.0.1 or ::1"),
+                ((*compatible, "https://example.invalid/v1/chat/completions"), "give the API root instead"),
+                (("--provider", "nonsense", "--model", "m"), "use one of: anthropic, "),
+                (("--base-url", "ftp://example.invalid/v1"), "check the provider name, the exact model ID"),
+            ):
+                with self.subTest(arguments=arguments):
+                    code, out, _ = _run("set", *arguments, "--json", restart=None)
+                    failure = json.loads(out)
+                    self.assertEqual((code, failure["error"]), (1, "invalid_llm_settings"))
+                    self.assertIn(words, failure["message"])
+                    self.assertNotIn("192.168.1.5", failure["message"])
+
     def test_a_new_provider_without_a_model_says_to_add_one(self) -> None:
         with _home():
             _initialize(provider="openai", model="gpt-test-model")

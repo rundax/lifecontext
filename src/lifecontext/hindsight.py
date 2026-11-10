@@ -122,8 +122,10 @@ def _has_unsafe_line_character(value: str) -> bool:
 class HindsightStartupError(RuntimeError):
     """A stable failure code that never includes provider messages."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, message: str | None = None):
         self.code = code
+        # A fixed sentence for people; never provider text or the refused value itself.
+        self.message = message
         super().__init__(code)
 
 
@@ -296,16 +298,21 @@ def validate_model_endpoint(
     hostname = parsed.hostname
     if "%" in hostname:
         raise HindsightStartupError("invalid_config")
-    if (
-        (port is not None and not 1 <= port <= 65535)
-        or (parsed.scheme != "https" and not is_loopback_host(hostname))
-        or not _valid_hostname(hostname)
-    ):
+    if (port is not None and not 1 <= port <= 65535) or not _valid_hostname(hostname):
         raise HindsightStartupError("invalid_config")
+    if parsed.scheme != "https" and not is_loopback_host(hostname):
+        raise HindsightStartupError("invalid_config", _HTTP_REFUSED)
     if provider == "openai_compatible" and parsed.path.casefold().rstrip("/").endswith(
         ("/chat/completions", "/responses")
     ):
-        raise HindsightStartupError("invalid_config")
+        raise HindsightStartupError("invalid_config", _ENDPOINT_REFUSED)
+
+
+# Why a base URL was refused, one sentence each.
+_HTTP_REFUSED = ("the base URL uses http on a host other than this machine; use https, or http only with "
+                 "localhost, 127.0.0.1 or ::1")
+_ENDPOINT_REFUSED = ("the base URL names one endpoint (/chat/completions or /responses); give the API root "
+                     "instead, for example https://api.example.com/v1")
 
 
 def _valid_hostname(hostname: str) -> bool:

@@ -61,6 +61,9 @@ MESSAGES = {
         f"{', '.join(sorted(FORCED_TOOL_REJECTING_MODELS))} do not work with LifeContext yet: its retain step "
         "uses strict structured output, which on Anthropic is a forced tool call, and these models refuse a "
         f"forced tool choice. Use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL} (it costs less)."),
+    "invalid_llm_settings": (
+        "The model settings were refused: check the provider name, the exact model ID and the base URL "
+        "(https, or http only on this machine; the API root, not one endpoint)."),
 }
 # llm set changes one setting at a time and reads no LIFECONTEXT_* variables.
 _LLM_SET_MESSAGES = {
@@ -86,6 +89,11 @@ class InitError(RuntimeError):
         super().__init__(code)
         self.code = code
         self.message = message or MESSAGES.get(code)
+
+
+def _refused(error: HindsightStartupError) -> str | None:
+    """The sentence for refused model settings when the check said why; else the generic one."""
+    return f"The model settings were refused: {error.message}." if error.message else None
 
 
 def rejects_forced_tool(llm: Mapping[str, Any]) -> bool:
@@ -251,7 +259,8 @@ def _choose_endpoint(given: Mapping[str, str | None], configured: Mapping[str, A
     if not provider:
         raise InitError("provider_required")
     if provider not in _PROVIDERS:
-        raise InitError("invalid_llm_settings")
+        raise InitError("invalid_llm_settings", "The model provider is not one LifeContext knows; use one of: "
+                        + ", ".join(sorted(_PROVIDERS)) + ".")
     same = configured if provider == configured.get("provider") else {}
     base_url = given["base_url"]
     if choice in (1, 2, 3, 4):
@@ -386,8 +395,8 @@ def run_init(
     if config_exists and not options.force:
         try:
             llm = _validated_profile_settings({"llm": existing["llm"]})
-        except HindsightStartupError:
-            raise InitError("invalid_llm_settings") from None
+        except HindsightStartupError as exc:
+            raise InitError("invalid_llm_settings", _refused(exc)) from None
         root = Path(existing_vault["root"]) if existing_vault else default_root
         journal = Path(existing_vault["journal_path"]) if existing_vault else root / "Journal"
         timezone = existing.get("timezone")
@@ -413,8 +422,8 @@ def run_init(
             llm_input["base_url"] = base_url
         try:
             llm = _validated_profile_settings({"llm": llm_input})
-        except HindsightStartupError:
-            raise InitError("invalid_llm_settings") from None
+        except HindsightStartupError as exc:
+            raise InitError("invalid_llm_settings", _refused(exc)) from None
         # A config that already names one of these models is kept as it is (doctor warns).
         if (provider == "anthropic" and model in FORCED_TOOL_REJECTING_MODELS
                 and (configured.get("provider"), configured.get("model")) != (provider, model)):
@@ -586,8 +595,8 @@ def show_llm() -> dict[str, Any]:
         raise InitError("config_missing")
     try:
         llm = _validated_profile_settings({"llm": settings["llm"]})
-    except HindsightStartupError:
-        raise InitError("invalid_llm_settings") from None
+    except HindsightStartupError as exc:
+        raise InitError("invalid_llm_settings", _refused(exc)) from None
     credentials = _existing_credentials(paths)
     if credentials and credentials.get("LIFEWEAVE_LLM_API_KEY"):
         key = "set"
