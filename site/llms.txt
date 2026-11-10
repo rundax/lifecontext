@@ -24,7 +24,7 @@ Current version: 1.2. Platforms: Linux x86_64 and aarch64 (glibc 2.35 or later) 
 - One agent skill for Claude Code, Codex, Gemini CLI and Hermes (`lifecontext skills install`).
 - An MCP server (`lifecontext mcp`, stdio) for MCP clients such as Claude Desktop and Cursor, new in 1.2. It is read-only by default; `--allow-writes` lets clients capture and import. Desktop apps do not read the shell PATH, so configure the full path from `command -v lifecontext`.
 - Connected agents run the CLI with the owner's authority. The skill tells them what not to do; LifeContext does not enforce per-agent permissions.
-- Bring your own model: one at a time, with no default. The installer and `lifecontext init` ask the user to choose Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server (Ollama, vLLM, LM Studio) or another OpenAI-compatible endpoint; unattended installs set `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL`. With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and Mythos 5.1 do not work yet.
+- Bring your own model: one at a time, with no default. The installer and `lifecontext init` ask the user to choose Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server (Ollama, vLLM, LM Studio) or another OpenAI-compatible endpoint; unattended installs set `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL`. With Anthropic, `claude-sonnet-5` is expected to work (not yet qualified end to end) and `claude-haiku-5-5` costs less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and Mythos 5.1 do not work yet.
 
 ## What leaves the machine
 

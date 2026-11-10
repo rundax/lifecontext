@@ -195,8 +195,9 @@ and use either the plugin or `lifecontext skills install` for Claude Code.
 
 LifeContext uses one model at a time and has no default: the installer and
 `lifecontext init` ask you to pick the provider and the model, and the text of
-your documents and notes is sent to it. With Anthropic, `claude-sonnet-5` works
-and `claude-haiku-5-5` costs less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and
+your documents and notes is sent to it. With Anthropic, `claude-sonnet-5` is
+expected to work (not yet qualified end to end) and `claude-haiku-5-5` costs
+less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and
 Mythos 5.1 do not work yet. Change it later with `lifecontext llm set`; every
 provider, field and rule, the API key and the optional vision model are in
 [docs/operations.md](docs/operations.md#choosing-the-model).
