@@ -9,7 +9,8 @@ or passage, and the source version, so you can check it.
 
 For people who work with AI agents and keep documents that matter: leases,
 contracts, insurance, tax and medical letters, research PDFs, scans in
-English, Ukrainian or Russian.
+English, Ukrainian or Russian. OCR and reranking cover Ukrainian and Russian;
+search quality for text that is not in English improves in a later release.
 
 Free for one person for their own use, including at work; businesses need a
 commercial license ([License](#license)). Linux, and macOS on Apple silicon.
@@ -62,7 +63,9 @@ the lease's wiki page holds the quote and its page.
   adds a version, and pages built on a corrected or forgotten source are
   marked stale.
 - **Scans read locally**: Tesseract OCR for English, Ukrainian and Russian.
-  Pages it could not read are listed, not skipped.
+  Pages it could not read are listed, not skipped. Recall reranks Ukrainian
+  and Russian text too; its embedding model is English-only, so search in
+  other languages improves in a later release.
 - **One memory for your agents**: one CLI and one skill for Claude Code, Codex,
   Gemini CLI and Hermes, and a read-only MCP server for Claude Desktop and
   Cursor.
