@@ -786,6 +786,25 @@ except Exception:
 ' "http://127.0.0.1:$API_PORT/healthz" </dev/null
 }
 
+# The command that shows the service's log.
+log_command() {
+	if [ "$os" = Linux ]; then
+		printf '%s\n' "journalctl --user -u lifecontext.service"
+	else
+		printf '%s\n' "tail -f ~/Library/Logs/lifecontext/serve.log"
+	fi
+}
+
+# The last 20 lines of the service's log.
+show_log_tail() {
+	say "The last 20 lines of the service log:"
+	if [ "$os" = Linux ]; then
+		journalctl --user -u lifecontext.service -n 20 --no-pager </dev/null 2>&1 || true
+	else
+		tail -n 20 "$HOME/Library/Logs/lifecontext/serve.log" </dev/null 2>&1 || true
+	fi
+}
+
 wait_for_api() {
 	waited=0
 	while [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; do
@@ -794,6 +813,10 @@ wait_for_api() {
 		fi
 		sleep 5
 		waited=$((waited + 5))
+		# The first start can take minutes (models, the memory engine); say it is still going.
+		if [ $((waited % 20)) -eq 0 ] && [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; then
+			say "Still waiting for the API ($waited s of up to $HEALTH_WAIT_SECONDS s); follow the log with: $(log_command)"
+		fi
 	done
 	return 1
 }
@@ -845,6 +868,8 @@ start_service() {
 	else
 		service_state="installed, still starting"
 		warn "the API did not answer within $HEALTH_WAIT_SECONDS s; check lifecontext service status and lifecontext doctor"
+		show_log_tail
+		say "The full log: $(log_command)"
 	fi
 }
 

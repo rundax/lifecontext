@@ -618,6 +618,45 @@ class InstallEndingTests(unittest.TestCase):
         self.assertIn("lifecontext doctor reported a problem", result.stderr)
 
 
+class InstallWaitTests(unittest.TestCase):
+    """wait_for_api with the health check, sleep and journalctl stubbed."""
+
+    def run_wait(self, answers_after: int, wait: int) -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-wait-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        stubs = root / "stubs"
+        stubs.mkdir()
+        _stub(stubs / "sleep", "exit 0\n")
+        _stub(stubs / "journalctl", 'echo "journalctl $*"\necho "a log line"\n')
+        harness = root / "harness.sh"
+        harness.write_text(
+            f"set -eu\nos=Linux\nHEALTH_WAIT_SECONDS={wait}\ncount=0\n"
+            f'api_answers() {{ count=$((count + 1)); [ "$count" -gt {answers_after} ]; }}\n'
+            + _functions("say", "warn", "log_command", "show_log_tail", "wait_for_api")
+            + '\nif wait_for_api; then echo answered; else show_log_tail; fi\n')
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": f"{stubs}:{os.defpath}"}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_a_long_wait_says_how_long_and_where_the_log_is_every_20_seconds(self) -> None:
+        result = self.run_wait(answers_after=9, wait=900)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "Still waiting for the API (20 s of up to 900 s); follow the log with: "
+            "journalctl --user -u lifecontext.service",
+            "Still waiting for the API (40 s of up to 900 s); follow the log with: "
+            "journalctl --user -u lifecontext.service",
+            "answered"])
+
+    def test_a_timeout_shows_the_last_20_log_lines(self) -> None:
+        result = self.run_wait(answers_after=99, wait=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Still waiting", result.stdout)
+        self.assertIn("The last 20 lines of the service log:\n"
+                      "journalctl --user -u lifecontext.service -n 20 --no-pager\na log line\n", result.stdout)
+
+
 class InstallModelCheckTests(unittest.TestCase):
     """check_model with `lifecontext preflight --model-probe` replaced by a stub."""
 
