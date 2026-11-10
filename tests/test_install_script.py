@@ -395,7 +395,7 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.harness = root / "harness.sh"
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
-            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_yes",
+            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_no",
                          "choose_provider", "ask_anthropic_model", "print_init_report", "configure_interactive")
             + '\nconfigure_interactive\necho "capture=$capture"\n')
 
@@ -462,7 +462,7 @@ class InstallEndpointPromptTests(unittest.TestCase):
             ("Choose 1-6: ", "6"), ("API base URL", "http://127.0.0.1:9999/v1"),
             ("Model ID (exactly as your endpoint names it)", "other-model"), ("API key", key),
             ("Vault folder", str(self.home / "Notes")),
-            ("Turn notes you put in Journal/Inbox into journal entries automatically? [Y/n]", "")])
+            ("Turn notes you put in Journal/Inbox into journal entries automatically? [y/N]", "")])
         self.assertEqual(code, 0, transcript)
         self.assertNotIn(key, transcript)
         recorded = self.calls.read_text().splitlines()
@@ -471,7 +471,8 @@ class InstallEndpointPromptTests(unittest.TestCase):
                                       f"--base-url http://127.0.0.1:9999/v1")
         self.assertEqual(recorded[1], f"key={key} -rw------- {self.tmp}")
         self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
-        self.assertIn("capture=1", transcript)
+        # Inbox capture is off unless asked for.
+        self.assertIn("capture=0", transcript)
 
     def test_a_rerun_that_finds_no_key_asks_for_it_hidden_at_a_terminal(self) -> None:
         key = "sk-typed-again-0123456789"
@@ -511,13 +512,14 @@ class InstallEndpointPromptTests(unittest.TestCase):
         code, transcript = self.converse([
             ("Choose 1-6: ", "1"), (f"{model_question('anthropic')} [claude-sonnet-5]", "claude-opus-5-5"),
             # Enter at the model prompt asked again takes the suggestion.
-            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "")],
+            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "y")],
             LIFECONTEXT_BASE_URL="http://127.0.0.1:8000/v1")
         self.assertEqual(code, 0, transcript)
         self.assertNotIn("URL", transcript)
         self.assertEqual(self.calls.read_text().splitlines(), [
             (f"init --non-interactive --json --provider anthropic --model claude-sonnet-5 "
              f"--vault {self.home}/LifeContext/vault")])
+        self.assertIn("capture=1", transcript)
 
     def test_the_refused_models_and_the_model_lists_match_lifecontext_init(self) -> None:
         from lifecontext.initialize import (

@@ -508,6 +508,16 @@ ask_secret() {
 	printf '\n' >/dev/tty
 }
 
+# ask_no QUESTION: $reply is 1 only when the answer starts with y.
+ask_no() {
+	printf '%s [y/N]: ' "$1" >/dev/tty
+	IFS= read -r reply </dev/tty || reply=""
+	case "$reply" in
+	[Yy]*) reply=1 ;;
+	*) reply=0 ;;
+	esac
+}
+
 # ask_yes QUESTION: $reply is 1 unless the answer starts with n.
 ask_yes() {
 	printf '%s [Y/n]: ' "$1" >/dev/tty
@@ -589,7 +599,7 @@ configure_interactive() {
 	api_key=$reply
 	ask "Vault folder (the folder you open in Obsidian)" "${LIFECONTEXT_VAULT:-$HOME/LifeContext/vault}"
 	vault=$reply
-	ask_yes "Turn notes you put in Journal/Inbox into journal entries automatically?"
+	ask_no "Turn notes you put in Journal/Inbox into journal entries automatically?"
 	capture=$reply
 	say "You can change the model later with: lifecontext llm set"
 
