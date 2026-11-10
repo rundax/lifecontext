@@ -169,6 +169,9 @@ detect_platform() {
 as_root() {
 	if [ "$(id -u)" -eq 0 ]; then
 		"$@"
+	elif [ "${sudo_asked:-0}" -eq 1 ]; then
+		# The person said yes at the terminal: sudo asks for the password there.
+		sudo "$@"
 	else
 		sudo -n "$@"
 	fi
@@ -176,6 +179,16 @@ as_root() {
 
 can_run_as_root() {
 	[ "$(id -u)" -eq 0 ] || { command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; }
+}
+
+# may_install_as_root: root or password-less sudo; in an interactive run at a terminal,
+# also sudo with a password once the person agrees. --non-interactive never asks.
+may_install_as_root() {
+	can_run_as_root && return 0
+	[ "$interactive" != no ] && command -v sudo >/dev/null 2>&1 && tty_available || return 1
+	ask_yes "Install Tesseract with sudo now?"
+	[ "$reply" -eq 1 ] || return 1
+	sudo_asked=1
 }
 
 ocr_ready() {
@@ -411,7 +424,7 @@ install_ocr() {
 		fi
 	elif command -v apt-get >/dev/null 2>&1; then
 		ocr_command="sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with apt-get"
 			{ as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
 				as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
@@ -420,14 +433,14 @@ install_ocr() {
 		fi
 	elif command -v dnf >/dev/null 2>&1; then
 		ocr_command="sudo dnf install tesseract tesseract-langpack-eng tesseract-langpack-rus tesseract-langpack-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with dnf"
 			as_root dnf install -y -q tesseract tesseract-langpack-eng tesseract-langpack-rus \
 				tesseract-langpack-ukr </dev/null || warn "dnf could not install Tesseract"
 		fi
 	elif command -v pacman >/dev/null 2>&1; then
 		ocr_command="sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with pacman"
 			# --noconfirm: pacman reads its confirmation from the terminal, and there is none here.
 			as_root pacman -S --needed --noconfirm tesseract tesseract-data-eng tesseract-data-rus \

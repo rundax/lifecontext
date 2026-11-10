@@ -277,14 +277,58 @@ class InstallOcrTests(unittest.TestCase):
         _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n'
               + ('if [ "$2" = true ]; then exit 0; fi\nshift\nexec "$@"\n' if works else "exit 1\n"))
 
-    def run_install_ocr(self):
+    def harness(self, interactive: str) -> Path:
         harness = Path(self.temp.name) / "harness.sh"
-        harness.write_text("set -eu\nos=Linux\n" + _functions(
-            "say", "warn", "as_root", "can_run_as_root", "ocr_ready", "install_ocr")
-            + '\ninstall_ocr\necho "ocr_state=$ocr_state"\n')
+        harness.write_text(f"set -eu\nos=Linux\ninteractive={interactive}\n" + _functions(
+            "say", "warn", "tty_available", "ask_yes", "as_root", "can_run_as_root", "may_install_as_root",
+            "ocr_ready", "install_ocr") + '\ninstall_ocr\necho "ocr_state=$ocr_state"\n')
+        return harness
+
+    def run_install_ocr(self):
         env = {"PATH": str(self.stubs), "HOME": self.temp.name}
-        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True, env=env,
+        return subprocess.run(["/bin/sh", str(self.harness("no"))], text=True, capture_output=True, env=env,
                               stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+    @unittest.skipIf(pty is None, "needs pseudo-terminals")
+    def test_an_interactive_run_asks_before_using_sudo_with_a_password(self) -> None:
+        # sudo -n fails (a password is needed); plain sudo "asks" and runs the command.
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n[ "$1" = -n ] && exit 1\nexec "$@"\n')
+        for answer, expected in (("", "ocr_state=ready"), ("n", "ocr_state=missing: sudo pacman")):
+            with self.subTest(answer=answer):
+                self.calls.unlink(missing_ok=True)
+                self.installed.unlink(missing_ok=True)
+                pid, descriptor = pty.fork()
+                if pid == 0:
+                    os.execve("/bin/sh", ["sh", str(self.harness("auto"))],
+                              {"PATH": str(self.stubs), "HOME": self.temp.name})
+                transcript = b""
+                deadline = time.monotonic() + 60
+                answered = False
+                try:
+                    while time.monotonic() < deadline:
+                        if not answered and b"Install Tesseract with sudo now?" in transcript \
+                                and transcript.endswith(b"[Y/n]: "):
+                            os.write(descriptor, (answer + "\n").encode())
+                            answered = True
+                        if not select.select([descriptor], [], [], 1)[0]:
+                            continue
+                        try:
+                            data = os.read(descriptor, 4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        transcript += data
+                finally:
+                    os.close(descriptor)
+                    os.waitpid(pid, 0)
+                text = transcript.decode(errors="replace")
+                self.assertTrue(answered, text)
+                self.assertIn(expected, text)
+                packages = "tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
+                self.assertEqual(self.logged(), ["sudo -n true"] + (
+                    [f"sudo pacman -S --needed --noconfirm {packages}", f"pacman -S --needed --noconfirm {packages}"]
+                    if answer == "" else []))
 
     def logged(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
