@@ -345,6 +345,16 @@ class OperationResponse(APIModel):
     summary: OperationSummary = Field(default_factory=OperationSummary)
 
 
+class OperationListItem(OperationResponse):
+    operation_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    created_at: str = Field(max_length=64)
+    updated_at: str = Field(max_length=64)
+
+
+class OperationListResponse(APIModel):
+    operations: list[OperationListItem] = Field(max_length=1000)
+
+
 class DocumentOperationResponse(OperationResponse):
     document: DocumentResponse | None = None
     # ``completed_with_errors`` when the operation finished but a wiki or vault stage failed.

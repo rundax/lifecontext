@@ -75,12 +75,19 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_indexing_failure_is_a_retryable_outcome(self):
         self.provider.fail_at = 1
-        document = (await self.ingest())["document"]
+        result = await self.ingest()
+        document = result["document"]
         self.assertEqual(document["outcome"], "retryable_failed")
         self.assertEqual([p["stage"] for p in document["problems"]], ["indexing"])
+        failed = self.catalog.list_operations(state="retryable_failed")
+        self.assertEqual([row["operation_id"] for row in failed], [result["operation_id"]])
+        self.assertEqual(self.catalog.list_operations(state="completed"), [])
 
 
-class DocumentRetryBySourceTests(DocumentOutcomeTests):
+class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
+    setUp = DocumentOutcomeTests.setUp
+    ingest = DocumentOutcomeTests.ingest
+
     def flaky_wiki(self, failures=1):
         calls = []
 

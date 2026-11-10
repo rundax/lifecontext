@@ -56,7 +56,7 @@ from lifecontext.api.models import (
     CategoryMergeRequest, CategoryReassignRequest, WikiPageRecord, WikiListResponse,
     WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
     WikiLintResponse, WikiReviewListResponse, WikiReviewMutationResponse, WikiReviewRecord,
-    WikiReviewResolveRequest, BriefResponse,
+    WikiReviewResolveRequest, BriefResponse, OperationListResponse,
 )
 from lifecontext.categories import CategoryClassification
 from lifecontext.catalog import CatalogError
@@ -835,6 +835,20 @@ async def download_document(source_id: SourceId, request: Request, version: Anno
         "Content-Disposition": "attachment; filename=\"document\"; filename*=UTF-8''" + quote(document.filename, safe=""),
         "X-Content-Type-Options": "nosniff",
     })
+
+
+@router.get("/v1/operations", response_model=OperationListResponse)
+async def list_operations(
+    request: Request,
+    state: Literal["pending", "running", "retryable_failed", "permanent_failed", "completed", "cancelled"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> OperationListResponse:
+    """Newest operations first; ``state=retryable_failed`` lists what a retry can pick up."""
+    rows = _application(request).list_operations(state=state, limit=limit)
+    try:
+        return OperationListResponse.model_validate({"operations": rows})
+    except ValidationError:
+        raise ApplicationError("invalid_provider_response") from None
 
 
 @router.get("/v1/operations/{operation_id}", response_model=OperationResponse)

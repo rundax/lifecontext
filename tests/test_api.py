@@ -486,7 +486,7 @@ class APIHTTPTests(unittest.TestCase):
                 "/v1/projections/reconcile",
                 "/v1/evidence/{source_id}", "/v1/curation", "/v1/relationships",
                 "/v1/relationships/scan", "/v1/relationships/{edge_id}/decision",
-                "/v1/imports", "/v1/exports", "/v1/operations/{operation_id}",
+                "/v1/imports", "/v1/exports", "/v1/operations", "/v1/operations/{operation_id}",
                 "/v1/documents", "/v1/documents/{source_id}",
                 "/v1/documents/{source_id}/original",
                 "/v1/documents/operations/{operation_id}/retry",
@@ -1181,6 +1181,15 @@ class APIHTTPTests(unittest.TestCase):
             )
         finally:
             self.application.limits = original_limits
+
+    def test_operations_are_listed_by_state(self) -> None:
+        status, _, body = self._request("/v1/operations?state=retryable_failed")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(item["state"] == "retryable_failed" for item in body["operations"]))
+        status, _, body = self._request("/v1/operations")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(body["operations"], list)
+        self._assert_error(self._request("/v1/operations?state=unknown"), 422, "invalid_request")
 
     def test_a_document_above_the_configured_file_limit_is_too_large(self) -> None:
         original_limits = self.application.limits

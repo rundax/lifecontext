@@ -2944,6 +2944,15 @@ class JournalApplication:
             },
         }
 
+    def list_operations(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state, with the same bounded summary."""
+        try:
+            rows = self.catalog.list_operations(state=state, limit=limit)
+        except CatalogError:
+            raise ApplicationError("invalid_request") from None
+        return [{**self.operation_status(row["operation_id"]), "operation_kind": row["operation_kind"],
+                 "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         """Expose durable state with only the API's bounded summary fields."""
         try:
