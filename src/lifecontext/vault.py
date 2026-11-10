@@ -61,10 +61,16 @@ class VaultError(ValueError):
         self.retryable = retryable
 
 
-def _refused(code: str) -> VaultError:
-    """A refusal caused by what is on disk at a target's path (not by the request)."""
-    error = VaultError(code)
-    error.on_disk = True
+# A symlink in the way (ELOOP; EMLINK on BSD), a file where a folder belongs, or no access:
+# what is on disk refused the call. Other errors (a name too long, ...) say nothing about the disk.
+_ON_DISK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK, errno.ENOTDIR, errno.EACCES, errno.EPERM})
+_MAX_REFUSED_PATH = 4096
+
+
+def _refused(exc: OSError) -> VaultError:
+    """The stable error for a failed open below ``Journal``, marked when the disk caused it."""
+    error = VaultError("unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path")
+    error.on_disk = exc.errno in _ON_DISK_ERRNOS
     return error
 
 
@@ -180,7 +186,8 @@ def _tighten_own_file(descriptor: int, info: os.stat_result) -> None:
     checked folders) and ``_check_file_fd`` has confirmed a regular file of
     this user, so ``fchmod`` cannot reach a symlink's target or another file.
     """
-    if os.name != "posix":
+    if os.name != "posix" or info.st_nlink != 1:
+        # A second hard link may be a file outside the vault: leave its mode alone.
         return
     mode = stat.S_IMODE(info.st_mode)
     if mode & ~0o600:
@@ -233,8 +240,7 @@ def _read_target(parent_fd: int, name: str) -> tuple[int, os.stat_result, bytes]
     except FileNotFoundError as exc:
         raise VaultError("not_found") from exc
     except OSError as exc:
-        code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise _refused(code) from exc
+        raise _refused(exc) from exc
     try:
         info = _check_file_fd(descriptor)
         return descriptor, info, _read_fd(descriptor)
@@ -252,8 +258,7 @@ def _open_subdirectory(parent_fd: int, name: str) -> int:
     except FileNotFoundError as exc:
         raise VaultError("unsafe_path") from exc
     except OSError as exc:
-        code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-        raise _refused(code) from exc
+        raise _refused(exc) from exc
     try:
         _check_subdirectory_fd(descriptor)
     except BaseException as exc:
@@ -337,7 +342,9 @@ class VaultWriterLock:
             if not stat.S_ISREG(info.st_mode):
                 raise VaultError("unsafe_path")
             _check_owner(info)
-            if os.name == "posix" and (not existed or stat.S_IMODE(info.st_mode) != 0o600):
+            if os.name == "posix" and (
+                not existed or (stat.S_IMODE(info.st_mode) != 0o600 and info.st_nlink == 1)
+            ):
                 # LifeContext's own lock file, opened O_NOFOLLOW in the private root.
                 os.fchmod(self._handle, 0o600)
                 info = os.fstat(self._handle)
@@ -515,9 +522,10 @@ class ManagedVault:
             yield
         except VaultError as exc:
             if exc.on_disk:
-                exc.path = self._vault_relative(relative_path)
-                if exc.path is not None:
-                    self.last_refusal = {"path": exc.path, "error": exc.code}
+                path = self._vault_relative(relative_path)
+                if path is not None and len(path) <= _MAX_REFUSED_PATH:
+                    exc.path = path
+                    self.last_refusal = {"path": path, "error": exc.code}
             raise
         else:
             refusal = self.last_refusal

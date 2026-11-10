@@ -229,6 +229,15 @@ class TargetPathTests(unittest.TestCase):
         self.assertTrue(self.vault.safe_write_text("entries/source-v1.md", entry, overwrite=True))
         self.assertEqual(stat.S_IMODE(written.stat().st_mode), 0o600)
 
+    def test_hard_linked_file_is_never_chmodded(self) -> None:
+        self.assertTrue(self._write_page())
+        page = self.wiki / "Lease.md"
+        page.chmod(0o644)
+        elsewhere = self.base / "elsewhere.md"
+        os.link(page, elsewhere)
+        self.assertTrue(self._write_page(b"page", hashlib.sha256(b"page").hexdigest()))
+        self.assertEqual(stat.S_IMODE(elsewhere.stat().st_mode), 0o644)
+
     def test_own_file_with_extra_bits_is_replaced_by_a_private_one(self) -> None:
         self.assertTrue(self._write_page())
         page = self.wiki / "Lease.md"

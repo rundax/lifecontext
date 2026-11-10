@@ -101,6 +101,9 @@ class VaultReadinessTests(unittest.TestCase):
         self.assertIsNone(raised.exception.path)
         with self.assertRaises(VaultError):
             self.vault.safe_write_text(".obsidian/app.json", "x")
+        with self.assertRaises(VaultError) as raised:
+            self.vault.safe_write_text("entries/" + "a" * 300 + ".md", "x")
+        self.assertIsNone(raised.exception.path)
         self.assertIsNone(self.app.readiness()["dependencies"]["vault"]["refused_path"])
 
 
