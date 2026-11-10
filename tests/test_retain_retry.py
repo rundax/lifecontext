@@ -112,6 +112,24 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), 2)
         self.assertEqual(self._operation_state(), ("retryable_failed", "retain_failed"))
 
+    def test_retry_never_indexes_an_older_version_over_a_newer_one(self) -> None:
+        source_id = "src_retry_older_version"
+        key = "retain-retry-old-version-key"
+        self._fail_once(source_id, b"first version", key)
+        asyncio.run(self.app.retain(
+            source_id, 2, b"second version", provenance={"source": "test"},
+            idempotency_key="retain-retry-second-version",
+        ))
+        calls = len(self.client.retain_calls)
+
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.retain(
+                source_id, 1, b"first version", provenance={"source": "test"},
+                idempotency_key=key,
+            ))
+        self.assertEqual(caught.exception.code, "source_conflict")
+        self.assertEqual(len(self.client.retain_calls), calls)
+
     def test_different_payload_under_failed_key_is_still_a_conflict(self) -> None:
         source_id = "src_retry_conflict"
         original = b"original failed note"

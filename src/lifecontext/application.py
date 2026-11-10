@@ -1367,6 +1367,15 @@ class JournalApplication:
             and metadata.get("source_checksum") == manifest.sha256
         )
 
+    def _newer_version_exists(self, source_id: str, source_version: int) -> bool:
+        try:
+            return any(
+                manifest.source_version > source_version
+                for manifest in self.catalog.list_source_manifests(source_id)
+            )
+        except CatalogError:
+            raise ApplicationError("internal_error") from None
+
     def _record_recovery_failure(self, operation: dict[str, Any], code: str) -> None:
         state = operation["state"]
         if state == "retryable_failed":
@@ -2029,6 +2038,9 @@ class JournalApplication:
         if retrying:
             if operation["result"].get("recovery_intent") != intent_result["recovery_intent"]:
                 raise ApplicationError(operation["error_code"] or "retain_failed")
+            if self._newer_version_exists(source_id, source_version):
+                # The engine keeps one document per source; never index an older version over it.
+                raise ApplicationError("source_conflict")
         else:
             try:
                 operation = self.catalog.set_operation_intent(
