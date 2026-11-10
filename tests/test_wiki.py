@@ -490,7 +490,7 @@ class WikiTests(unittest.TestCase):
         patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
         self.assertEqual(len(patch.claims), 40)
         # Every window asks for the own page only; the summary and routing requests carry no evidence.
-        self.assertEqual(keys, [{"target", "example_patch", "evidence"}] * 40 + [{"document", "claims"}, {"document", "claims", "pages", "existing_claims"}])
+        self.assertEqual(keys, [{"target", "max_claims", "example_patch", "evidence"}] * 40 + [{"document", "claims"}, {"document", "claims", "pages", "existing_claims"}])
         self.assertEqual({c.citations[0].passage_start for c in patch.claims}, set(range(40)))
 
     def windowed(self, texts):
@@ -722,7 +722,8 @@ class WikiTests(unittest.TestCase):
 
         self.service.hindsight = SimpleNamespace(reflect=reflect)
         self.update()
-        self.assertLess(len(calls), MAX_SOURCE_CLAIMS)
+        # Each of the 48 sampled windows keeps its quota of one claim; the page never overflows.
+        self.assertEqual(len(calls), MAX_SOURCE_CLAIMS)
         page = self.catalog.get_wiki_page(PAGE)
         patch = self.service.store.read(PAGE, 1, self.catalog.get_wiki_revision(PAGE, 1)["artifact_sha256"])
         self.assertEqual(page["title"], "Original")

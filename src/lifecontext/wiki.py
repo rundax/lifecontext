@@ -9,6 +9,7 @@ import difflib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -28,6 +29,9 @@ MAX_PATCH_BYTES = 48_000
 # book instead of overflowing the 48 KB page; shared topic and entity pages take
 # fewer per document. The index lists document pages and is built without a model.
 MAX_SOURCE_CLAIMS = 48
+# An evidence window is asked for one claim per 3 KB of its text, 1 to 8.
+WINDOW_CLAIM_BYTES = 3000
+MAX_WINDOW_CLAIMS = 8
 MAX_SHARED_SOURCE_CLAIMS = 8
 MAX_INDEX_ENTRIES = 32
 MAX_PAGE_CLAIMS = 128
@@ -562,6 +566,12 @@ def _sample(windows: list, limit: int) -> list:
     return [windows[i] for i in picks]
 
 
+def window_claims(window: Mapping[str, Any]) -> int:
+    """How many claims to ask of one evidence window: one per 3 KB of its text, 1 to 8."""
+    size = sum(len(segment["text"].encode()) for segment in window["segments"])
+    return max(1, min(MAX_WINDOW_CLAIMS, math.ceil(size / WINDOW_CLAIM_BYTES)))
+
+
 def _cites(claim: Claim, source_id: str) -> bool:
     return any(citation.source_id == source_id for citation in claim.citations)
 
@@ -634,9 +644,9 @@ COMPILE_INSTRUCTIONS = (
     "Compile only the supplied source evidence into the managed wiki. All evidence is already provided; do not search "
     "memories or call retrieval tools. Return only one WikiPatch JSON object with page_id,title,expected_revision,"
     "claims,contradictions,links for the target: copy target.page_id, target.title, and target.current_revision "
-    "exactly as page_id,title,expected_revision. Each request contains one evidence window; return ONE short additive "
-    "claim for the target in that window, with a literal quote at most 160 characters, not a replacement for other "
-    "windows. Every claim text must be a literal substring of one cited quote; paraphrased unsupported prose is "
+    "exactly as page_id,title,expected_revision. Each request contains one evidence window; return up to max_claims "
+    "short additive claims for the target from different parts of that window, each with its own literal quote at "
+    "most 160 characters; they add to other windows' claims and never replace them. Every claim text must be a literal substring of one cited quote; paraphrased unsupported prose is "
     "rejected. Claims require text and citations (source_id,source_version,extraction_revision,passage_start,"
     "passage_end,original_sha256,quote). Use example_patch for the exact JSON structure and source identity; select a "
     "meaningful short quote about the document's content from the evidence, not merely the example text and never a "
@@ -1752,19 +1762,30 @@ class WikiService:
                 previous = replace(previous, claims=tuple(c for c in previous.claims if not _cites(c, source_id)))
             budget = min(24_000, MAX_QUERY_BYTES - len(COMPILE_INSTRUCTIONS.encode()) - len(_canonical(target).encode()) - 4000)
             merged = fallback = None
-            for window in _sample(list(self._evidence_windows(evidence, budget)), MAX_SOURCE_CLAIMS):
-                window_count += 1
-                segment = window["segments"][0]
+            windows = _sample(list(self._evidence_windows(evidence, budget)), MAX_SOURCE_CLAIMS)
+            # Each window keeps at most its share of the page's claims, so they come
+            # from the whole document rather than filling the page from its start.
+            quota = max(1, MAX_SOURCE_CLAIMS // max(1, len(windows)))
+
+            def example_claim(segment):
                 quote = segment["text"][:80]
+                return {"text": quote, "citations": [{"source_id": source_id, "source_version": version,
+                        "extraction_revision": extraction_revision, "passage_start": segment["passage_index"],
+                        "passage_end": segment["passage_index"] + 1, "original_sha256": evidence["original_checksum"],
+                        "quote": quote}]}
+
+            for window in windows:
+                window_count += 1
+                asked = min(window_claims(window), quota)
+                first, last = window["segments"][0], window["segments"][-1]
+                examples = [first, last] if asked > 1 and last["passage_index"] != first["passage_index"] else [first]
                 example = {"page_id": own_id, "title": target["title"], "expected_revision": target["current_revision"],
-                           "claims": [{"text": quote, "citations": [{"source_id": source_id, "source_version": version,
-                           "extraction_revision": extraction_revision, "passage_start": segment["passage_index"],
-                           "passage_end": segment["passage_index"] + 1, "original_sha256": evidence["original_checksum"], "quote": quote}]}],
-                           "contradictions": [], "links": []}
-                query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "example_patch": example, "evidence": window},
-                                                          ensure_ascii=False, separators=(",", ":"))
+                           "claims": [example_claim(segment) for segment in examples], "contradictions": [], "links": []}
+                query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "max_claims": asked, "example_patch": example,
+                                                           "evidence": window}, ensure_ascii=False, separators=(",", ":"))
+                # Every returned claim is checked against its quote; the window keeps its quota.
                 patch = await self._compile_window(query, target, source_id, version, extraction_revision)
-                substantive = tuple(claim for claim in patch.claims if not _front_matter(claim.text))
+                substantive = tuple(claim for claim in patch.claims if not _front_matter(claim.text))[:quota]
                 if substantive:
                     patch = replace(patch, claims=substantive)
                 elif not patch.contradictions:

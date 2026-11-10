@@ -1,7 +1,8 @@
 """A deterministic stand-in for the wiki model, to test the whole compile pipeline.
 
 Each evidence window yields one claim per sentence of its first segment, quoting
-that sentence. The summary rests on the first claim. Routing sends each claim to
+that sentence, then, up to the window's ``max_claims``, the first sentence of later
+segments spread evenly over the window. The summary rests on the first claim. Routing sends each claim to
 the topic or entity one of its keywords names, reusing an existing page with that
 title, and reports a contradiction when a claim and a listed existing claim say
 different things about the same subject ("X is Y", "X — це Y").
@@ -40,12 +41,21 @@ class FakeCompiler:
     def window(data):
         example = data["example_patch"]
         citation = example["claims"][0]["citations"][0]
-        segment = data["evidence"]["segments"][0]
-        claims = []
-        for sentence in _SENTENCE.findall(segment["text"]):
+        segments = data["evidence"]["segments"]
+
+        def claim(segment, sentence):
             quote = sentence.strip()
-            claims.append({"text": quote, "citations": [{**citation, "passage_start": segment["passage_index"],
-                                                         "passage_end": segment["passage_index"] + 1, "quote": quote}]})
+            return {"text": quote, "citations": [{**citation, "passage_start": segment["passage_index"],
+                                                  "passage_end": segment["passage_index"] + 1, "quote": quote}]}
+
+        claims = [claim(segments[0], sentence) for sentence in _SENTENCE.findall(segments[0]["text"])]
+        later = [(segment, found[0]) for segment in segments[1:]
+                 if segment["passage_index"] != segments[0]["passage_index"] and (found := _SENTENCE.findall(segment["text"]))]
+        wanted = data.get("max_claims", 1) - len(claims)
+        if wanted > 0 and later:
+            picks = (later if wanted >= len(later) else
+                     [later[round(i * (len(later) - 1) / (wanted - 1))] for i in range(wanted)] if wanted > 1 else later[:1])
+            claims.extend(claim(segment, sentence) for segment, sentence in picks)
         return {**example, "claims": claims or example["claims"]}
 
     def routes(self, data):
