@@ -384,3 +384,6 @@ cosign verify ghcr.io/rundax/lifecontext:1.2.0 \
   --certificate-identity https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+For 1.2.0rc1, use `refs/tags/v1.2.0rc1`; its image is not public, so skip the
+image check.
