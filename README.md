@@ -257,7 +257,8 @@ and failure codes.
 
 **Connect Claude Desktop or Cursor.** `lifecontext mcp` is an MCP server over
 the same API, read-only unless you add `--allow-writes`; the configuration is
-in [docs/agents.md](docs/agents.md#mcp-server).
+in [docs/agents.md](docs/agents.md#mcp-server). These clients may time out on
+slow recalls ([slow calls and client timeouts](docs/agents.md#slow-calls-and-client-timeouts)).
 
 **Agents on another machine.** `bin/lifecontext-remote` runs the same
 `lifecontext` command over SSH, against a dedicated key that
