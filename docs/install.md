@@ -230,8 +230,10 @@ starts with `HF_HUB_OFFLINE=1` and downloads no models. It runs as the unprivile
 is published; you reach it with `docker exec` or the
 [`lifecontext-docker`](#agents-and-the-lifecontext-docker-wrapper) wrapper.
 
-The image is `ghcr.io/rundax/lifecontext:1.2.0`. To build it from a checkout
-instead, run `docker compose build` (or `docker build -t lifecontext .`).
+The image is not published yet: build it from a checkout with `docker compose
+build` (or `docker build -t lifecontext .`). It is about 3 GB, and the build
+takes about 3 minutes on GitHub-hosted runners. Once 1.2.0 is published, the
+image will be `ghcr.io/rundax/lifecontext:1.2.0`.
 
 ### Start with Docker Compose
 
@@ -240,6 +242,7 @@ with named volumes, the key as a secret, a health check on `/healthz`,
 `restart: unless-stopped`, a 4 GB memory limit and no Linux capabilities.
 
 ```bash
+docker compose build                               # until the image is published
 mkdir -p secrets
 (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Enter, Ctrl-D
 sudo chown 1000 secrets/lifecontext_api_key        # Linux, if your uid is not 1000

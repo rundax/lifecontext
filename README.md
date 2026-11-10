@@ -94,16 +94,22 @@ This tree is the 1.2.0 development version (1.2.0.dev0).
 ### Docker
 
 The image runs as an unprivileged user, publishes no port, and has Tesseract
-and the local models inside. From a checkout:
+and the local models inside. It is not published yet, so build it from a
+checkout first: it is about 3 GB, and the build takes about 3 minutes on
+GitHub-hosted runners.
 
 ```bash
+docker compose build
 mkdir -p secrets && (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Ctrl-D
+sudo chown 1000 secrets/lifecontext_api_key                            # Linux, if your uid is not 1000
 LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
 docker compose exec lifecontext lifecontext doctor
 ```
 
 Set `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL` to the provider and model
 you chose; without them the container waits and logs which one is missing.
+The vault is in a Docker volume; to open it in Obsidian, mount a folder that
+belongs to uid 1000 instead ([volumes](docs/install.md#volumes)).
 Agents on the host use `bin/lifecontext-docker`; see
 [docs/install.md](docs/install.md#docker).
 
