@@ -615,6 +615,31 @@ raise AssertionError('kill point was not reached')
         self.assertTrue(page.read_text().endswith(user))
         self.assertIn("1. The sky is blue.", page.read_text())
 
+    def test_a_page_written_by_the_previous_renderer_is_rewritten_without_a_review(self):
+        from test_wiki import PAGE
+
+        import lifecontext.wiki as wiki
+        fixture, projection = self.wiki_fixture()
+        fixture.update()
+        self.assertEqual(projection.project_wiki(PAGE)["state"], "completed")
+        receipt = fixture.catalog.get_artifact_projection("wiki", PAGE, 1)
+        page = self.journal / receipt["projection_path"]
+        history = self.journal / fixture.catalog.get_artifact_projection("wiki", PAGE + "_history", 1)["projection_path"]
+        self.assertIn("(doc_1 v1/e1 passages 0:1)", page.read_text())
+        user = f"{USER_START}\nMy notes.\n<!-- life-context:user:end -->\n"
+        page.write_text(page.read_text().replace(f"{USER_START}\n\n<!-- life-context:user:end -->\n", user))
+        # The next renderer writes another citation label for the same stored revision.
+        with patch.object(wiki, "_citation_label", lambda citation: "Original, line 1"):
+            result = projection.project_wiki(PAGE)
+        self.assertEqual(result["state"], "completed", result)
+        self.assertEqual([review["code"] for review in fixture.catalog.list_wiki_reviews(PAGE)], [])
+        self.assertIn("1. The sky is blue. (Original, line 1)", page.read_text())
+        self.assertIn("1. The sky is blue. [Original, line 1]", history.read_text())
+        for path in (page, history):
+            self.assertNotIn("passages 0:1", path.read_text())
+        self.assertTrue(page.read_text().endswith(user))
+        self.assertEqual(len(fixture.catalog.list_wiki_revisions(PAGE)), 1)
+
     def test_wiki_user_sections_history_and_schema(self):
         self.catalog.create_wiki_page("topic", title="Topic")
         self.catalog.list_wiki_revisions = lambda page_id: [{"revision": 1}]
