@@ -332,7 +332,8 @@ ERRORS: dict[str, ErrorText] = {
                                  "use the next version number, or look at the stored one with "
                                  "`lifecontext documents show ID`"),
     "evidence_unavailable": ErrorText("The stored original of that source cannot be read or no longer matches "
-                                      "its checksum.", "run `lifecontext reconcile`, then " + _DOCTOR, True),
+                                      "its checksum.", "run `lifecontext reconcile`; if it still fails, "
+                                      "`lifecontext doctor` says what is wrong", True),
     "invalid_source_text": ErrorText("The input must be UTF-8 text.",
                                      "convert it to UTF-8, or import the file with `lifecontext documents import`"),
     "invalid_provider_response": ErrorText("The model answered, but not in the expected form.", _MODEL, True),
@@ -367,8 +368,8 @@ ERRORS: dict[str, ErrorText] = {
                                    "check that the vault folder exists and belongs to you; " + _DOCTOR, True),
     "catalog_busy": ErrorText("The catalog is busy with another change.", "wait a few seconds and re-run", True),
     "internal_error": ErrorText("The service failed unexpectedly.",
-                                "re-run once; if it fails again, " + _DOCTOR + " and the service log has the "
-                                "request ID", True),
+                                "re-run once; if it fails again, run `lifecontext doctor` and look for the "
+                                "request ID in the service log", True),
     # The CLI's own codes.
     "api_unavailable": ErrorText("The LifeContext service is not reachable at 127.0.0.1:{port}.", "{start}", True),
     "api_timeout": ErrorText("The LifeContext service did not answer in time; it may still be working on the "
