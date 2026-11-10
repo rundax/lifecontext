@@ -647,10 +647,10 @@ class InstallWaitTests(unittest.TestCase):
         result = self.run_wait(answers_after=9, wait=900)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
-            "Still waiting for the API (20 s of up to 900 s); follow the log with: "
-            "journalctl --user -u lifecontext.service",
-            "Still waiting for the API (40 s of up to 900 s); follow the log with: "
-            "journalctl --user -u lifecontext.service",
+            ("Still waiting for the API (20 s of up to 900 s); follow the log with: "
+             "journalctl --user -u lifecontext.service"),
+            ("Still waiting for the API (40 s of up to 900 s); follow the log with: "
+             "journalctl --user -u lifecontext.service"),
             "answered"])
 
     def test_a_timeout_shows_the_last_20_log_lines(self) -> None:

@@ -443,8 +443,8 @@ Choose 1-6""")
             self.assertEqual(report["next_steps"], [
                 f'Open {vault} in Obsidian as a vault ("Open folder as vault").',
                 "Import a document: lifecontext documents import ~/path/to/lease.pdf",
-                'Start a new agent session (it loads the skill at start), then ask: '
-                '"What does my lease say about the deposit?"'])
+                ('Start a new agent session (it loads the skill at start), then ask: '
+                 '"What does my lease say about the deposit?"')])
             self.assertEqual([step.split("  ")[0] for step in report["setup_steps"]], [
                 "lifecontext preflight", "lifecontext service install --maintenance",
                 "lifecontext skills install", "lifecontext doctor"])
