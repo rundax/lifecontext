@@ -59,6 +59,7 @@ from lifecontext.api.models import (
     WikiReviewResolveRequest, BriefResponse,
 )
 from lifecontext.categories import CategoryClassification
+from lifecontext.documents import document_outcome
 from lifecontext.api.app import DOCUMENT_MAX_BYTES
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -679,6 +680,11 @@ def _document(value: dict[str, Any]) -> DocumentResponse:
             "download_url": f"/v1/documents/{value['source_id']}/original?version={value['source_version']}",
             "extraction_warnings": value.get("extractions", [{}])[-1].get("warnings", []) if value.get("extractions") else [],
             "coverage": value.get("coverage"),
+            "outcome": value.get("outcome"),
+            "problems": value.get("problems", []),
+            "last_operation_id": value.get("last_operation_id"),
+            "extraction_reason": value["extractions"][-1].get("reason") if value.get("extractions") else None,
+            "wiki_page_id": value.get("wiki_page_id"),
         })
     except (KeyError, TypeError, ValidationError):
         raise ApplicationError("invalid_provider_response") from None
@@ -687,10 +693,12 @@ def _document(value: dict[str, Any]) -> DocumentResponse:
 def _document_operation(application, result: dict[str, Any]) -> DocumentOperationResponse:
     envelope = application.operation_status(result["operation_id"])
     value = DocumentOperationResponse.model_validate(envelope)
+    value.outcome = value.state
     if result.get("document") is not None:
         value.document = _document(result["document"])
         if value.state == "completed" and value.document.stages.indexing.state != "completed":
             value.state = "running"
+        value.outcome = document_outcome(result["document"]["stages"], value.state)
     return value
 
 

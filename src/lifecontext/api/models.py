@@ -223,6 +223,20 @@ class DocumentCoverage(APIModel):
     complete: bool
 
 
+_OUTCOMES = Literal[
+    "pending", "running", "retryable_failed", "permanent_failed", "completed", "completed_with_errors", "cancelled"
+]
+
+
+class DocumentProblem(APIModel):
+    """A stage that did not complete, why, and what to run next."""
+
+    stage: Literal["extraction", "indexing", "wiki", "projection"]
+    code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    reason: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    next_step: str = Field(min_length=1, max_length=512)
+
+
 class DocumentResponse(APIModel):
     source_id: SourceId
     source_version: Version
@@ -236,6 +250,12 @@ class DocumentResponse(APIModel):
     download_url: str
     extraction_warnings: list[Annotated[str, StringConstraints(max_length=1024)]] = Field(default_factory=list, max_length=1000)
     coverage: DocumentCoverage | None = None
+    # Added in 1.2.0; optional so older clients and servers keep working.
+    outcome: _OUTCOMES | None = None
+    problems: list[DocumentProblem] = Field(default_factory=list, max_length=5)
+    last_operation_id: Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"[A-Za-z0-9_-]+")] | None = None
+    extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    wiki_page_id: SourceId | None = None
 
     @field_validator("filename")
     @classmethod
@@ -315,6 +335,8 @@ class OperationResponse(APIModel):
 
 class DocumentOperationResponse(OperationResponse):
     document: DocumentResponse | None = None
+    # ``completed_with_errors`` when the operation finished but a wiki or vault stage failed.
+    outcome: _OUTCOMES | None = None
 
 
 class RelationshipRecord(APIModel):

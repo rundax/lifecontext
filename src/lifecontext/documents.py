@@ -26,9 +26,61 @@ from lifecontext.extraction import (
 )
 from lifecontext.hindsight_adapter import source_scope_tag
 from lifecontext.vision import VisionUnavailable
+from lifecontext.wiki import source_page_id
 
 # Written into every extraction a document opted out of; any later rerun path reads it.
 VISION_OPT_OUT = "vision_opted_out; this document is never sent to a vision model"
+
+_PROBLEM_STATES = {"failed", "blocked", "conflict"}
+_FORMATS = "PDF, DOCX, XLSX, PPTX, TXT, Markdown, PNG, JPEG or TIFF"
+# What a person can do about an extraction that could not read the file.
+_EXTRACTION_STEPS = {
+    "unsupported_format": f"This file type is not supported; save it as {_FORMATS} and import it again.",
+    "macro_enabled_office": f"Macro-enabled Office files are not supported; save it as {_FORMATS} and import it again.",
+    "encrypted_or_legacy_office": "The file is password-protected or in an old Office format; remove the password or save it as DOCX, XLSX or PPTX and import it again.",
+    "encrypted_pdf": "The PDF is password-protected; save an unlocked copy and import it again.",
+    "encrypted_zip": "The archive is password-protected; import an unlocked copy.",
+    "no_extractable_text": "No text could be read; install tesseract for OCR or turn on vision, then run: lifecontext documents retry {source_id} --rerun-extraction",
+    "ocr_backend_not_configured": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
+    "ocr_executable_unavailable": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
+}
+
+
+def document_outcome(stages, operation_state=None):
+    """What an import came to, from its stage states; catalog states never change for it.
+
+    A finished operation whose wiki page or vault note failed is ``completed_with_errors``.
+    """
+    if operation_state not in (None, "completed"):
+        return operation_state
+    core = [stages[name]["state"] for name in ("extraction", "indexing")]
+    if any(state in _PROBLEM_STATES for state in core):
+        return "retryable_failed"
+    if any(state != "completed" for state in core):
+        return "running"
+    if any(stages[name]["state"] in _PROBLEM_STATES for name in ("wiki", "projection")):
+        return "completed_with_errors"
+    return "completed"
+
+
+def document_problems(source_id, stages, extractions):
+    """One entry per failed, blocked or conflicting stage, with what to run next."""
+    problems = []
+    retry = f"Run: lifecontext documents retry {source_id}"
+    for name in ("extraction", "indexing", "wiki", "projection"):
+        stage = stages[name]
+        if stage["state"] not in _PROBLEM_STATES:
+            continue
+        code = stage["error_code"] or stage["state"]
+        reason = code
+        if name == "extraction" and extractions and extractions[-1].get("reason"):
+            reason = extractions[-1]["reason"]
+        next_step = _EXTRACTION_STEPS.get(reason, retry) if name == "extraction" else retry
+        if stage["state"] == "conflict":
+            next_step = "The vault copy was edited; resolve the conflict, then " + retry[0].lower() + retry[1:]
+        problems.append({"stage": name, "code": code, "reason": reason,
+                         "next_step": next_step.format(source_id=source_id)})
+    return problems
 
 
 def _digest(value: Any) -> str:
@@ -803,6 +855,9 @@ class DocumentService:
                     )
                 except ValueError:
                     record["reason"] = "evidence_unavailable"
+        last = self.catalog.latest_document_operation(source_id, source_version)
+        page_id = source_page_id(source_id)
+        page = self.catalog.get_wiki_page(page_id)
         return {
             **metadata,
             "accepted": stages["custody"]["state"] == "accepted",
@@ -810,6 +865,10 @@ class DocumentService:
             "extractions": extractions,
             "coverage": self._coverage(source_id, source_version, extractions),
             "chunks": self.catalog.list_provider_chunks(source_id, source_version),
+            "last_operation_id": last["operation_id"] if last else None,
+            "outcome": document_outcome(stages, last["state"] if last else None),
+            "problems": document_problems(source_id, stages, extractions),
+            "wiki_page_id": page_id if page and page["current_revision"] else None,
         }
 
     def _coverage(self, source_id, source_version, extractions):

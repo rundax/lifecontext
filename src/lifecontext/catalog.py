@@ -2175,6 +2175,44 @@ class LifeContextCatalog:
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 
+    def latest_document_operation(self, source_id: str, source_version: int) -> dict[str, Any] | None:
+        """The newest import or retry operation recorded for one document version."""
+        _validate_identity(source_id, source_version)
+        self._ensure_open()
+        try:
+            row = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json,
+                          error_code, created_at, updated_at
+                   FROM operations
+                   WHERE operation_kind IN ('document_import', 'document_retry')
+                     AND json_extract(result_json, '$.recovery_intent.source_id') = ?
+                     AND json_extract(result_json, '$.recovery_intent.source_version') = ?
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (source_id, source_version),
+            ).fetchone()
+            return self._operation_from_row(row) if row is not None else None
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def list_operations(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise CatalogError("invalid operation limit")
+        if state is not None and state not in _OPERATION_TRANSITIONS:
+            raise CatalogError("invalid operation state")
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json,
+                          error_code, created_at, updated_at
+                   FROM operations WHERE (? IS NULL OR state = ?)
+                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                (state, state, limit),
+            ).fetchall()
+            return [self._operation_from_row(row) for row in rows]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def list_recoverable_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
         """Return a bounded ordered batch of operations eligible for recovery."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
