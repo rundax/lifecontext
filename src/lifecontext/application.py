@@ -758,6 +758,48 @@ class JournalApplication:
             )
             report["completed"] += 1
             return completed["state"] == "completed"
+        if current["state"] == "retryable_failed":
+            # The provider refused the original from custody; offer it once more.
+            try:
+                provider_state = self.catalog.get_provider_state(source_id, source_version)
+                resubmit = (
+                    provider_state is not None
+                    and provider_state["submission_state"] == "failed"
+                    and not self._newer_version_exists(source_id, source_version)
+                )
+            except (ApplicationError, CatalogError):
+                return False
+            if resubmit:
+                current = self._transition_operation(
+                    current["operation_id"],
+                    "retryable_failed",
+                    "running",
+                    result={
+                        key: value
+                        for key, value in current["result"].items()
+                        if key != "error_code"
+                    },
+                )
+                report["resumed"] += 1
+                try:
+                    submitted = await self._submit_retained_manifest(
+                        manifest, evidence.original_bytes
+                    )
+                    self.project(source_id, source_version)
+                except Exception as exc:
+                    code = self._retain_error_code(exc)
+                    self._fail_operation(
+                        current["operation_id"], code, result=current["result"]
+                    )
+                    return False
+                completed = self._transition_operation(
+                    current["operation_id"],
+                    "running",
+                    "completed",
+                    result=self._manifest_result(submitted),
+                )
+                report["completed"] += 1
+                return completed["state"] == "completed"
         return await self._reconcile_provider_metadata(current, manifest, report)
 
     async def _reconcile_provider_metadata(

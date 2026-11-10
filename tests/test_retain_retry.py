@@ -97,6 +97,43 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(replay, result)
         self.assertEqual(len(self.client.retain_calls), 2)
 
+    def test_restart_resubmits_a_failed_note_from_custody(self) -> None:
+        source_id = "src_retry_restart"
+        original = b"note recovered at startup"
+        self._fail_once(source_id, original, "retain-retry-restart-key")
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(report["resumed"], 1)
+        self.assertEqual(report["completed"], 1)
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self.client.retain_calls[-1][1], original.decode("utf-8"))
+        self.assertEqual(self._operation_state(), ("completed", None))
+        self.assertEqual(
+            self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "submitted"
+        )
+        projection = self.app.catalog.get_projection_state(source_id, 1)
+        self.assertEqual(projection["state"], "projected")
+        self.assertTrue((self.journal / projection["projection_path"]).is_file())
+
+        # Nothing is left to recover on the next start.
+        again = asyncio.run(self.app.recover_startup())
+        self.assertEqual(again["resumed"], 0)
+        self.assertEqual(len(self.client.retain_calls), 2)
+
+    def test_restart_while_provider_still_fails_stays_retryable(self) -> None:
+        source_id = "src_retry_restart_fails"
+        self._fail_once(source_id, b"note still refused", "retain-retry-restart-fail-key")
+        self.client.error = RuntimeError("still rate limited")
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(report["completed"], 0)
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self._operation_state(), ("retryable_failed", "retain_failed"))
+
     def test_retry_that_fails_again_stays_retryable(self) -> None:
         source_id = "src_retry_fails_again"
         original = b"note that fails twice"
