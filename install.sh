@@ -911,6 +911,8 @@ try:
     report = json.loads(sys.stdin.read())
 except ValueError:
     sys.exit(1)
+if "error" in report:
+    sys.exit(1)
 print(", ".join(names.get(item["agent"], item["agent"]) for item in report.get("agents") or []
                 if item.get("state") == "linked"))
 ') || linked="?"

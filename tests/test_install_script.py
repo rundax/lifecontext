@@ -688,6 +688,8 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         self.assertIn("skills_state=linked for Claude Code, Codex\n", self.run_function("link_skills", report).stdout)
         result = self.run_function("link_skills", json.dumps({"agents": []}))
         self.assertIn("skills_state=no agent found", result.stdout)
+        result = self.run_function("link_skills", json.dumps({"error": "link_failed"}))
+        self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
 
     def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
         for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/bash", "Linux", "~/.profile"),
