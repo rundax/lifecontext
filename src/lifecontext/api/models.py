@@ -281,7 +281,11 @@ class DocumentRetryRequest(APIModel):
     vision: bool | None = None
 
 
-class RetainResponse(Citation):
+class RetainResponse(APIModel):
+    # Its own fields: a retain receipt keeps exactly the citation identity it always had.
+    source_id: SourceId
+    source_version: Version
+    sha256: Sha256
     size_bytes: int = Field(ge=0, le=LIMIT_CEILINGS["max_text_bytes"])
     submission_state: Literal["submitted"]
 
