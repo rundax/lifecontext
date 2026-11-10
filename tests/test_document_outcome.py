@@ -148,5 +148,30 @@ class DocumentRetryBySourceTests(DocumentOutcomeTests):
                 await self.service.retry(target)
 
 
+class WikiReachesVaultAfterRetryTests(unittest.IsolatedAsyncioTestCase):
+    setUp = DocumentOutcomeTests.setUp
+    ingest = DocumentOutcomeTests.ingest
+
+    async def test_the_page_is_projected_after_an_indexing_failure_and_a_retry(self):
+        projected = []
+
+        def project(document):
+            # The vault note records the wiki state it was projected with.
+            projected.append(document["stages"]["wiki"]["state"])
+            return {"state": "completed"}
+
+        self.service.wiki_hook = lambda document: {"state": "completed"}
+        self.service.projection_hook = project
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        self.assertEqual(first["state"], "retryable_failed")
+        self.assertEqual(projected, ["pending"])
+        self.provider.fail_at = None
+        recovered = await self.service.retry(first["document"]["source_id"])
+        self.assertEqual(recovered["state"], "completed")
+        self.assertEqual(projected, ["pending", "completed"])
+        self.assertEqual(recovered["document"]["outcome"], "completed")
+
+
 if __name__ == "__main__":
     unittest.main()

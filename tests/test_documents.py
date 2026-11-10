@@ -239,7 +239,7 @@ class DocumentTests(unittest.IsolatedAsyncioTestCase):
         recovered = await self.service.retry(first["operation_id"])
         self.assertEqual(recovered["state"], "completed")
         self.assertEqual(len(wiki_calls), 1)
-        self.assertEqual(len(projection_calls), 1)
+        self.assertEqual(len(projection_calls), 2)  # the page reaches the vault after the retry
 
     async def test_async_pending_is_not_completed(self):
         self.provider.async_ack = True

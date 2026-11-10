@@ -618,6 +618,7 @@ class DocumentService:
             except Exception:  # noqa: BLE001 -- durable boundary redacts dependency failures
                 indexing_failed = True
             # Hooks own their effects; only an explicit completed response is acknowledgement.
+            wiki_ran = False
             for stage, hook in (
                 ("wiki", self.wiki_hook),
                 ("projection", self.projection_hook),
@@ -625,10 +626,16 @@ class DocumentService:
                 if (
                     hook is None
                     or (stage == "wiki" and indexing_failed)
-                    or self.catalog.get_document_stage(sid, version, stage)["state"]
-                    == "completed"
+                    # The vault note and page follow every wiki run, even after an
+                    # earlier projection completed without them.
+                    or (
+                        self.catalog.get_document_stage(sid, version, stage)["state"]
+                        == "completed"
+                        and not (stage == "projection" and wiki_ran)
+                    )
                 ):
                     continue
+                wiki_ran = wiki_ran or stage == "wiki"
                 self._active(sid, version)
                 self._stage(sid, version, stage, "running")
                 try:
