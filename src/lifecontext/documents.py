@@ -277,24 +277,53 @@ class DocumentService:
             return self._response(operation)
         return await self._run(operation)
 
-    async def retry(self, operation_id, rerun_extraction=False, vision=None):
-        operation = self.catalog.get_operation(operation_id)
+    def _retry_target(self, target):
+        """An operation ID, or a source ID whose current version's latest operation is used."""
+        if not isinstance(target, str):
+            raise CatalogError("document operation unavailable")
+        if re.fullmatch(r"op_[0-9a-f]{32}", target):
+            operation = self.catalog.get_operation(target)
+            if operation is not None:
+                return operation, False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", target):
+            raise CatalogError("document operation unavailable")
+        current = self.catalog.get_current_manifest(target)
+        if current is None:
+            raise CatalogError("document operation unavailable")
+        return self.catalog.latest_document_operation(target, current.source_version), True
+
+    async def retry(self, operation_id, rerun_extraction=False, vision=None, idempotency_key=None):
         if (
-            not operation
-            or operation["operation_kind"] not in {"document_import", "document_retry"}
-            or not isinstance(rerun_extraction, bool)
+            not isinstance(rerun_extraction, bool)
             or (vision is not None and not isinstance(vision, bool))
             or (vision is not None and not rerun_extraction)
         ):
             raise CatalogError("document operation unavailable")
-        if not rerun_extraction:
-            return await self.recover(operation)
+        operation, by_source = self._retry_target(operation_id)
+        if (
+            not operation
+            or operation["operation_kind"] not in {"document_import", "document_retry"}
+        ):
+            raise CatalogError("document operation unavailable")
+        request_digest = _digest({"retry": operation_id, "rerun_extraction": rerun_extraction, "vision": vision})
+        if idempotency_key is not None:
+            # The same key and request replays (or resumes) the retry it started.
+            prior = self.catalog.lookup_operation(idempotency_key, request_digest, "document_retry")
+            if prior is not None:
+                return await self.recover(prior)
         old = operation["result"].get("recovery_intent")
         if not old:
             raise CatalogError("document intent unavailable")
         sid, version = old["source_id"], old["source_version"]
-        self._active(sid, version)
         extractions = self.catalog.list_extractions(sid, version)
+        if by_source and not rerun_extraction and extractions and extractions[-1]["status"] != "completed":
+            # A recorded extraction that could not read the file is only retried by reading it again.
+            rerun_extraction = True
+        if not rerun_extraction:
+            if operation["state"] == "completed" and self._unfinished_stages(sid, version):
+                return await self._rerun_stages(old, extractions, idempotency_key, request_digest)
+            return await self.recover(operation)
+        self._active(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
         intent = {
             k: old[k] for k in ("source_id", "source_version", "sha256", "size_bytes")
@@ -312,15 +341,48 @@ class DocumentService:
         # The choice is part of the key, so --no-vision can follow a rerun that is
         # stuck on a vision outage instead of conflicting with it.
         choice = "" if vision is None else (":vision" if vision else ":no-vision")
-        retry = self.catalog.begin_operation(
-            f"document-rerun:{sid}:{version}:{revision}{choice}", digest, "document_retry"
-        )
+        if idempotency_key is not None:
+            retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
+        else:
+            retry = self.catalog.begin_operation(
+                f"document-rerun:{sid}:{version}:{revision}{choice}", digest, "document_retry"
+            )
         if not retry["result"]:
             retry = self.catalog.set_operation_intent(
                 retry["operation_id"], self._envelope(intent)
             )
         elif retry["result"].get("recovery_intent") != intent:
             raise CatalogConflict("document retry identity conflict")
+        return await self._run(retry)
+
+    def _unfinished_stages(self, sid, version):
+        """Stages a retry runs again: indexing, and the wiki and vault stages that have a hook."""
+        names = ["indexing"]
+        names += [name for name, hook in (("wiki", self.wiki_hook), ("projection", self.projection_hook))
+                  if hook is not None]
+        return [name for name in names
+                if self.catalog.get_document_stage(sid, version, name)["state"] != "completed"]
+
+    async def _rerun_stages(self, old, extractions, idempotency_key, request_digest):
+        """A finished import whose wiki or vault stage did not complete runs those stages again."""
+        sid, version = old["source_id"], old["source_version"]
+        self._active(sid, version)
+        if not extractions:
+            raise CatalogError("document intent unavailable")
+        intent = {k: old[k] for k in ("source_id", "source_version", "sha256", "size_bytes")}
+        intent.update(kind="document_retry", extraction_revision=extractions[-1]["extraction_revision"])
+        intent["request_digest"] = _digest(intent)
+        if idempotency_key is not None:
+            retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
+        else:
+            # Each plain retry is a new attempt; a finished one is never replayed instead.
+            retry = self.catalog.begin_operation(
+                f"document-stages:{sid}:{version}:{uuid.uuid4().hex}", intent["request_digest"], "document_retry"
+            )
+        if not retry["result"]:
+            retry = self.catalog.set_operation_intent(retry["operation_id"], self._envelope(intent))
+        if retry["state"] in {"completed", "permanent_failed", "cancelled"}:
+            return self._response(retry)
         return await self._run(retry)
 
     def _active(self, sid, version):

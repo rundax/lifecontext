@@ -782,12 +782,18 @@ async def show_document(source_id: SourceId, request: Request, version: Annotate
 
 
 @router.post("/v1/documents/operations/{operation_id}/retry", response_model=DocumentOperationResponse)
-async def retry_document(operation_id: str, payload: DocumentRetryRequest, request: Request, response: Response):
+async def retry_document(
+    operation_id: Annotated[str, Path(min_length=1, max_length=128)], payload: DocumentRetryRequest,
+    request: Request, response: Response,
+    idempotency_key_header: Annotated[str | None, Header(alias="Idempotency-Key", min_length=1, max_length=255)] = None,
+):
+    """Retry by operation ID or by source ID; a repeated Idempotency-Key replays the same retry."""
     application = _application(request)
     if payload.vision is not None and not payload.rerun_extraction:
         raise PublicAPIError(422, "invalid_request")
+    key = None if idempotency_key_header is None else _required_idempotency_key(request, idempotency_key_header)
     result = await application.retry_document(
-        operation_id, rerun_extraction=payload.rerun_extraction, vision=payload.vision
+        operation_id, rerun_extraction=payload.rerun_extraction, vision=payload.vision, idempotency_key=key
     )
     value = _document_operation(application, result)
     response.headers["X-Lifeweave-Operation-ID"] = value.operation_id

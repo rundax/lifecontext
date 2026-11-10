@@ -197,9 +197,11 @@ class JournalApplication:
             raise ApplicationError("source_not_found") from None
 
     async def retry_document(self, operation_id: str, rerun_extraction: bool = False,
-                             vision: bool | None = None) -> dict[str, Any]:
+                             vision: bool | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        """Retry by operation ID or by source ID (its current version's latest operation)."""
         try:
-            outcome = await self.documents.retry(operation_id, rerun_extraction, vision)
+            outcome = await self.documents.retry(operation_id, rerun_extraction, vision,
+                                                 idempotency_key=idempotency_key)
             document = outcome.get("document")
             if document and document["stages"]["indexing"]["state"] == "completed":
                 await self._classify_document(document)
