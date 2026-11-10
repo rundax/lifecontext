@@ -2,7 +2,7 @@
 
 > Your documents, compiled. Every claim cited. LifeContext gives Claude Code, Codex and other AI agents your contracts, letters, scans and notes. A local service and the `lifecontext` CLI keep your original files on your machine, extract their text (with local OCR), index them with the open-source Hindsight memory engine, send the text only to the model you choose, and compile a Markdown wiki in an Obsidian vault. Every claim is a literal quote, checked against the source text before the page is written, and cited to its page or passage and the source version; the short summary above the claims is labelled as model-written. Source-available under BUSL-1.1: free for one person for their own use, including at work; businesses need a commercial licence.
 
-For people who work with AI agents and keep documents that matter: leases, contracts, insurance, tax and medical letters, research PDFs, scans in English, Ukrainian or Russian. Not for: people who want an app with no computer to run it on, teams that want one shared knowledge base, or people who need audio, video or web capture.
+For people who work with AI agents and keep documents that matter: leases, contracts, insurance, tax and medical letters, research PDFs, scans in English, Ukrainian or Russian (search in Ukrainian and Russian is weaker for now). Not for: people who want an app with no computer to run it on, teams that want one shared knowledge base, or people who need audio, video or web capture.
 
 Current version: 1.2.0rc1, a pre-release; the final 1.2.0 is pending. Platforms: Linux x86_64 and aarch64 (glibc 2.35 or later) and macOS 14 or later on arm64 natively; Windows through Docker or WSL.
 
@@ -10,7 +10,7 @@ Current version: 1.2.0rc1, a pre-release; the final 1.2.0 is pending. Platforms:
 
 - Keeps original files immutable, checksummed and versioned. A correction adds a new version.
 - Extracts text from TXT, Markdown, PDF (including book-length PDFs), DOCX, XLSX, PPTX and images. Scans go through local Tesseract OCR for English, Ukrainian and Russian. An optional vision model that the owner configures can read handwriting, photos and charts; it is off by default.
-- Indexes everything with the Hindsight memory engine (MIT, by Vectorize). LifeContext configures a multilingual reranker for English, Ukrainian and Russian text. LifeContext is built on Hindsight and is not affiliated with Vectorize; no endorsement is implied.
+- Indexes everything with the Hindsight memory engine (MIT, by Vectorize). LifeContext configures a multilingual reranker for English, Ukrainian and Russian text. The embedding model (`BAAI/bge-small-en-v1.5`) is English-only; search quality for other languages improves in a later release. LifeContext is built on Hindsight and is not affiliated with Vectorize; no endorsement is implied.
 - Compiles a maintained wiki from imported documents. Each document gets its own page. Shared topic and entity pages collect claims from several documents and link to each other. Every claim is a literal quote with a citation to source, version and passage. A short summary above the quotes is labelled as model-written.
 - Records the contradictions the model finds between sources and never resolves them automatically.
 - Marks pages stale when a source they depend on is corrected or forgotten; `lifecontext wiki rebuild` rebuilds them.
