@@ -398,7 +398,7 @@ class MCPServerTests(unittest.TestCase):
             with self.subTest(tool=name):
                 text = self.error_text(self.call(name, arguments))
                 self.assertIn("token_unavailable", text)
-                self.assertIn("There is no LifeContext API token for this user", text)
+                self.assertIn("No LifeContext API token for this user", text)
                 self.assertNotIn(str(self.home), text)
         self.assertEqual(self.api.requests, [])
 

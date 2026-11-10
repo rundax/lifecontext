@@ -376,8 +376,8 @@ ERRORS: dict[str, ErrorText] = {
                              "show command before re-running: running it again may repeat the work", True),
     "api_error": ErrorText("The service answered with an error this command does not know.", _SAME_VERSION),
     "invalid_api_response": ErrorText("The service's answer is not what this command expects.", _SAME_VERSION),
-    "token_unavailable": ErrorText("There is no LifeContext API token for this user: the service writes it when "
-                                   "it starts, under the same HOME.", "{start}", True),
+    "token_unavailable": ErrorText("No LifeContext API token for this user: the service writes it when it starts, "
+                                   "under the same HOME.", "{start}", True),
     "input_unavailable": ErrorText("Unable to read the selected source input.",
                                    "give an existing regular file, or - for standard input"),
     "vault_missing": ErrorText("The vault's Journal folder does not exist.",
