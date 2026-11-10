@@ -1120,11 +1120,22 @@ def _human_result(value: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _command_name(args: argparse.Namespace) -> str:
+    """``documents show`` for ``lifecontext documents show …``: the key of its plain renderer."""
+    words = [args.command]
+    words += [getattr(args, name) for name in ("document_command", "category_command", "wiki_command")
+              if isinstance(getattr(args, name, None), str)]
+    return " ".join(words)
+
+
 def _print_success(args: argparse.Namespace, value: dict[str, object]) -> None:
     if args.as_json:
         print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    else:
-        print(_human_result(value))
+        return
+    from lifecontext import cli_output
+
+    rendered = cli_output.render(_command_name(args), value)
+    print(_human_result(value) if rendered is None else rendered)
 
 
 def _print_error(args: argparse.Namespace, code: str) -> None:

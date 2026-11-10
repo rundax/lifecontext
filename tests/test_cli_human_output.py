@@ -174,5 +174,148 @@ class JsonGoldenTests(unittest.TestCase):
                                          sort_keys=True, separators=(",", ":")) + "\n")
 
 
+class PlainRendererSnapshotTests(unittest.TestCase):
+    """What a person sees without --json; widths come from the data, never the terminal."""
+
+    maxDiff = None
+
+    def plain(self, argv: list[str], body: object) -> str:
+        code, out, err = run(argv, body)
+        self.assertEqual((code, err), (0, ""))
+        return out
+
+    def test_wiki_show_prints_the_page_markdown_raw(self) -> None:
+        self.assertEqual(self.plain(["wiki", "show", "index"], WIKI_SHOW),
+                         "<!-- lifecontext:managed -->\n# Index\n\n- [[source_doc_af7084b8|Apartment lease]]\n")
+
+    def test_wiki_list_is_a_table(self) -> None:
+        self.assertEqual(self.plain(["wiki", "list"], WIKI_LIST), "\n".join([
+            "PAGE ID" + " " * 38 + "TITLE" + " " * 12 + "STATE" + " " * 4 + "REVISION",
+            "index" + " " * 40 + "Index" + " " * 12 + "current  3",
+            "source_" + DOC_ID + "  Apartment lease  stale    1",
+            "Next: `lifecontext wiki lint` says what to do about stale or conflicting pages.",
+        ]) + "\n")
+
+    def test_documents_list_is_a_table_with_one_state_per_document(self) -> None:
+        self.assertEqual(self.plain(["documents", "list"], {"documents": [DOCUMENT, COMPLETE_DOCUMENT]}), "\n".join([
+            "SOURCE ID" + " " * 29 + "V  TITLE" + " " * 13 + "CATEGORY" + " " * 3 + "PAGES  STATE",
+            DOC_ID + "  1  Apartment lease   inbox      11/12  wiki failed",
+            "doc_" + "c" * 32 + "  1  Insurance letter  insurance  2/2    complete",
+            "2 documents.",
+            "Next: `lifecontext documents show SOURCE_ID` says what failed and how to retry it.",
+        ]) + "\n")
+        self.assertEqual(self.plain(["documents", "list"], {"documents": []}),
+                         "No documents yet. Import one with `lifecontext documents import FILE`.\n")
+
+    def test_status_prints_ready_then_one_line_per_dependency(self) -> None:
+        self.assertEqual(self.plain(["status"], STATUS), "\n".join([
+            "Ready: yes",
+            "- catalog: ready",
+            "- hindsight: ready",
+            "- vault: ready",
+            "Reconciliation: nothing to repair",
+            "Largest accepted file: 32 MiB",
+        ]) + "\n")
+        broken = {**STATUS, "ready": False,
+                  "dependencies": {
+                      "hindsight": {"ready": False, "capabilities": {
+                          "aretain": True, "arecall": False, "areflect": False, "attributed_reflect": False}},
+                      "vault": {"ready": False, "permissions": False, "error": "unsafe_permissions"},
+                      "catalog": {"ready": True}},
+                  "reconciliation": {"fact_count": 2, "facts": {
+                      "missing_original": 1, "corrupt_original": 0, "stale_projection": 1}}}
+        self.assertEqual(self.plain(["status"], broken), "\n".join([
+            "Ready: no",
+            "- catalog: ready",
+            "- hindsight: not ready; without arecall, areflect, attributed_reflect",
+            "- vault: not ready (unsafe_permissions); permissions too open",
+            "Reconciliation: 2 to repair (1 missing original, 1 stale projection)",
+            "Largest accepted file: 32 MiB",
+            "Next: `lifecontext doctor` says what is wrong and how to fix it.",
+        ]) + "\n")
+
+    def test_brief_uses_the_vault_renderer(self) -> None:
+        from lifecontext.brief import render_brief
+
+        out = self.plain(["brief"], BRIEF)
+        self.assertEqual(out, render_brief(BRIEF))
+        self.assertTrue(out.startswith("# Brief 2026-11-10\n"))
+        self.assertNotIn('{"items"', out)
+
+    def test_documents_show_has_a_stage_checklist_coverage_and_next_step(self) -> None:
+        self.assertEqual(self.plain(["documents", "show", DOC_ID], DOCUMENT), "\n".join([
+            f"Apartment lease ({DOC_ID} v1)",
+            "File: lease.pdf (application/pdf)",
+            "Category: inbox",
+            "Stages:",
+            "  [x] custody     completed",
+            "  [x] extraction  completed",
+            "  [x] indexing    completed",
+            "  [!] wiki        failed (provider_unavailable), attempt 2",
+            "  [ ] projection  pending",
+            "Coverage: 11 of 12 pages resolved (10 text layer, 1 OCR); unresolved: 7",
+            "Extraction warnings: 1 (listed with --json)",
+            "Next: check the model with `lifecontext doctor --model-probe`, then run "
+            "`lifecontext documents retry OPERATION_ID` with the operation ID the import printed.",
+        ]) + "\n")
+        out = self.plain(["documents", "show", COMPLETE_DOCUMENT["source_id"]], COMPLETE_DOCUMENT)
+        self.assertIn("Coverage: 2 of 2 pages resolved (2 text layer)\n", out)
+        self.assertNotIn("Next:", out)
+        self.assertNotIn("download", out.lower())
+
+    def test_documents_show_uses_newer_optional_fields_when_present(self) -> None:
+        newer = {**DOCUMENT, "outcome": "failed", "last_operation_id": OP_ID, "wiki_page_id": "source_" + DOC_ID,
+                 "vault_path": "Journal/wiki/sources/Apartment lease.md",
+                 "problems": ["The model did not answer while compiling the wiki page.",
+                              {"code": "page_partial", "message": "1 page was only partly read"}]}
+        out = self.plain(["documents", "show", DOC_ID], newer)
+        self.assertIn("Outcome: failed\n", out)
+        self.assertIn(f"Wiki page: source_{DOC_ID} (Journal/wiki/sources/Apartment lease.md)\n", out)
+        self.assertIn("Problems:\n- The model did not answer while compiling the wiki page.\n"
+                      "- page_partial: 1 page was only partly read\n", out)
+        self.assertTrue(out.endswith(f"then run `lifecontext documents retry {OP_ID}`.\n"))
+
+    def test_import_result_names_the_operation_and_the_document(self) -> None:
+        out = self.plain(["documents", "import", "lease.pdf"], IMPORT_RESULT)
+        self.assertTrue(out.startswith(f"Durable operation ID: {OP_ID}\nState: completed\n"
+                                       f"Apartment lease ({DOC_ID} v1)\n"), out)
+        self.assertIn("  [!] wiki        failed (provider_unavailable), attempt 2\n", out)
+        self.assertTrue(out.endswith(f"then run `lifecontext documents retry {OP_ID}`.\n"), out)
+
+    def test_recall_lists_texts_with_short_source_ids(self) -> None:
+        self.assertEqual(self.plain(["recall", "--query", "rent"], RECALL), "\n".join([
+            "- The rent is 900 EUR per month. (doc_af7084b8 v1)",
+            "- Notice period is three months. (journal_2026 v2)",
+            "1 result without a source left out.",
+        ]) + "\n")
+        titled = {"results": [{"text": "Rent: 900 EUR.", "evidence": {
+            "source_id": DOC_ID, "source_version": 1, "sha256": SHA, "title": "Apartment lease"}}],
+            "truncated": True, "omitted_unresolvable": 0}
+        self.assertEqual(self.plain(["recall", "--query", "rent"], titled),
+                         "- Rent: 900 EUR. (Apartment lease, doc_af7084b8 v1)\n"
+                         "More matched than fit; raise --max-results or --max-tokens to see more.\n")
+        self.assertEqual(self.plain(["recall", "--query", "x"], {"results": [], "truncated": False}),
+                         "Nothing found.\n")
+
+    def test_reflect_prints_the_answer_then_its_sources(self) -> None:
+        self.assertEqual(self.plain(["reflect", "--query", "rent"], REFLECT),
+                         "Your rent is 900 EUR a month.\n\nSources:\n- doc_af7084b8 v1\n")
+
+    def test_categories_list_is_a_table(self) -> None:
+        self.assertEqual(self.plain(["categories", "list"], CATEGORIES), "\n".join([
+            "CATEGORY ID  NAME     REVISION  ALIASES",
+            "inbox" + " " * 8 + "Inbox" + " " * 4 + "1" + " " * 9 + "-",
+            "housing" + " " * 6 + "Housing  4" + " " * 9 + "home, rent",
+        ]) + "\n")
+
+    def test_commands_without_a_renderer_keep_the_fallback(self) -> None:
+        out = self.plain(["operations", "get", OP_ID], {"operation_id": OP_ID, "state": "completed",
+                                                 "summary": {"sources": [], "item_count": 3, "error_code": None}})
+        self.assertEqual(out, f"Durable operation ID: {OP_ID}\nState: completed\n"
+                              'Summary: {"error_code": null, "item_count": 3, "sources": []}\n')
+        # An answer of an unexpected shape falls back instead of failing.
+        self.assertEqual(self.plain(["wiki", "list"], {"pages": "nope"}), 'Pages: "nope"\n')
+
+
 if __name__ == "__main__":
     unittest.main()
