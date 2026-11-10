@@ -231,7 +231,8 @@ lifecontext wiki list
 lifecontext wiki show index
 ```
 
-**Ask.** `recall` returns cited passages, each tied to one source version. It
+**Ask.** `recall` returns matching evidence, each item tied to one source ID
+and version; the quote and its page are on the document's wiki page. It
 reranks on the CPU and can take tens of seconds; run one at a time. `reflect`
 writes an answer from cited evidence.
 
