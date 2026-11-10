@@ -35,6 +35,8 @@ class DocumentCLIContractTests(unittest.TestCase):
                     cli.HTTP_TIMEOUT + ExtractionLimits().max_seconds + VISION_DEADLINE_SECONDS + VISION_PROBE_SECONDS,
                 )
             cli._http_exchange(self.args("status"), "GET", "/v1/documents")
+            self.assertEqual(connect.call_args.kwargs["timeout"], cli.GET_TIMEOUT)
+            cli._http_exchange(self.args("status"), "POST", "/v1/recall")
             self.assertEqual(connect.call_args.kwargs["timeout"], cli.HTTP_TIMEOUT)
 
     def test_available_token_applies_to_all_versioned_routes(self):

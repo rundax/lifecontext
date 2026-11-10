@@ -26,6 +26,8 @@ from lifecontext.paths import LifeContextPaths
 DEFAULT_PORT = 8765
 # Leave five seconds after Hindsight's bounded provider request for API cleanup.
 HTTP_TIMEOUT = HINDSIGHT_CLIENT_TIMEOUT + 5.0
+# Reads answer from the catalog and the vault: a GET that takes longer is stuck, not working.
+GET_TIMEOUT = 30.0
 MAX_TEXT_BYTES = LIMIT_CEILINGS["max_text_bytes"]
 MAX_QUERY_BYTES = LIMIT_CEILINGS["max_query_bytes"]
 MAX_FILE_BYTES = LIMIT_CEILINGS["max_file_bytes"]
@@ -607,7 +609,7 @@ def _http_exchange(
         except OSError:
             raise CLIError("unauthorized") from None
         request_headers["Authorization"] = "Bearer " + token
-    timeout = HTTP_TIMEOUT
+    timeout = GET_TIMEOUT if method == "GET" else HTTP_TIMEOUT
     if method == "POST" and (path == "/v1/documents" or
                              (path.startswith("/v1/documents/operations/") and path.endswith("/retry"))):
         from lifecontext.extraction import ExtractionLimits
@@ -1667,17 +1669,33 @@ def _run_local(args: argparse.Namespace) -> int:
     return code
 
 
+INTERRUPTED_EXIT = 130
+
+
+def _interrupted() -> int:
+    """Ctrl-C: one line instead of a traceback, and the shell's usual 128 + SIGINT exit status."""
+    print("Interrupted. Anything already sent may still be running in the service: check with "
+          "`lifecontext status` or `lifecontext documents list` before running it again.", file=sys.stderr)
+    return INTERRUPTED_EXIT
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command in _LOCAL_COMMANDS:
-        return _run_local(args)
+        try:
+            return _run_local(args)
+        except KeyboardInterrupt:
+            return _interrupted()
     if args.command == "agent-gate":
         from lifecontext.agent_gate import run as run_agent_gate
 
         return run_agent_gate(allow_delete=args.allow_delete, max_calls=args.max_calls, port=args.port)
     if args.command == "preflight":
-        return _preflight(args)
+        try:
+            return _preflight(args)
+        except KeyboardInterrupt:
+            return _interrupted()
     if args.command == "serve":
         try:
             return _serve(args)
@@ -1698,6 +1716,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CLIError as exc:
         _print_error(args, exc)
         return 1
+    except KeyboardInterrupt:
+        return _interrupted()
     return LINT_FAILED_EXIT if failing else 0
 
 

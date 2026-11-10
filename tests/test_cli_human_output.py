@@ -442,5 +442,45 @@ class UnreachableServiceTests(unittest.TestCase):
             self.assertFalse(cli._service_installed())
 
 
+class InterruptAndTimeoutTests(unittest.TestCase):
+    def interrupt(self, argv: list[str], target: str) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        patcher = (patch.dict(cli._LOCAL_COMMANDS, {"doctor": unittest.mock.Mock(side_effect=KeyboardInterrupt)})
+                   if target == "local" else patch.object(cli, "_dispatch", side_effect=KeyboardInterrupt))
+        with patcher, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_ctrl_c_prints_one_line_and_exits_130(self) -> None:
+        for argv, target in ((["documents", "import", "lease.pdf"], "api"), (["status", "--json"], "api"),
+                             (["doctor"], "local")):
+            with self.subTest(argv=argv):
+                code, out, err = self.interrupt(argv, target)
+                self.assertEqual((code, out), (130, ""))
+                self.assertEqual(err.count("\n"), 1, err)
+                self.assertTrue(err.startswith("Interrupted. Anything already sent may still be running"), err)
+                self.assertNotIn("Traceback", err)
+
+    def test_reads_use_a_short_timeout_and_writes_keep_theirs(self) -> None:
+        from unittest.mock import MagicMock
+
+        connection = MagicMock()
+        response = connection.getresponse.return_value
+        response.read.return_value = b"{}"
+        response.getheaders.return_value = []
+        response.status = 200
+        args = cli._build_parser().parse_args(["status"])
+        with patch.object(cli, "local_token", return_value="a" * 64), \
+                patch.object(cli.http.client, "HTTPConnection", return_value=connection) as connect:
+            for method, target, expected in (("GET", "/v1/status", 30.0), ("GET", "/v1/wiki/index", 30.0),
+                                             ("POST", "/v1/recall", cli.HTTP_TIMEOUT),
+                                             ("POST", "/v1/reflect", cli.HTTP_TIMEOUT),
+                                             ("POST", "/v1/retain?source_id=a&source_version=1", cli.HTTP_TIMEOUT)):
+                with self.subTest(method=method, target=target):
+                    cli._http_exchange(args, method, target)
+                    self.assertEqual(connect.call_args.kwargs["timeout"], expected)
+        self.assertGreater(cli.HTTP_TIMEOUT, cli.GET_TIMEOUT)
+
+
 if __name__ == "__main__":
     unittest.main()
