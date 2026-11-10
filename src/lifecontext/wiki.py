@@ -327,6 +327,28 @@ def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | N
     return f"{several} {start}–{end}"
 
 
+def coverage_line(locators: list, coverage: Mapping[str, Any], passages: Iterable[tuple[int, int]]) -> str | None:
+    """One line under a document page's title: of how many of the document's pages (or
+    slides, or frames) its claims come from, and which were not read. None for a
+    document without such units, where the line would say nothing."""
+    unit = coverage.get("unit") or next((kind for kind in ("page", "slide")
+                                         if any(locator.get("kind") == kind for locator in locators)), None)
+    if unit is None:
+        return None
+    kind = {"frame": "image"}.get(unit, unit)
+    units = {locator.get("start") for locator in locators if locator.get("kind") == kind}
+    total = coverage.get("total") or len(units)
+    cited = {locator.get("start") for start, end in passages for locator in locators[start:end]
+             if locator.get("kind") == kind}
+    unread = [item.split(":", 1)[1] for item in coverage.get("unresolved") or ()
+              if item.startswith(unit + ":") and item.split(":", 1)[1].isdigit()]
+    line = f"Claims come from {len(cited)} of {total} {unit}{'' if total == 1 else 's'}"
+    if unread:
+        shown = ", ".join(unread[:10]) + (f" and {len(unread) - 10} more" if len(unread) > 10 else "")
+        line += f"; not read: {unit}{'' if len(unread) == 1 else 's'} {shown}"
+    return line + "."
+
+
 def citation_label(title: str, place: str | None, version: int | None = None) -> str:
     """A citation as people read it: ``Title, p. 3``; ``Title v2, p. 3`` when the
     document has more than one version. Long titles are shortened."""
@@ -357,7 +379,8 @@ def render_managed_v11(patch: WikiPatch) -> str:
 
 
 def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None, state: str | None = None,
-                   page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None) -> str:
+                   page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None,
+                   coverage: str | None = None) -> str:
     """Render immutable managed content only; projection must preserve user bytes/CAS.
 
     Claims are numbered; a model summary is labelled and names the claims it rests
@@ -367,8 +390,8 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     ``citation_link(citation)`` return a relative link target, or None while the
     target is not projected (the text then stays plain). ``citation_label(citation)``
     names a citation for people (``WikiService.show`` passes title and page); without
-    it the machine label is shown. A ``withdrawn`` page ("forgotten" or "retired")
-    shows one fixed line instead of claims.
+    it the machine label is shown. ``coverage`` is one line under a document page's
+    title. A ``withdrawn`` page ("forgotten" or "retired") shows one fixed line instead of claims.
     """
     if withdrawn:
         return "\n".join([MANAGED_START, f"# {_line(patch.title)}", "", WITHDRAWN_LINES[withdrawn], MANAGED_END, ""])
@@ -400,6 +423,8 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
             entry = f"Model summary: {sentences[number]}" if number in sentences else cited(claim)
             lines.append(f"{number}. {page(link)} — {entry}")
         return "\n".join([*lines, MANAGED_END, ""])
+    if coverage:
+        lines.extend([_line(coverage), ""])
     if patch.summary:
         prose = " ".join(f"{s.text} [{', '.join(map(str, s.claims))}]" for s in patch.summary)
         lines.extend([SUMMARY_LABEL, ">", f"> {prose}", ""])
@@ -860,11 +885,10 @@ class WikiService:
                           summary=() if dropped else patch.summary)
         return visible, None if kept else ("forgotten" if gone else "retired")
 
-    def _locators(self, source_id: str, version: int, extraction_revision: int) -> list | None:
-        """The locator of each passage of one stored extraction, or None when it cannot be read.
-
-        Extraction artifacts are immutable, so a few are kept per checksum across renders.
-        """
+    def _extraction_view(self, source_id: str, version: int, extraction_revision: int) -> dict | None:
+        """The locator of each passage of one stored extraction and its coverage, or None
+        when it cannot be read. Extraction artifacts are immutable, so a few are kept per
+        checksum across renders."""
         rows = [row for row in self.catalog.list_extractions(source_id, version)
                 if row["extraction_revision"] == extraction_revision and row["artifact_sha256"]]
         if not rows:
@@ -872,9 +896,11 @@ class WikiService:
         key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
         cache = self._locator_cache
         if key not in cache:
+            from lifecontext.extraction import coverage_summary
             try:
                 payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
-                cache[key] = [segment.get("locator") or {} for segment in payload.get("segments", [])]
+                cache[key] = {"locators": [segment.get("locator") or {} for segment in payload.get("segments", [])],
+                              "coverage": coverage_summary(payload)}
             except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return None
             if len(cache) > 8:
@@ -896,13 +922,27 @@ class WikiService:
                 titles[source] = title or self._title(source, citation.source_version)
                 current = self.catalog.get_current_manifest(source)
                 versions[source] = current.source_version if current is not None else 1
-            locators = self._locators(source, citation.source_version, citation.extraction_revision) or []
+            view = self._extraction_view(source, citation.source_version, citation.extraction_revision)
+            locators = view["locators"] if view else []
             place = None
             if citation.passage_end <= len(locators):
                 place = citation_place(locators[citation.passage_start], locators[citation.passage_end - 1])
             several = max(versions[source], citation.source_version) > 1
             return citation_label(titles[source], place, citation.source_version if several else None)
         return label
+
+    def _coverage_line(self, patch: WikiPatch) -> str | None:
+        """``coverage_line`` for a document's own page, from the extraction its claims cite."""
+        own = [c for claim in patch.claims for c in claim.citations if source_page_id(c.source_id) == patch.page_id]
+        if not own:
+            return None
+        first = own[0]
+        view = self._extraction_view(first.source_id, first.source_version, first.extraction_revision)
+        if view is None:
+            return None
+        return coverage_line(view["locators"], view["coverage"],
+                             [(c.passage_start, c.passage_end) for c in own
+                              if (c.source_version, c.extraction_revision) == (first.source_version, first.extraction_revision)])
 
     def show(self, page_id: str, revision: int | None = None, **render: Any) -> dict | None:
         """A page, one revision and its managed text; ``render`` passes the vault's state and link resolvers.
@@ -928,8 +968,11 @@ class WikiService:
             # Page titles never change, so naming linked pages keeps a revision's text stable;
             # links to withdrawn pages are gone already.
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
+            extra = {}
+            if not withdrawn and page_id.startswith("source_"):
+                extra["coverage"] = self._coverage_line(visible)
             managed = render_managed(visible, titles=titles, withdrawn=withdrawn,
-                                     citation_label=self._citation_labels(), **render)
+                                     citation_label=self._citation_labels(), **extra, **render)
         return {"page": {**page, "title": title}, "revision": row, "managed": managed, "title": title,
                 "title_withdrawn": neutral,
                 "withdrawn": withdrawn, "reviews": [review for review in self.catalog.list_wiki_reviews(page_id)
