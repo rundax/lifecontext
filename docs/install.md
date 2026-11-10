@@ -16,11 +16,15 @@ leaves your machine is in [privacy.md](privacy.md).
 
 ## install.sh
 
+> 1.2.0rc1 is a pre-release; the final 1.2.0 is pending. The commands on this
+> page install the release candidate.
+
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh | sh
 ```
 
-It installs the latest release. To install a commit from a checkout instead,
+It installs the release the script belongs to, here 1.2.0rc1. If it prints a
+`curl:` error, nothing was installed. To install a commit from a checkout instead,
 build a wheel from the tree and pass it with the lock for your platform
 (`linux-x86_64`, `linux-aarch64` or `macos-arm64`):
 
@@ -156,7 +160,7 @@ guesses a provider or a model: both must be set, or it stops with
 | `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh |
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh |
   LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 \
   LIFECONTEXT_API_KEY_FILE=~/anthropic-key.txt sh -s -- --non-interactive
 ```
