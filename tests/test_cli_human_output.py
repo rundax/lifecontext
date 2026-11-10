@@ -381,5 +381,66 @@ class ErrorTableTests(unittest.TestCase):
         self.assertNotIn("a" * 64, err)
 
 
+class UnreachableServiceTests(unittest.TestCase):
+    maxDiff = None
+
+    def fail_with(self, argv: list[str], failure: BaseException, *, installed: bool) -> tuple[int, str, str]:
+        from unittest.mock import MagicMock
+
+        connection = MagicMock()
+        connection.request.side_effect = failure
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(cli, "local_token", return_value="a" * 64), \
+                patch.object(cli.http.client, "HTTPConnection", return_value=connection), \
+                patch.object(cli, "_service_installed", return_value=installed), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_a_refused_connection_points_to_the_installed_service_or_to_serve(self) -> None:
+        code, out, err = self.fail_with(["status", "--port", "18799"], ConnectionRefusedError(), installed=True)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "The LifeContext service is not reachable at 127.0.0.1:18799.\n"
+                              "Next: check it with `lifecontext service status`: it may still be starting, "
+                              "or recovering after a restart.\n")
+        _, _, err = self.fail_with(["status", "--port", "18799"], ConnectionRefusedError(), installed=False)
+        self.assertTrue(err.endswith("Next: start it with `lifecontext serve --port 18799`.\n"), err)
+        code, out, _ = self.fail_with(["status", "--json"], ConnectionRefusedError(), installed=True)
+        failure = json.loads(out)
+        self.assertEqual((code, failure["error"], failure["retryable"], failure["request_id"]),
+                         (1, "api_unavailable", True, None))
+        self.assertIn("lifecontext service status", failure["next_step"])
+
+    def test_a_timeout_says_the_service_may_still_be_working(self) -> None:
+        code, out, err = self.fail_with(["recall", "--query", "rent"], TimeoutError(), installed=True)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("did not answer in time; it may still be working on the request.", err)
+        self.assertIn("running it again may repeat the work", err)
+        self.assertNotIn("serve", err)
+        code, out, _ = self.fail_with(["documents", "list", "--json"], TimeoutError(), installed=False)
+        failure = json.loads(out)
+        # Scripts keep seeing the same code; only the explanation differs.
+        self.assertEqual((code, failure["error"], failure["retryable"]), (1, "api_unavailable", True))
+        self.assertIn("may still be working", failure["message"])
+
+    def test_the_installed_unit_is_found_where_the_service_manager_reads_it(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from local_paths import scratch_root
+
+        with tempfile.TemporaryDirectory(dir=scratch_root()) as directory, \
+                patch("platform.system", return_value="Linux"), \
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}):
+            self.assertFalse(cli._service_installed())
+            units = Path(directory) / "systemd" / "user"
+            units.mkdir(parents=True)
+            (units / "lifecontext.service").write_text("[Service]\n", encoding="utf-8")
+            self.assertTrue(cli._service_installed())
+        with patch("platform.system", return_value="Plan9"):
+            self.assertFalse(cli._service_installed())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -57,7 +57,7 @@ class CLIError(RuntimeError):
     """Stable command failure that never includes paths or remote response text."""
 
     def __init__(self, code: str, status: int | None = None, message: str | None = None, *,
-                 retryable: bool | None = None, request_id: str | None = None):
+                 retryable: bool | None = None, request_id: str | None = None, timed_out: bool = False):
         super().__init__(code)
         self.code = code
         # The HTTP status when the API itself answered with an error.
@@ -67,6 +67,8 @@ class CLIError(RuntimeError):
         # From the API's error body, when it answered with one.
         self.retryable = retryable
         self.request_id = request_id
+        # The service accepted the connection but did not answer in time: it may still be working.
+        self.timed_out = timed_out
 
 
 def _positive_int(value: str) -> int:
@@ -624,7 +626,10 @@ def _http_exchange(
         return response.status, response_headers, raw
     except CLIError:
         raise
-    except (http.client.HTTPException, OSError, TimeoutError):
+    except TimeoutError:
+        # The code stays api_unavailable for scripts; the message says the service may still be working.
+        raise CLIError("api_unavailable", timed_out=True) from None
+    except (http.client.HTTPException, OSError):
         raise CLIError("api_unavailable") from None
     finally:
         connection.close()
@@ -1151,12 +1156,31 @@ def _print_error(args: argparse.Namespace, error: CLIError) -> None:
     """One failure, from the shared table: ``--json`` keeps ``error`` and adds the explanation."""
     from lifecontext import cli_output
 
+    start = None
+    if error.code in {"api_unavailable", "token_unavailable"}:
+        start = cli_output.start_hint(args.port, service_installed=_service_installed())
+    message_code = "api_timeout" if error.timed_out else None
     if args.as_json:
-        failure = cli_output.error_json(error.code, port=args.port, retryable=error.retryable,
-                                        request_id=error.request_id)
+        failure = cli_output.error_json(error.code, port=args.port, start=start, retryable=error.retryable,
+                                        request_id=error.request_id, message_code=message_code)
         print(json.dumps(failure, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return
-    print(cli_output.error_text(error.code, port=args.port), file=sys.stderr)
+    print(cli_output.error_text(error.code, port=args.port, start=start, message_code=message_code),
+          file=sys.stderr)
+
+
+def _service_installed() -> bool:
+    """Whether this account has the LifeContext API unit installed (systemd or launchd)."""
+    import platform
+
+    from lifecontext import service
+
+    try:
+        manager = service.manager_for(platform.system())
+        directory = service._unit_directory(service.account_home(), manager, os.environ)
+        return (directory / service._our_files(manager, maintenance=False, capture=False)[0]).is_file()
+    except (service.ServiceError, OSError, KeyError, IndexError):
+        return False
 
 
 def _preflight(args: argparse.Namespace) -> int:
