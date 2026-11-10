@@ -1,5 +1,4 @@
 """Several checked claims per evidence window, spread over the whole document under the page cap."""
-import asyncio
 import json
 import math
 import unittest
@@ -7,7 +6,12 @@ import unittest
 import test_wiki
 from wiki_fake_compiler import FakeCompiler
 
-from lifecontext.wiki import COMPILE_INSTRUCTIONS, MAX_SOURCE_CLAIMS, source_page_id
+from lifecontext.wiki import (
+    COMPILE_INSTRUCTIONS,
+    MAX_SOURCE_CLAIMS,
+    WikiError,
+    source_page_id,
+)
 
 
 class ClaimsPerWindowTests(unittest.TestCase):
@@ -80,7 +84,7 @@ class ClaimsPerWindowTests(unittest.TestCase):
             return answer
 
         compiler.window = window
-        with self.assertRaises(Exception):
+        with self.assertRaises(WikiError):
             fixture.update()
         self.assertEqual(fixture.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "failed")
         self.assertIsNone(fixture.catalog.get_wiki_page(source_page_id("doc_1")))

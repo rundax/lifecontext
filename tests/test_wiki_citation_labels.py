@@ -5,7 +5,13 @@ import unittest
 
 import test_wiki
 
-from lifecontext.wiki import Citation, WikiPatch, citation_label, citation_place, render_managed
+from lifecontext.wiki import (
+    Citation,
+    WikiPatch,
+    citation_label,
+    citation_place,
+    render_managed,
+)
 
 
 def locator(kind, start, end=None, container=None):
