@@ -32,35 +32,57 @@ def _tokens(line: str) -> list[str]:
         return line.split()
 
 
-def _commands(markdown: str, top_level: set[str]) -> list[tuple[str, list[str]]]:
+def _segments(tokens: list[str]) -> list[list[str]]:
+    """The calls on one line: `a | b && c; d` is four."""
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
+
+
+def _commands(markdown: str, parser: argparse.ArgumentParser) -> list[tuple[str, list[str]]]:
     """Each command the Markdown names, as (its text, the words after the program name).
 
-    Code blocks count only lines that call ``lifecontext`` or ``"$CLI"``. Code spans
-    also count a bare command (``wiki show PAGE_ID``) or a bare ``--flag``."""
+    Code blocks count every call of ``lifecontext`` or ``"$CLI"`` on a line. Code spans
+    also count a bare command (``wiki show PAGE_ID``), a bare ``--flag``, and a span
+    that looks like a call of a command the parser lacks: an unknown lowercase word
+    followed by a lifecontext flag or subcommand name (``wikis show PAGE_ID``)."""
+    top_level = set(_subcommands(parser).choices)
+    flags, names = _all_flags(parser), _all_subcommand_names(parser)
     lines = [(line, False) for block in _FENCE.findall(markdown)
              for line in block.replace("\\\n", " ").splitlines()]
     lines += [(" ".join(span.split()), True) for span in _SPAN.findall(_FENCE.sub("", markdown))]
     found = []
     for line, bare in lines:
-        tokens = _tokens(line)
-        starts = [index for index, token in enumerate(tokens) if token in _PROGRAM]
-        if starts:
-            words = tokens[starts[0] + 1:]
-        elif bare and tokens and (tokens[0] in top_level or tokens[0].startswith("--")):
-            words = tokens
-        else:
-            continue
-        for index, word in enumerate(words):
-            if word in _SEPARATORS:
-                words = words[:index]
-                break
-        if words:
-            found.append((line, words))
+        for segment in _segments(_tokens(line)):
+            starts = [index for index, token in enumerate(segment) if token in _PROGRAM]
+            if starts:
+                words = segment[starts[0] + 1:]
+            elif bare and (segment[0] in top_level or segment[0].startswith("--")):
+                words = segment
+            elif bare and re.fullmatch(r"[a-z][a-z-]*", segment[0]) and len(segment) > 1 \
+                    and (segment[1] in names or any(word.split("=", 1)[0] in flags for word in segment[1:])):
+                words = segment
+            else:
+                continue
+            if words:
+                found.append((line, words))
     return found
 
 
 def _subcommands(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
     return next((action for action in parser._actions if isinstance(action, argparse._SubParsersAction)), None)
+
+
+def _all_subcommand_names(parser: argparse.ArgumentParser) -> set[str]:
+    subcommands = _subcommands(parser)
+    names = set(subcommands.choices) if subcommands else set()
+    for child in (subcommands.choices.values() if subcommands else ()):
+        names |= _all_subcommand_names(child)
+    return names
 
 
 def _all_flags(parser: argparse.ArgumentParser) -> set[str]:
@@ -118,12 +140,11 @@ def _problems(parser: argparse.ArgumentParser, words: list[str]) -> list[str]:
     return problems
 
 
-def _skill_problems() -> dict[tuple[str, str], list[str]]:
+def _skill_problems(files: list[Path]) -> dict[tuple[str, str], list[str]]:
     parser = cli._build_parser()
-    top_level = set(_subcommands(parser).choices)
     problems = {}
-    for path in _skill_files():
-        for line, words in _commands(path.read_text(encoding="utf-8"), top_level):
+    for path in files:
+        for line, words in _commands(path.read_text(encoding="utf-8"), parser):
             found = _problems(parser, words)
             if found:
                 problems[(path.name, line)] = found
@@ -132,14 +153,17 @@ def _skill_problems() -> dict[tuple[str, str], list[str]]:
 
 class SkillCommandTests(unittest.TestCase):
     def test_every_command_and_flag_the_skill_names_exists_in_the_parser(self) -> None:
-        problems = _skill_problems()
+        files = _skill_files()
+        self.assertGreater(len(files), 1)
+        self.assertTrue(any(path.parent.name == "references" for path in files))
+        problems = _skill_problems(files)
         report = "\n".join(f"{name}: `{line}`: {'; '.join(found)}" for (name, line), found in sorted(problems.items()))
         self.assertEqual(problems, {}, "commands or flags the parser does not have:\n" + report)
 
     def test_the_recipes_are_read_and_checked(self) -> None:
         parser = cli._build_parser()
         text = (skill_source() / "SKILL.md").read_text(encoding="utf-8")
-        commands = [words for _, words in _commands(text, set(_subcommands(parser).choices))]
+        commands = [words for _, words in _commands(text, parser)]
         for expected in (["wiki", "list", "--json"], ["wiki", "show", "source_<SOURCE_ID>", "--json"],
                          ["documents", "import", "/path/to/lease.pdf", "--idempotency-key", "UNIQUE_KEY", "--json"],
                          ["retain", "SOURCE_ID", "1", "--idempotency-key", "UNIQUE_KEY", "--json"]):
@@ -148,30 +172,36 @@ class SkillCommandTests(unittest.TestCase):
 
     def test_a_made_up_command_flag_or_choice_is_reported(self) -> None:
         parser = cli._build_parser()
-        top_level = set(_subcommands(parser).choices)
         markdown = "\n".join([
             "```bash",
             '"$CLI" wiki search --json',
             '"$CLI" recall --query "x" --page 3 --json',
             '"$CLI" wiki lint --fail-on fatal --json',
+            '"$CLI" status --json && "$CLI" wiki serch',
             "```",
-            "Run `curate fix SOURCE_ID`, `wiki show PAGE_ID EXTRA`, `--no-such-flag` and `lifecontext status --json`.",
+            "Run `curate fix SOURCE_ID`, `wiki show PAGE_ID EXTRA`, `--no-such-flag`, `wikis show PAGE_ID --json`,"
+            " `tesseract --list-langs` and `lifecontext status --json`.",
         ])
-        problems = [_problems(parser, words) for _, words in _commands(markdown, top_level)]
+        problems = [_problems(parser, words) for _, words in _commands(markdown, parser)]
         self.assertEqual(problems, [
             ["lifecontext wiki has no command search"],
             ["lifecontext recall has no --page"],
             ["lifecontext wiki lint --fail-on has no choice fatal"],
+            [],
+            ["lifecontext wiki has no command serch"],
             ["lifecontext curate has no action fix"],
             ["lifecontext wiki show takes no argument EXTRA"],
             ["no lifecontext command has --no-such-flag"],
+            ["lifecontext has no command wikis"],
             [],
         ])
 
     def test_the_description_leads_with_answering_questions_on_supported_platforms(self) -> None:
         text = (skill_source() / "SKILL.md").read_text(encoding="utf-8")
         front_matter = text.split("---", 2)[1]
-        description = re.search(r'^description: "(.*)"$', front_matter, re.MULTILINE).group(1)
+        match = re.search(r'^description: "(.*)"$', front_matter, re.MULTILINE)
+        self.assertIsNotNone(match)
+        description = match.group(1)
         self.assertTrue(description.startswith("Answer questions from the user's own documents and notes"))
         self.assertIn("platforms: [linux, macos]", front_matter)
         body = text.split("---", 2)[2]
