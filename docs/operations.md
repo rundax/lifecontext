@@ -548,10 +548,10 @@ test fails when the two differ).
 
 ### The CLI's own codes
 
-- `api_unavailable`: The LifeContext service is not reachable at 127.0.0.1:PORT. Next: start it with `lifecontext serve --port PORT`.
+- `api_unavailable`: The LifeContext service is not reachable at 127.0.0.1:PORT. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
 - `api_error`: The service answered with an error this command does not know. Next: update the CLI and restart the service so both run the same version.
 - `invalid_api_response`: The service's answer is not what this command expects. Next: update the CLI and restart the service so both run the same version.
-- `token_unavailable`: No LifeContext API token for this user: the service writes it when it starts, under the same HOME. Next: start it with `lifecontext serve --port PORT`.
+- `token_unavailable`: No LifeContext API token for this user: the service writes it when it starts, under the same HOME. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
 - `input_unavailable`: Unable to read the selected source input. Next: give an existing regular file, or - for standard input.
 - `vault_missing`: The vault's Journal folder does not exist. Next: create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml.
 - `destination_exists`: The output file already exists; LifeContext never overwrites one. Next: choose a new file name.
@@ -562,7 +562,7 @@ test fails when the two differ).
 
 ### The MCP server's own codes
 
-- `busy`: A previous the tool call is still finishing. Next: report it instead of retrying.
+- `busy`: A previous MCP tool call is still finishing. Next: report it instead of retrying.
 - `path_not_allowed`: The file is outside the import directories the owner allowed, or in a protected place (the LifeContext home, the vault, a hidden directory in the home directory, or a system directory). Next: ask the owner to import it.
 
 ### Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)
@@ -582,7 +582,7 @@ test fails when the two differ).
 - `invalid_vault`: That vault location is not allowed. Next: choose a folder that is not `/`, not inside ~/.lifeweave and not a parent of it.
 - `vault_path_has_symlink`: The vault path in config.yaml goes through a symbolic link. Next: run `lifecontext init --force` to store the real path.
 - `unsafe_vault`: The vault folder is not a real folder of yours. Next: choose a folder you own, or fix its owner and type.
-- `unsafe_home`: The LifeContext home is not private to you. Next: check that ~/.lifeweave belongs to you with mode 0700, then re-run.
+- `unsafe_home`: The LifeContext home is not private to you, or HOME is not an absolute path. Next: check that HOME is an absolute path and ~/.lifeweave belongs to you with mode 0700, then re-run.
 - `unsafe_credentials`: The credentials file is open to other users or not a regular file. Next: make it a regular file with mode 0600, or delete it and run `lifecontext init` again.
 - `invalid_credentials`: The credentials file is malformed. Next: delete it and run `lifecontext init` again to enter the key.
 - `config_incomplete`: The config file has no model section. Next: run `lifecontext init --force` with --provider and --model.
@@ -627,8 +627,8 @@ test fails when the two differ).
 - `archive_instance_invalid`: The memory engine's instance file in the archive is not valid. Next: use another backup.
 - `home_not_empty`: This HOME already holds LifeContext data; a restore never overwrites it. Next: restore into a fresh HOME.
 - `vault_not_empty`: The vault folder to restore into is not empty. Next: restore into an empty or new folder.
-- `vault_outside_home`: The vault to restore is outside this HOME. Next: restore it into a folder inside your home directory.
-- `vault_location_refused`: The vault location is not one a restore writes to. Next: restore into a folder inside ~/LifeContext.
+- `vault_outside_home`: The vault to restore is outside this HOME. Next: give `--vault DIR` with a folder inside your home directory.
+- `vault_location_refused`: The vault location is not one a restore writes to. Next: give `--vault DIR` with a folder inside ~/LifeContext.
 - `schema_unsupported`: The archive was made by a newer LifeContext. Next: update LifeContext, then re-run.
 
 ### The memory engine

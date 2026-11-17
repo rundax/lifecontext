@@ -410,7 +410,8 @@ _CLI: dict[str, ErrorText] = {
     "api_unavailable": ErrorText("The LifeContext service is not reachable at 127.0.0.1:{port}.", "{start}", True),
     "api_timeout": ErrorText("The LifeContext service did not answer in time; it may still be working on the "
                              "request.", "wait, then check with the matching list or show command before "
-                             "re-running: running it again may repeat the work"),
+                             "re-running: running it again may repeat the work",
+                             agent_next_step="report it with the command you ran; do not resend it"),
     "api_timeout_read": ErrorText("The LifeContext service did not answer in 30 s; it may be busy with an "
                                   "import.", "try again in a few minutes", True),
     "api_error": ErrorText("The service answered with an error this command does not know.", _UPDATE,
@@ -471,8 +472,9 @@ _LOCAL: dict[str, ErrorText] = {
                                         "run `lifecontext init --force` to store the real path"),
     "unsafe_vault": ErrorText("The vault folder is not a real folder of yours.",
                               "choose a folder you own, or fix its owner and type"),
-    "unsafe_home": ErrorText("The LifeContext home is not private to you.",
-                             "check that ~/.lifeweave belongs to you with mode 0700, then re-run"),
+    "unsafe_home": ErrorText("The LifeContext home is not private to you, or HOME is not an absolute path.",
+                             "check that HOME is an absolute path and ~/.lifeweave belongs to you with mode "
+                             "0700, then re-run"),
     "unsafe_credentials": ErrorText("The credentials file is open to other users or not a regular file.",
                                     "make it a regular file with mode 0600, or delete it and run "
                                     "`lifecontext init` again"),
@@ -552,9 +554,9 @@ _LOCAL: dict[str, ErrorText] = {
     "vault_not_empty": ErrorText("The vault folder to restore into is not empty.",
                                  "restore into an empty or new folder"),
     "vault_outside_home": ErrorText("The vault to restore is outside this HOME.",
-                                    "restore it into a folder inside your home directory"),
+                                    "give `--vault DIR` with a folder inside your home directory"),
     "vault_location_refused": ErrorText("The vault location is not one a restore writes to.",
-                                        "restore into a folder inside ~/LifeContext"),
+                                        "give `--vault DIR` with a folder inside ~/LifeContext"),
     "schema_unsupported": ErrorText("The archive was made by a newer LifeContext.",
                                     "update LifeContext, then re-run"),
 }
@@ -618,7 +620,8 @@ GROUPS: tuple[tuple[str, dict[str, ErrorText]], ...] = (
     ("Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)", _LOCAL),
     ("The memory engine", _ENGINE),
 )
-# Every code the CLI prints as {"error": ...}. {port}, {tool} and {start} are filled in.
+# Every code the CLI prints as {"error": ...}, except the agent gate's own transport codes. {port}, {tool}
+# and {start} are filled in.
 ERRORS: dict[str, ErrorText] = {code: entry for _, group in GROUPS for code, entry in group.items()}
 # Codes that only choose the sentence for another code (a timeout reports api_unavailable).
 EXPLAINERS = frozenset({"api_timeout", "api_timeout_read"})
@@ -640,7 +643,7 @@ def describe(code: str, *, port: int, start: str | None = None, tool: str = "",
     return entry.message.format(**fields), step.format(**fields) if step else None, entry.retryable
 
 
-def start_hint(port: int, *, service_installed: bool) -> str:
+def start_hint(port: int | str, *, service_installed: bool) -> str:
     """Where to look when the service is not reachable; `serve` stays the answer without an installed unit."""
     serve = f"start it with `lifecontext serve --port {port}`"
     if service_installed:
@@ -672,7 +675,7 @@ def failure_codes_section() -> str:
         for code, entry in group.items():
             if code in EXPLAINERS:
                 continue
-            fields = {"port": "PORT", "tool": "the tool", "start": "start it with `lifecontext serve --port PORT`"}
+            fields = {"port": "PORT", "tool": "MCP tool", "start": start_hint("PORT", service_installed=True)}
             step = entry.next_step.format(**fields) if entry.next_step else ""
             lines.append(f"- `{code}`: {entry.message.format(**fields)}" + (f" Next: {step}." if step else ""))
         lines.append("")
