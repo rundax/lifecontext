@@ -770,16 +770,7 @@ class JournalApplication:
             except (ApplicationError, CatalogError):
                 return False
             if resubmit:
-                current = self._transition_operation(
-                    current["operation_id"],
-                    "retryable_failed",
-                    "running",
-                    result={
-                        key: value
-                        for key, value in current["result"].items()
-                        if key != "error_code"
-                    },
-                )
+                current = self._start_admitted_operation(current)
                 report["resumed"] += 1
                 try:
                     submitted = await self._submit_retained_manifest(
@@ -1034,7 +1025,25 @@ class JournalApplication:
                 return False
             target_manifest = target.manifest
             if not await self._provider_has_exact_manifest(target_manifest):
-                return False
+                # The provider refused the correction; offer it once more from custody.
+                try:
+                    provider_state = self.catalog.get_provider_state(source_id, target_version)
+                    if (
+                        state != "retryable_failed"
+                        or provider_state is None
+                        or provider_state["submission_state"] != "failed"
+                        or self._newer_version_exists(source_id, target_version)
+                    ):
+                        return False
+                except (ApplicationError, CatalogError):
+                    return False
+                operation = self._start_admitted_operation(operation)
+                report["resumed"] += 1
+                try:
+                    await self._submit_curation_source(target_manifest, target.original_bytes)
+                except Exception as exc:
+                    self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
+                    return False
             try:
                 self.project(source_id, target_version)
                 if history is None:
@@ -2117,15 +2126,7 @@ class JournalApplication:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
             raise ApplicationError(code) from None
-        if retrying:
-            operation = self._transition_operation(
-                operation["operation_id"],
-                "retryable_failed",
-                "running",
-                result=intent_result,
-            )
-        else:
-            operation = self._start_admitted_operation(operation)
+        operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
             self.project(source_id, source_version)
@@ -2240,7 +2241,9 @@ class JournalApplication:
         operation = self._begin_operation(idempotency_key, request_digest, "curation")
         if operation["state"] == "completed":
             return self._curation_response(operation)
-        if operation["state"] in {"retryable_failed", "permanent_failed"}:
+        # A correction or reindex only resubmits custody, so after a retryable failure the same request runs again.
+        retrying = operation["state"] == "retryable_failed" and action in {"correct", "reindex"}
+        if operation["state"] in {"retryable_failed", "permanent_failed"} and not retrying:
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if operation["state"] == "running":
             # An earlier process may have crossed an external write boundary.
@@ -2249,7 +2252,7 @@ class JournalApplication:
             intent_manifest = self.catalog.get_manifest(source_id, bound_version)
         except CatalogError:
             raise ApplicationError("internal_error") from None
-        if intent_manifest is not None:
+        if intent_manifest is not None and not retrying:
             recovery_intent: dict[str, Any] = {
                 "kind": "curation",
                 "action": action,
@@ -2277,12 +2280,15 @@ class JournalApplication:
             latest = self.catalog.get_current_manifest(source_id)
             if latest is None:
                 raise ApplicationError("source_not_found")
-            if latest.source_version != bound_version:
+            if latest.source_version != bound_version and not (
+                # A refused correction registered its target already; any newer version wins.
+                retrying and action == "correct" and latest.source_version == bound_version + 1
+            ):
                 raise ApplicationError("conflict")
             evidence = self.custody.resolve_exact(source_id, bound_version)
             if (
-                evidence.manifest.sha256 != latest.sha256
-                or evidence.manifest.size_bytes != latest.size_bytes
+                evidence.manifest.sha256 != intent_manifest["sha256"]
+                or evidence.manifest.size_bytes != intent_manifest["size_bytes"]
             ):
                 raise ApplicationError("evidence_unavailable")
 
@@ -3086,7 +3092,15 @@ class JournalApplication:
                 "running",
                 result=operation["result"],
             )
-        if state in {"retryable_failed", "permanent_failed"}:
+        if state == "retryable_failed":
+            # The same request after a retryable failure runs again, from custody.
+            return self._transition_operation(
+                operation["operation_id"],
+                "retryable_failed",
+                "running",
+                result={key: value for key, value in operation["result"].items() if key != "error_code"},
+            )
+        if state == "permanent_failed":
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if state == "running":
             # A prior process may have crossed an external boundary already.
