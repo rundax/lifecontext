@@ -141,7 +141,9 @@ path to put in MCP client configs); the paths and modes of `~/.lifeweave`,
 `config.yaml`, `.env`, the vault root and `Journal`; a config summary (provider,
 model, base URL, time zone, which limits are customised) and whether the keys are
 present, never their values; the service on `--port` (`/healthz`, then
-`/v1/status` and the wiki lint counts with the local token); unfinished and
+`/v1/status` and the wiki lint counts with the local token), including how many
+journal entries are waiting for indexing (the count only: `lifecontext status`
+lists them); unfinished and
 failed operation counts from a read-only catalog connection; Tesseract, its
 version and installed languages (`eng`, `rus`, `ukr` are expected); the vision
 configuration (it never sends the probe image: use `preflight --vision-probe`);
@@ -819,14 +821,28 @@ succeeds. The complete inventory must fit `--limit` (default 200, maximum 4096);
 a larger inventory fails closed before writes. Increase the limit explicitly
 when needed.
 
-A failed retain keeps exact custody and a durable failed operation. Inspect
-`operations get <operation-id> --json`; repeating the same idempotency key
-replays its recorded result without a duplicate submission. For a known
-provider failure, use `curate reindex <source-id> --expected-version <N>` with
-an explicit new idempotency key after repairing the route. For projection
+A failed retain keeps exact custody and a durable failed operation, and its
+journal entry is already in the vault. Inspect
+`operations get <operation-id> --json`. Repeating the same idempotency key
+replays a completed or permanently failed result without a new submission.
+After a retryable provider failure (`retain_failed` or `provider_unavailable`),
+the same key with the same input runs a journal retain, correction or reindex
+again from custody, but only after a delay that grows with each refusal:
+1 minute, 5 minutes, 30 minutes, 2 hours, then every 6 hours. A retry before
+then gets the same retryable error and the provider is not called;
+`lifecontext capture` repeats pending notes this way. Each start also
+resubmits up to five refused journal notes from custody and stops at the first
+one the provider refuses again. A deleted or forgotten note is never
+resubmitted. `lifecontext status --json` reports `indexing_pending`: how many
+current journal entries are not indexed yet (pending or failed) and up to 20 of
+their vault-relative paths; `doctor` shows the count. For a known provider
+failure you can also run `curate reindex <source-id> --expected-version <N>`
+with an explicit new idempotency key after repairing the route. For projection
 failure, use reconciliation after resolving permissions or reviewing the edit;
-never edit the catalog or overwrite conflicting Markdown. Restart recovery
-uses exact provider evidence and managed hashes; unknown outcomes remain
+never edit the catalog or overwrite conflicting Markdown. An entry edited
+before its indexing finished keeps the edit and is reported as a projection
+conflict. Restart recovery uses exact provider evidence and managed hashes;
+outcomes it cannot check, because the provider cannot be asked, remain
 unresolved rather than being blindly resubmitted.
 
 ## Journal and wiki file names
