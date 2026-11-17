@@ -916,11 +916,14 @@ except ValueError:
     sys.exit(1)
 if "error" in report:
     sys.exit(1)
-print(", ".join(names.get(item["agent"], item["agent"]) for item in report.get("agents") or []
-                if item.get("state") == "linked"))
+agents = report.get("agents") or []
+linked = [names.get(item["agent"], item["agent"]) for item in agents if item.get("state") == "linked"]
+# "!": agents were found, none has the skill.
+print(", ".join(linked) if linked else ("!" if agents else ""))
 ') || linked="?"
 	case "$linked" in
 	"?") skills_state="unknown; see lifecontext skills check" ;;
+	"!") skills_state="agents found, but the skill was not linked; see lifecontext skills check" ;;
 	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
 	*) skills_state="linked for $linked" ;;
 	esac

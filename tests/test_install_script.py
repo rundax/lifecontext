@@ -690,6 +690,11 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         self.assertIn("skills_state=linked for Claude Code, Codex\n", self.run_function("link_skills", report).stdout)
         result = self.run_function("link_skills", json.dumps({"agents": []}))
         self.assertIn("skills_state=no agent found", result.stdout)
+        # Agents found, none linked: not the same as no agent.
+        result = self.run_function("link_skills", json.dumps({"agents": [{"agent": "claude", "state": "stale_link"}]}))
+        self.assertIn("skills_state=agents found, but the skill was not linked; see lifecontext skills check",
+                      result.stdout)
+        self.assertNotIn("no agent found", result.stdout)
         result = self.run_function("link_skills", json.dumps({"error": "link_failed"}))
         self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
 
