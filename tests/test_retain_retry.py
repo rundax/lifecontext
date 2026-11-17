@@ -522,6 +522,27 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "submitted")
         self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
 
+    def test_a_retain_interrupted_after_the_provider_refused_it_is_resubmitted_at_startup(self) -> None:
+        source_id = "src_retry_interrupted_after_refusal"
+        self.client.error = RuntimeError("rate limited")
+        with patch.object(self.app, "_fail_operation", side_effect=_Crash), self.assertRaises(_Crash):
+            asyncio.run(self.app.retain(
+                source_id, 1, b"note refused just before the crash", provenance={"source": "test"},
+                idempotency_key="retain-retry-interrupted-after-refusal",
+            ))
+        self.client.error = None
+        self.client.document_metadata.clear()
+        self.assertEqual(self._operation_state(), ("running", None))
+        self.assertEqual(self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "failed")
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual((report["resumed"], report["completed"]), (1, 1))
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self._operation_state(), ("completed", None))
+
     def test_a_correction_interrupted_during_the_provider_call_is_resubmitted_at_startup(self) -> None:
         source_id = "src_retry_correct_interrupted"
         self._edited_note(source_id)

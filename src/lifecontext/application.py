@@ -776,7 +776,11 @@ class JournalApplication:
             provider_state = self.catalog.get_provider_state(source_id, source_version)
         except CatalogError:
             return False
-        if provider_state is None or provider_state["submission_state"] != "failed":
+        if (
+            current["state"] == "running"
+            or provider_state is None
+            or provider_state["submission_state"] != "failed"
+        ):
             # Interrupted during the provider call: done if the provider holds this exact version,
             # else recorded as refused so it is offered again below.
             if await self._reconcile_provider_metadata(current, manifest, report):
