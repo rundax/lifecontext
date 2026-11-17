@@ -499,7 +499,7 @@ def cli_output_module():
 
 
 class LocalCommandErrorTests(unittest.TestCase):
-    def fail(self, argv: list[str], error: cli.CLIError) -> tuple[int, str, str]:
+    def run_failing(self, argv: list[str], error: cli.CLIError) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.dict(cli._LOCAL_COMMANDS, {"skills": unittest.mock.Mock(side_effect=error)}), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -507,30 +507,30 @@ class LocalCommandErrorTests(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_json_keeps_the_code_and_adds_the_same_keys_as_the_api_commands(self) -> None:
-        code, out, err = self.fail(["skills", "install", "--json"], cli.CLIError("skill_missing"))
+        code, out, err = self.run_failing(["skills", "install", "--json"], cli.CLIError("skill_missing"))
         self.assertEqual((code, err), (1, ""))
         self.assertEqual(json.loads(out), {
             "error": "skill_missing", "message": "The agent skill files are missing from this installation.",
             "next_step": "reinstall LifeContext, then re-run", "retryable": False, "request_id": None})
 
     def test_plain_output_names_the_command_gives_a_sentence_and_a_next_line(self) -> None:
-        code, out, err = self.fail(["skills", "install"], cli.CLIError("capture_requires_inbox"))
+        code, out, err = self.run_failing(["skills", "install"], cli.CLIError("capture_requires_inbox"))
         self.assertEqual((code, out), (1, ""))
-        self.assertEqual(err, "lifecontext skills failed: Capture needs an inbox folder and none is configured.\n"
-                              "Next: give --inbox FOLDER, or set the capture inbox in config.yaml.\n")
+        self.assertEqual(err, "lifecontext skills failed: The capture folder must be named Inbox.\n"
+                              "Next: leave out --inbox to use Journal/Inbox of the vault, or give a folder named Inbox.\n")
 
     def test_a_message_the_command_already_has_wins_over_the_table(self) -> None:
         error = cli.CLIError("model_unsupported", message="That model refuses forced tool choice.")
-        _, out, _ = self.fail(["skills", "install", "--json"], error)
+        _, out, _ = self.run_failing(["skills", "install", "--json"], error)
         failure = json.loads(out)
         self.assertEqual((failure["error"], failure["message"]), ("model_unsupported",
                                                                   "That model refuses forced tool choice."))
         self.assertTrue(failure["next_step"])
-        _, _, err = self.fail(["skills", "install"], error)
+        _, _, err = self.run_failing(["skills", "install"], error)
         self.assertTrue(err.startswith("lifecontext skills failed: That model refuses forced tool choice.\nNext: "))
 
     def test_a_code_outside_the_table_still_gets_a_sentence(self) -> None:
-        _, _, err = self.fail(["skills", "install"], cli.CLIError("brand_new_code"))
+        _, _, err = self.run_failing(["skills", "install"], cli.CLIError("brand_new_code"))
         self.assertEqual(err, "lifecontext skills failed: LifeContext request failed: brand new code.\n")
 
 
