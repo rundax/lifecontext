@@ -558,10 +558,18 @@ class ManagedVault:
 
     @property
     def last_refusal(self) -> dict[str, str] | None:
-        """The folder or file last refused on disk, dropped once it is acceptable again."""
+        """The folder or file last refused on disk, dropped once it is acceptable again.
+
+        Never raises: when the re-check itself fails (no descriptor, no access), the record stays.
+        """
         refusal = self._last_refusal
-        if refusal is not None and not self._refusal_stands(refusal):
-            self._last_refusal = None
+        if refusal is not None:
+            try:
+                stands = self._refusal_stands(refusal)
+            except Exception:
+                stands = True
+            if not stands:
+                self._last_refusal = None
         return self._last_refusal
 
     def _refusal_stands(self, refusal: dict[str, str]) -> bool:
@@ -570,8 +578,10 @@ class ManagedVault:
             return True
         parts = refusal["path"].split("/")
         pinned = len(self._journal_prefix) if tuple(parts[: len(self._journal_prefix)]) == self._journal_prefix else 0
-        descriptor = os.dup(self._root_fd)
+        directory = refusal["kind"] == "directory"
+        descriptor = -1
         try:
+            descriptor = os.dup(self._root_fd)
             for index, name in enumerate(parts[:-1]):
                 child = os.open(name, _directory_flags(), dir_fd=descriptor)
                 os.close(descriptor)
@@ -579,19 +589,22 @@ class ManagedVault:
                 if index >= pinned:
                     _check_subdirectory_fd(descriptor)
             info = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
-            if refusal["kind"] == "directory":
+            if directory:
                 _check_subdirectory_info(info)
-            elif refusal["path"] == LOCK_FILENAME:
-                _check_file_info(info)
-                _check_owner_and_mode(info, directory=False)
             else:
                 _check_file_info(info)
+                if refusal["path"] == LOCK_FILENAME:
+                    _check_owner_and_mode(info, directory=False)
+            # lstat passes for a file or folder with mode 0000; the path is acceptable only if it opens.
+            # The kind was just checked, so this cannot block on a FIFO or open a device.
+            os.close(os.open(parts[-1], _directory_flags() if directory else _FILE_FLAGS, dir_fd=descriptor))
         except FileNotFoundError:
             return False
         except (OSError, VaultError):
             return True
         finally:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
         return False
 
     @contextmanager
@@ -640,22 +653,24 @@ class ManagedVault:
         """Open a folder below the vault root without following symlinks.
 
         The root and ``Journal`` are pinned and checked by ``verify_permissions``.
-        Every folder below ``Journal`` gets the checks the write side applies.
+        Every folder below ``Journal`` gets the checks the write side applies;
+        folders outside ``Journal`` (an Obsidian vault's own) keep the plain
+        no-follow, must-be-a-folder open.
         """
         prefix = self._journal_prefix
-        pinned = len(prefix) if components[: len(prefix)] == prefix else 0
+        inside = components[: len(prefix)] == prefix
         descriptor = os.dup(self._root_fd)
         try:
             for index, component in enumerate(components):
-                if index < pinned:
-                    child = os.open(component, _directory_flags(), dir_fd=descriptor)
-                else:
+                if inside and index >= len(prefix):
                     try:
                         child = _open_subdirectory(descriptor, component)
                     except VaultError as exc:
                         if isinstance(exc.__cause__, FileNotFoundError):
                             raise VaultError("not_found") from exc
                         raise
+                else:
+                    child = os.open(component, _directory_flags(), dir_fd=descriptor)
                 os.close(descriptor)
                 descriptor = child
             return descriptor
@@ -719,7 +734,12 @@ class ManagedVault:
                 raise VaultError("not_found") from exc
             except OSError as exc:
                 raise _refused(exc) from exc
-            info = _check_file_fd(descriptor)
+            if components[: len(self._journal_prefix)] == self._journal_prefix:
+                info = _check_file_fd(descriptor)
+            else:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    raise VaultError("unsafe_path")
             if info.st_size > max_bytes:
                 raise VaultError("file_too_large")
             chunks: list[bytes] = []

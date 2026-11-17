@@ -426,6 +426,43 @@ class RefusedComponentTests(unittest.TestCase):
                 self.vault.read_vault_file("Journal/wiki/Lease.md", max_bytes=100)
         self.assertEqual(raised.exception.code, "unsafe_permissions")
 
+    def test_folders_and_files_outside_journal_keep_the_plain_checks(self) -> None:
+        areas = self.root / "Areas"
+        (areas / "Sub").mkdir(parents=True)
+        for folder in (areas, areas / "Sub"):
+            folder.chmod(0o775)
+        note = areas / "note.md"
+        note.write_text("[[x]]", encoding="utf-8")
+        note.chmod(0o664)
+        self.assertEqual(
+            self.vault.list_vault_directory("Areas")[0], [("Sub", "directory"), ("note.md", "file")]
+        )
+        self.assertEqual(self.vault.read_vault_file("Areas/note.md", max_bytes=100), b"[[x]]")
+        (areas / "link.md").symlink_to(note)
+        with self.assertRaises(VaultError) as raised:
+            self.vault.read_vault_file("Areas/link.md", max_bytes=100)
+        self.assertEqual(raised.exception.code, "unsafe_path")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can open a mode 0000 file")
+    def test_refusal_of_an_unopenable_own_file_stands_after_the_recheck(self) -> None:
+        locked = self.wiki / "Locked.md"
+        locked.write_bytes(b"x")
+        locked.chmod(0)
+        with self.assertRaises(VaultError) as raised:
+            self.vault.read_artifact("wiki/Locked.md")
+        self.assertEqual(raised.exception.code, "unsafe_permissions")
+        self.assertEqual(self.vault.last_refusal["path"], "Journal/wiki/Locked.md")
+        locked.chmod(0o600)
+        self.assertIsNone(self.vault.last_refusal)
+
+    def test_last_refusal_never_raises_when_the_recheck_cannot_run(self) -> None:
+        self.wiki.chmod(0o777)
+        with self.assertRaises(VaultError):
+            self._page()
+        with patch("lifecontext.vault.os.dup", side_effect=OSError(24, "too many open files")):
+            self.assertEqual(self.vault.last_refusal["path"], "Journal/wiki")
+        self.wiki.chmod(0o700)
+
     def test_lock_file_with_a_second_hard_link_is_refused_and_named(self) -> None:
         with self.vault.writer_lock():
             pass
