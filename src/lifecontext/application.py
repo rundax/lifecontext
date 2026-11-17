@@ -75,6 +75,7 @@ _RETRYABLE_OPERATION_ERRORS = {"provider_unavailable", "retain_failed"}
 # How long a refused journal retain or curation waits before the provider is asked again: 1 min, 5 min,
 # 30 min, 2 h, then every 6 h. Capture repeats a pending note every 30 s.
 _RETRY_DELAYS_SECONDS = (60, 300, 1800, 7200, 21600)
+_MAX_STARTUP_RESUBMITS = 5
 _CURATION_CONFIRMATION_TTL_SECONDS = 600
 _MAX_LISTED_REVIEWS = 50
 _MAX_LISTED_UNINDEXED = 20
@@ -106,6 +107,7 @@ class JournalApplication:
 
     # Seconds since the epoch; tests replace it to move past a retry delay.
     _clock = staticmethod(lambda: datetime.now(UTC).timestamp())
+    _startup_resubmits = 0
 
     def __init__(
         self,
@@ -608,6 +610,8 @@ class JournalApplication:
             operations = self.catalog.list_recoverable_operations(limit=limit)
         except CatalogError:
             raise ApplicationError("internal_error") from None
+        # Each provider call can take minutes and the API listens only after recovery.
+        self._startup_resubmits = _MAX_STARTUP_RESUBMITS
         report = {
             "examined": 0,
             "resumed": 0,
@@ -789,6 +793,7 @@ class JournalApplication:
                     and provider_state["submission_state"] == "failed"
                     and not self._newer_version_exists(source_id, source_version)
                     and not self._retry_waiting(current)
+                    and self._take_startup_resubmit()
                 )
             except (ApplicationError, CatalogError):
                 return False
@@ -801,6 +806,7 @@ class JournalApplication:
                     )
                     self._project_indexed(source_id, source_version)
                 except Exception as exc:
+                    self._startup_resubmits = 0  # the provider still refuses: the rest wait too
                     code = self._retain_error_code(exc)
                     self._fail_operation(
                         current["operation_id"], code, result=current["result"]
@@ -1069,6 +1075,7 @@ class JournalApplication:
                         self.catalog.get_provider_state(source_id, target_version) is None
                         or self._newer_version_exists(source_id, target_version)
                         or self._retry_waiting(operation)
+                        or not self._take_startup_resubmit()
                     ):
                         return False
                     self._record_provider_failure(target_manifest)
@@ -1080,6 +1087,7 @@ class JournalApplication:
                 try:
                     await self._submit_curation_source(target_manifest, target.original_bytes)
                 except Exception as exc:
+                    self._startup_resubmits = 0  # the provider still refuses: the rest wait too
                     self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                     return False
             try:
@@ -1459,6 +1467,13 @@ class JournalApplication:
             and metadata.get("source_version") == manifest.source_version
             and metadata.get("source_checksum") == manifest.sha256
         )
+
+    def _take_startup_resubmit(self) -> bool:
+        """Spend one of this start's journal resubmissions; the rest wait for the next start or a retry."""
+        if self._startup_resubmits <= 0:
+            return False
+        self._startup_resubmits -= 1
+        return True
 
     def _newer_version_exists(self, source_id: str, source_version: int) -> bool:
         try:

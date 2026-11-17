@@ -515,6 +515,37 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(self.app.catalog.get_provider_state(source_id, 2)["submission_state"], "submitted")
         self.assertEqual(self.app.catalog.get_projection_state(source_id, 2)["state"], "projected")
 
+    def _refuse_notes(self, count: int, prefix: str) -> None:
+        self.client.error = RuntimeError("provider down")
+        for number in range(count):
+            with self.assertRaises(ApplicationError):
+                asyncio.run(self.app.retain(
+                    f"src_{prefix}_{number}", 1, f"note {number}".encode(),
+                    provenance={"source": "test"}, idempotency_key=f"{prefix}-{number}",
+                ))
+        self.client.document_metadata.clear()  # the provider never stored them
+        self.clock[0] += 61
+
+    def test_a_start_resubmits_at_most_five_notes_and_the_next_start_the_rest(self) -> None:
+        self._refuse_notes(7, "retry_cap")
+        self.client.error = None
+        for sent, done in ((5, 5), (7, 7)):
+            self.app.close()
+            self.app = self._open()
+            asyncio.run(self.app.recover_startup())
+            self.assertEqual(len(self.client.retain_calls), 7 + sent)
+            self.assertEqual(self._states("retain").count("completed"), done)
+
+    def test_a_start_stops_resubmitting_while_the_provider_still_refuses(self) -> None:
+        self._refuse_notes(3, "retry_refused")
+        self.app.close()
+        self.app = self._open()
+
+        asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(len(self.client.retain_calls), 4)
+        self.assertEqual(self._states("retain"), ["retryable_failed"] * 3)
+
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
 
