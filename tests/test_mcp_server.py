@@ -88,13 +88,16 @@ class FakeAPI:
                 status, raw, headers = api.routes.get(
                     (self.command, path), (200, json.dumps(default).encode(), extra)
                 )
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(raw)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client gave up waiting
 
             do_GET = _answer
             do_POST = _answer
@@ -401,6 +404,21 @@ class MCPServerTests(unittest.TestCase):
                 self.assertIn("No LifeContext API token for this user", text)
                 self.assertNotIn(str(self.home), text)
         self.assertEqual(self.api.requests, [])
+
+    def test_a_timeout_is_not_reported_as_an_unreachable_service(self) -> None:
+        self.api.gated.update({"/v1/status", "/v1/recall"})
+        self.api.gate.clear()
+        self.addCleanup(self.api.gate.set)
+        with patch.object(cli, "GET_TIMEOUT", 0.3), patch.object(cli, "HTTP_TIMEOUT", 0.3):
+            read = self.error_text(self.call("status", {}))
+            write = self.error_text(self.call("recall", {"query": "anything"}))
+        self.assertIn("api_unavailable: The LifeContext service did not answer in 30 s; it may be busy with an "
+                      "import. Next: try again in a few minutes.", read)
+        self.assertIn("api_unavailable: The LifeContext service did not answer in time; it may still be working "
+                      "on the request.", write)
+        for text in (read, write):
+            self.assertNotIn("not reachable", text)
+            self.assertNotIn("starts", text)
 
     def _one_at_a_time(self, gated_path: str, calls, **options):
         """Hold the first call at the API; run the second meanwhile, the third after."""

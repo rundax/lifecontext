@@ -200,6 +200,20 @@ def render_wiki_show(value: Mapping[str, Any]) -> str | None:
     return managed.rstrip("\n") if isinstance(managed, str) else None
 
 
+def wiki_show_note(value: Mapping[str, Any], *, revision_asked: bool) -> str | None:
+    """One stderr line when the page printed is not simply the current one: stale, conflicting or an old revision."""
+    page, revision = value.get("page"), value.get("revision")
+    if not isinstance(page, Mapping) or not isinstance(revision, Mapping):
+        return None
+    state = page.get("state")
+    if state == "current" and not revision_asked:
+        return None
+    line = f"Page {page.get('page_id')}: revision {revision.get('revision')}, state {state}"
+    if page.get("current_revision") != revision.get("revision"):
+        line += f" (current revision is {page.get('current_revision')})"
+    return line + "."
+
+
 def render_categories(value: Mapping[str, Any]) -> str | None:
     categories = value.get("categories")
     if not isinstance(categories, list) or not all(isinstance(item, Mapping) for item in categories):
@@ -294,29 +308,40 @@ def render_reflect(value: Mapping[str, Any]) -> str | None:
 
 
 _DOCTOR = "`lifecontext doctor` checks the service, the engine and the model"
-_SAME_VERSION = "`lifecontext doctor` checks that this command and the service are the same version"
 _MODEL = "check the model with `lifecontext doctor --model-probe`, then re-run the command"
+_UPDATE = "update the CLI and restart the service so both run the same version"
+_FIX_AND_RUN = "`lifecontext preflight` and `lifecontext doctor` say what to fix"
+# What an agent is told when the fix is the owner's: it reports and never repairs anything itself.
+AGENT_START = ("the owner starts the LifeContext service or checks it with `lifecontext service status`; "
+               "do not start it yourself")
+_OWNER_DOCTOR = "the owner runs `lifecontext doctor`, which says what is wrong"
 
 
 class ErrorText:
-    """What one failure code means, what to do next, and whether the same call may work later."""
+    """What one failure code means, what to do next, and whether the same call may work later.
 
-    __slots__ = ("message", "next_step", "retryable")
+    ``agent_next_step`` replaces ``next_step`` in ``--json`` and over MCP when the step is a repair the
+    owner makes and an agent must only report.
+    """
 
-    def __init__(self, message: str, next_step: str | None, retryable: bool = False):
+    __slots__ = ("agent_next_step", "message", "next_step", "retryable")
+
+    def __init__(self, message: str, next_step: str | None, retryable: bool = False,
+                 agent_next_step: str | None = None):
         self.message = message
         self.next_step = next_step
         self.retryable = retryable
+        self.agent_next_step = agent_next_step
 
 
-# Every code the CLI prints as {"error": ...}: the API's codes, the CLI's own and the MCP server's.
-# docs/operations.md "Failure codes" is generated from this table. {port}, {tool} and {start} are filled in.
-ERRORS: dict[str, ErrorText] = {
-    # The API's codes (cli._API_ERROR_CODES).
+# The API's codes (api.models._ERROR_CODES).
+_API: dict[str, ErrorText] = {
     "invalid_request": ErrorText("The request was refused: an argument or the input is not valid.",
                                  "check the arguments with `lifecontext COMMAND --help`"),
-    "unauthorized": ErrorText("The service refused the API token.",
-                              "run the command as the same user, with the same HOME, as the service"),
+    "unauthorized": ErrorText("The API token was refused or cannot be read.",
+                              "run the command as the same user, with the same HOME, as the service",
+                              agent_next_step="the owner runs this tool as the same user, with the same HOME, "
+                                              "as the service"),
     "body_too_large": ErrorText("The input or the answer is larger than the configured limit.",
                                 "send a smaller input; for recall and reflect lower --max-results or --max-tokens"),
     "response_too_large": ErrorText("The service's answer is larger than this command accepts.",
@@ -333,7 +358,9 @@ ERRORS: dict[str, ErrorText] = {
                                  "`lifecontext documents show ID`"),
     "evidence_unavailable": ErrorText("The stored original of that source cannot be read or no longer matches "
                                       "its checksum.", "run `lifecontext reconcile`; if it still fails, "
-                                      "`lifecontext doctor` says what is wrong", True),
+                                      "`lifecontext doctor` says what is wrong", True,
+                                      "the owner runs `lifecontext reconcile`; if it still fails, "
+                                      "`lifecontext doctor` says what is wrong"),
     "invalid_source_text": ErrorText("The input must be UTF-8 text.",
                                      "convert it to UTF-8, or import the file with `lifecontext documents import`"),
     "invalid_provider_response": ErrorText("The model answered, but not in the expected form.", _MODEL, True),
@@ -361,83 +388,295 @@ ERRORS: dict[str, ErrorText] = {
                                           "see the current edges with `lifecontext relationships list`, "
                                           "then re-run", True),
     "unsafe_path": ErrorText("The service refused a path outside the vault or through a symbolic link.",
-                             "`lifecontext doctor` names the path to fix"),
+                             "`lifecontext doctor` names the path to fix",
+                             agent_next_step="the owner runs `lifecontext doctor`, which names the path to fix"),
     "unsafe_permissions": ErrorText("Files or folders of LifeContext are open to other users.",
-                                    "`lifecontext doctor` names them; make folders 0700 and files 0600"),
+                                    "`lifecontext doctor` names them; make folders 0700 and files 0600",
+                                    agent_next_step="the owner makes the LifeContext folders 0700 and files "
+                                                    "0600; `lifecontext doctor` names them"),
     "vault_unavailable": ErrorText("The vault cannot be read or written.",
-                                   "check that the vault folder exists and belongs to you; " + _DOCTOR, True),
+                                   "check that the vault folder exists and belongs to you; " + _DOCTOR, True,
+                                   "the owner checks that the vault folder exists and belongs to them; "
+                                   + _DOCTOR),
     "catalog_busy": ErrorText("The catalog is busy with another change.", "wait a few seconds and re-run", True),
     "internal_error": ErrorText("The service failed unexpectedly.",
                                 "re-run once; if it fails again, run `lifecontext doctor` and look for the "
-                                "request ID in the service log", True),
-    # The CLI's own codes.
+                                "request ID in the service log", True,
+                                "report it with the request ID; the owner runs `lifecontext doctor` and looks "
+                                "for the ID in the service log"),
+}
+# The CLI's own codes. api_timeout and api_timeout_read only explain an api_unavailable that timed out.
+_CLI: dict[str, ErrorText] = {
     "api_unavailable": ErrorText("The LifeContext service is not reachable at 127.0.0.1:{port}.", "{start}", True),
     "api_timeout": ErrorText("The LifeContext service did not answer in time; it may still be working on the "
-                             "request.", "wait, then check with `lifecontext status` and the matching list or "
-                             "show command before re-running: running it again may repeat the work", True),
-    "api_error": ErrorText("The service answered with an error this command does not know.", _SAME_VERSION),
-    "invalid_api_response": ErrorText("The service's answer is not what this command expects.", _SAME_VERSION),
+                             "request.", "wait, then check with the matching list or show command before "
+                             "re-running: running it again may repeat the work"),
+    "api_timeout_read": ErrorText("The LifeContext service did not answer in 30 s; it may be busy with an "
+                                  "import.", "try again in a few minutes", True),
+    "api_error": ErrorText("The service answered with an error this command does not know.", _UPDATE,
+                           agent_next_step="the owner updates the CLI and restarts the service"),
+    "invalid_api_response": ErrorText("The service's answer is not what this command expects.", _UPDATE,
+                                      agent_next_step="the owner updates the CLI and restarts the service"),
     "token_unavailable": ErrorText("No LifeContext API token for this user: the service writes it when it starts, "
                                    "under the same HOME.", "{start}", True),
     "input_unavailable": ErrorText("Unable to read the selected source input.",
                                    "give an existing regular file, or - for standard input"),
     "vault_missing": ErrorText("The vault's Journal folder does not exist.",
-                               "create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml"),
+                               "create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml",
+                               agent_next_step="the owner creates it with mode 0700, or sets `vault` in "
+                                               "~/.lifeweave/config.yaml"),
     "destination_exists": ErrorText("The output file already exists; LifeContext never overwrites one.",
                                     "choose a new file name"),
     "output_unavailable": ErrorText("The output file cannot be written.",
                                     "check that its folder exists and that you can write to it"),
     "invalid_config": ErrorText("The config file ~/.lifeweave/config.yaml cannot be read.",
-                                "`lifecontext doctor` says what is wrong"),
+                                "`lifecontext doctor` says what is wrong", agent_next_step=_OWNER_DOCTOR),
     "server_start_failed": ErrorText("The service could not start.",
                                      "`lifecontext preflight` and `lifecontext doctor` say why"),
     "nothing_to_change": ErrorText("Nothing to change.", "give --provider, --model, --base-url or --api-key-stdin; "
                                    "`lifecontext llm show` shows the current model"),
+}
+_MCP: dict[str, ErrorText] = {
+    "busy": ErrorText("A previous {tool} call is still finishing.", "report it instead of retrying", True),
+    "path_not_allowed": ErrorText("The file is outside the import directories the owner allowed, or in a "
+                                  "protected place (the LifeContext home, the vault, a hidden directory in the "
+                                  "home directory, or a system directory).", "ask the owner to import it"),
+}
+# Local commands: init, llm, service, skills, capture, backup, restore, hindsight.
+_LOCAL: dict[str, ErrorText] = {
     "setup_failed": ErrorText("The setup files could not be written.",
                               "check that ~/.lifeweave belongs to you and is writable, then re-run"),
     "backup_failed": ErrorText("The backup could not be written.", "check the destination folder, then re-run"),
     "restore_failed": ErrorText("The restore could not read or write its files.",
                                 "check the archive and the LifeContext home, then re-run"),
     "hindsight_failed": ErrorText("The memory engine could not be stopped.", _DOCTOR),
-    # The MCP server's own codes.
-    "busy": ErrorText("A previous {tool} call is still finishing.", "report it instead of retrying", True),
-    "path_not_allowed": ErrorText("The file is outside the import directories the owner allowed, or in a "
-                                  "protected place (the LifeContext home, the vault, a hidden directory in the "
-                                  "home directory, or a system directory).", "ask the owner to import it"),
+    "provider_required": ErrorText("No model provider was chosen.", "give --provider, or run `lifecontext init` in "
+                                                                    "a terminal to choose one"),
+    "model_required": ErrorText("No model was chosen.", "give --model with the exact ID your provider lists"),
+    "model_unsupported": ErrorText("That model does not work with LifeContext yet.",
+                                   "choose another model with --model"),
+    "invalid_llm_settings": ErrorText("The model settings are not valid.",
+                                      "check --provider, --model and --base-url, or `lifecontext llm show`"),
+    "invalid_api_key": ErrorText("The API key is not valid: one line of printable ASCII, without quotes.",
+                                 "give it again at the hidden prompt or on stdin with --api-key-stdin"),
+    "api_key_required": ErrorText("A model API key is required and none was given.",
+                                  "give it at the hidden prompt, on stdin with --api-key-stdin, or in the file "
+                                  "named by LIFECONTEXT_API_KEY_FILE"),
+    "api_key_file_unreadable": ErrorText("The file named by LIFECONTEXT_API_KEY_FILE cannot be read.",
+                                         "check that it exists, holds one line and is readable by you"),
+    "invalid_timezone": ErrorText("That time zone is not known.", "give an IANA name such as Europe/Kyiv"),
+    "invalid_vault": ErrorText("That vault location is not allowed.",
+                               "choose a folder that is not `/`, not inside ~/.lifeweave and not a parent of it"),
+    "vault_path_has_symlink": ErrorText("The vault path in config.yaml goes through a symbolic link.",
+                                        "run `lifecontext init --force` to store the real path"),
+    "unsafe_vault": ErrorText("The vault folder is not a real folder of yours.",
+                              "choose a folder you own, or fix its owner and type"),
+    "unsafe_home": ErrorText("The LifeContext home is not private to you.",
+                             "check that ~/.lifeweave belongs to you with mode 0700, then re-run"),
+    "unsafe_credentials": ErrorText("The credentials file is open to other users or not a regular file.",
+                                    "make it a regular file with mode 0600, or delete it and run "
+                                    "`lifecontext init` again"),
+    "invalid_credentials": ErrorText("The credentials file is malformed.",
+                                     "delete it and run `lifecontext init` again to enter the key"),
+    "config_incomplete": ErrorText("The config file has no model section.",
+                                   "run `lifecontext init --force` with --provider and --model"),
+    "config_missing": ErrorText("There is no config file with model settings yet.", "run `lifecontext init` first"),
+    "executable_not_found": ErrorText("The `lifecontext` program to run as a service was not found.",
+                                      "install LifeContext so `lifecontext` is on PATH, then re-run"),
+    "unsupported_platform": ErrorText("Services are supported on Linux (systemd) and macOS (launchd) only.",
+                                      "run the API in a terminal with `lifecontext serve`"),
+    "unit_write_failed": ErrorText("The service files could not be written.",
+                                   "check that the user service folder is writable, then re-run"),
+    "unit_remove_failed": ErrorText("The service files could not be removed.",
+                                    "remove them by hand from the user service folder"),
+    "systemctl_unavailable": ErrorText("The `systemctl` program was not found.",
+                                       "use a systemd session, or run the API with `lifecontext serve`"),
+    "systemctl_failed": ErrorText("The `systemctl` program refused the command.",
+                                  "run `systemctl --user status lifecontext` to see why"),
+    "launchctl_unavailable": ErrorText("The `launchctl` program was not found.",
+                                       "run the API in a terminal with `lifecontext serve`"),
+    "launchctl_failed": ErrorText("The `launchctl` program refused the command.",
+                                  "run `launchctl list` to see the state of the LifeContext jobs"),
+    "skill_missing": ErrorText("The agent skill files are missing from this installation.",
+                               "reinstall LifeContext, then re-run"),
+    "link_failed": ErrorText("The skill could not be linked into the agent's folder.",
+                             "check that the folder exists and is writable, then re-run"),
+    "unlink_failed": ErrorText("The skill link could not be removed.", "remove the link by hand"),
+    "capture_requires_inbox": ErrorText("The capture folder must be named Inbox.",
+                                        "leave out --inbox to use Journal/Inbox of the vault, or give a folder "
+                                        "named Inbox"),
+    "capture_unavailable": ErrorText("The inbox folder cannot be read.",
+                                     "check that it exists and that you can read it", True),
+    "unsafe_state": ErrorText("The capture state in ~/.lifeweave/capture is not private to you or is damaged.",
+                              "check that the folder is yours with mode 0700, or remove its state.json, then "
+                              "re-run"),
+    "file_exists": ErrorText("A file is already at that place in the vault.", "choose a new name"),
+    "file_too_large": ErrorText("The file is larger than the vault accepts.", "use a smaller file"),
+    "invalid_file": ErrorText("The vault file is not valid.", _DOCTOR),
+    "not_found": ErrorText("No such file in the vault.", "check the name and run it again"),
+    "read_only_path": ErrorText("That vault path is read-only for LifeContext.", "choose another path"),
+    "unmanaged_file": ErrorText("The vault file is not one LifeContext manages.",
+                                "leave it as it is, or move it out of the way"),
+    "sync_conflict": ErrorText("The vault holds a sync conflict copy of a LifeContext file.",
+                               "settle the conflict in your sync tool, then run `lifecontext reconcile`"),
+    "export_durability": ErrorText("The vault copy could not be made durable on disk.",
+                                   "check the free space and that the disk is writable, then re-run", True),
+    "locking_unavailable": ErrorText("File locking is not available on this system.",
+                                     "run LifeContext on Linux or macOS"),
+    "lock_timeout": ErrorText("Another LifeContext process holds the vault lock.",
+                              "wait a moment and re-run", True),
+    "nothing_to_back_up": ErrorText("There is no LifeContext data to back up.", "run `lifecontext init` first"),
+    "service_running": ErrorText("The service is running.", "stop it, or add --stop-service where the command "
+                                                            "allows it, then re-run"),
+    "hindsight_running": ErrorText("The memory engine is still running.",
+                                   "run `lifecontext hindsight stop`, then re-run"),
+    "backup_write_failed": ErrorText("The archive could not be written.",
+                                     "check the free space and the destination, then re-run"),
+    "catalog_unreadable": ErrorText("The catalog database is damaged or unreadable.", _DOCTOR),
+    "destination_inside_backup": ErrorText("The archive would be written inside the data it backs up.",
+                                           "choose a destination outside the LifeContext home and the vault"),
+    "source_changed": ErrorText("A file changed while it was being backed up.", "re-run the backup", True),
+    "archive_invalid": ErrorText("The archive is not a LifeContext backup.", "check that you gave the right file"),
+    "archive_unreadable": ErrorText("The archive cannot be read.", "check the path and that you can read it"),
+    "archive_incomplete": ErrorText("The archive lacks files its manifest lists.", "make a new backup"),
+    "archive_changed": ErrorText("The archive changed while it was being read.", "copy it to a stable place, "
+                                                                                 "then re-run"),
+    "archive_checksum_mismatch": ErrorText("The archive does not match its checksum.",
+                                           "copy it again or use another backup"),
+    "archive_config_invalid": ErrorText("The config file in the archive is not valid.",
+                                        "use another backup"),
+    "archive_instance_invalid": ErrorText("The memory engine's instance file in the archive is not valid.",
+                                          "use another backup"),
+    "home_not_empty": ErrorText("This HOME already holds LifeContext data; a restore never overwrites it.",
+                                "restore into a fresh HOME"),
+    "vault_not_empty": ErrorText("The vault folder to restore into is not empty.",
+                                 "restore into an empty or new folder"),
+    "vault_outside_home": ErrorText("The vault to restore is outside this HOME.",
+                                    "restore it into a folder inside your home directory"),
+    "vault_location_refused": ErrorText("The vault location is not one a restore writes to.",
+                                        "restore into a folder inside ~/LifeContext"),
+    "schema_unsupported": ErrorText("The archive was made by a newer LifeContext.",
+                                    "update LifeContext, then re-run"),
 }
+# The memory engine (Hindsight) and its Postgres.
+_ENGINE: dict[str, ErrorText] = {
+    "missing_package": ErrorText("A package of the memory engine is not installed.", "reinstall LifeContext"),
+    "unsupported_version": ErrorText("The memory engine is not the version LifeContext pins.",
+                                     "reinstall LifeContext so the packages match"),
+    "missing_capability": ErrorText("The memory engine lacks a capability LifeContext needs.",
+                                    "reinstall LifeContext so the packages match"),
+    "missing_credentials": ErrorText("The model API key is missing.", "run `lifecontext init` and give the key"),
+    "document_generation_failed": ErrorText("The model could not write the document.",
+                                            _MODEL, True),
+    "daemon_unavailable": ErrorText("The memory engine is not answering or not healthy.",
+                                    _FIX_AND_RUN, True),
+    "daemon_port_foreign": ErrorText("Another program holds the port this HOME's memory engine needs.",
+                                     "stop that program, then run `lifecontext doctor`"),
+    "daemon_port_unavailable": ErrorText("No free port was found near this HOME's engine port.",
+                                         "free a port near it, then run `lifecontext doctor`"),
+    "daemon_stop_failed": ErrorText("An old memory engine daemon of this HOME did not stop.",
+                                    "stop that process by hand, then run `lifecontext doctor`"),
+    "engine_auth_disabled": ErrorText("The memory engine runs without its API token.", _FIX_AND_RUN),
+    "engine_auth_rejected": ErrorText("The memory engine refused LifeContext's API token.", _FIX_AND_RUN),
+    "engine_token_missing": ErrorText("The memory engine's token file is missing.",
+                                      "start the service once so it writes the token", True),
+    "unsafe_engine_token": ErrorText("The engine token file is not a private regular file of 64 hex digits.",
+                                     "delete it and start again"),
+    "unsafe_profile_paths": ErrorText("The memory engine's profile folders are not private to you.",
+                                      _FIX_AND_RUN),
+    "unsafe_profile_file": ErrorText("The memory engine's profile file is not a private regular file of yours.",
+                                     _FIX_AND_RUN),
+    "unsafe_profile_lock": ErrorText("The profile lock file is not a private regular file of yours.",
+                                     _FIX_AND_RUN),
+    "profile_lock_unavailable": ErrorText("The profile lock cannot be taken.", _FIX_AND_RUN),
+    "profile_lock_timeout": ErrorText("Another LifeContext process holds the profile lock.",
+                                      "wait a moment and re-run", True),
+    "profile_setup_failed": ErrorText("The memory engine's profile could not be set up.", _FIX_AND_RUN),
+    "postgres_setup_failed": ErrorText("The Postgres of the memory engine could not be set up.", _FIX_AND_RUN),
+    "postgres_binaries_missing": ErrorText("The Postgres programs of the memory engine are missing.",
+                                           "reinstall LifeContext"),
+    "postgres_start_failed": ErrorText("The Postgres of the memory engine did not start.", _FIX_AND_RUN),
+    "postgres_stop_failed": ErrorText("The Postgres of the memory engine did not stop.", _FIX_AND_RUN),
+    "postgres_control_failed": ErrorText("The Postgres control program failed.", _FIX_AND_RUN),
+    "postgres_state_unknown": ErrorText("The state of the memory engine's Postgres cannot be told.",
+                                        _FIX_AND_RUN),
+    "postgres_instance_invalid": ErrorText("The Postgres instance file of the memory engine is not valid.",
+                                           "restore it from a backup"),
+    "postgres_instance_unsafe": ErrorText("The Postgres instance files are not private to you.", _FIX_AND_RUN),
+    "postgres_socket_dir_unsafe": ErrorText("The Postgres socket folder is not private to you.", _FIX_AND_RUN),
+    "postgres_socket_path_too_long": ErrorText("The Postgres socket path is too long for this HOME.",
+                                               "use a shorter HOME path"),
+    "postgres_socket_path_unsupported": ErrorText("The HOME path has a quote, comma or backslash, which the "
+                                                  "Postgres socket path cannot hold.", "use a HOME path without them"),
+    "postgres_instance_missing": ErrorText("The Postgres data folder has no `instance.json`; pg0 deletes it when "
+                                           "one of its own starts fails.", "restore the file from a backup"),
+}
+GROUPS: tuple[tuple[str, dict[str, ErrorText]], ...] = (
+    ("The API's codes", _API),
+    ("The CLI's own codes", _CLI),
+    ("The MCP server's own codes", _MCP),
+    ("Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)", _LOCAL),
+    ("The memory engine", _ENGINE),
+)
+# Every code the CLI prints as {"error": ...}. {port}, {tool} and {start} are filled in.
+ERRORS: dict[str, ErrorText] = {code: entry for _, group in GROUPS for code, entry in group.items()}
+# Codes that only choose the sentence for another code (a timeout reports api_unavailable).
+EXPLAINERS = frozenset({"api_timeout", "api_timeout_read"})
 
 
-def describe(code: str, *, port: int, start: str | None = None, tool: str = "") -> tuple[str, str | None, bool]:
-    """(message, next step, retryable) for a code; unknown codes get a plain sentence and no next step."""
+def describe(code: str, *, port: int, start: str | None = None, tool: str = "",
+             agent: bool = False) -> tuple[str, str | None, bool]:
+    """(message, next step, retryable) for a code; unknown codes get a plain sentence and no next step.
+
+    ``agent`` words the next step for a caller that reports to the owner instead of repairing: the
+    ``--json`` output and the MCP server.
+    """
     entry = ERRORS.get(code)
     if entry is None:
         return f"LifeContext request failed: {code.replace('_', ' ')}.", None, False
-    start = start or f"start it with `lifecontext serve --port {port}`"
+    start = start or (AGENT_START if agent else f"start it with `lifecontext serve --port {port}`")
     fields = {"port": port, "tool": tool or "LifeContext", "start": start}
-    next_step = entry.next_step.format(**fields) if entry.next_step else None
-    return entry.message.format(**fields), next_step, entry.retryable
+    step = entry.next_step if not agent or entry.agent_next_step is None else entry.agent_next_step
+    return entry.message.format(**fields), step.format(**fields) if step else None, entry.retryable
 
 
 def start_hint(port: int, *, service_installed: bool) -> str:
-    """Where to look when the service is not reachable: the installed unit, otherwise `serve`."""
+    """Where to look when the service is not reachable; `serve` stays the answer without an installed unit."""
+    serve = f"start it with `lifecontext serve --port {port}`"
     if service_installed:
-        return ("check it with `lifecontext service status`: it may still be starting, or recovering "
-                "after a restart")
-    return f"start it with `lifecontext serve --port {port}`"
+        return ("if LifeContext runs as the installed service, check it with `lifecontext service status`: it "
+                f"may still be starting, or recovering after a restart; otherwise {serve}")
+    return serve
 
 
-def error_json(code: str, *, port: int, start: str | None = None, retryable: bool | None = None,
-               request_id: str | None = None, message_code: str | None = None) -> dict[str, object]:
+def error_json(code: str, *, port: int, retryable: bool | None = None, request_id: str | None = None,
+               message_code: str | None = None, message: str | None = None) -> dict[str, object]:
     """``--json`` failure: ``error`` is the code as before; the other keys explain it."""
-    message, next_step, default_retryable = describe(message_code or code, port=port, start=start)
-    return {"error": code, "message": message, "next_step": next_step,
+    text, next_step, default_retryable = describe(message_code or code, port=port, agent=True)
+    return {"error": code, "message": message or text, "next_step": next_step,
             "retryable": default_retryable if retryable is None else retryable, "request_id": request_id}
 
 
-def error_text(code: str, *, port: int, start: str | None = None, message_code: str | None = None) -> str:
+def error_text(code: str, *, port: int, start: str | None = None, message_code: str | None = None,
+               message: str | None = None) -> str:
     """Plain failure: the sentence, then a "Next:" line when there is something to do."""
-    message, next_step, _ = describe(message_code or code, port=port, start=start)
-    return message + (f"\nNext: {next_step}." if next_step else "")
+    text, next_step, _ = describe(message_code or code, port=port, start=start)
+    return (message or text) + (f"\nNext: {next_step}." if next_step else "")
+
+
+def failure_codes_section() -> str:
+    """The Markdown list for docs/operations.md, one bullet per code of the table."""
+    lines = []
+    for title, group in GROUPS:
+        lines += [f"### {title}", ""]
+        for code, entry in group.items():
+            if code in EXPLAINERS:
+                continue
+            fields = {"port": "PORT", "tool": "the tool", "start": "start it with `lifecontext serve --port PORT`"}
+            step = entry.next_step.format(**fields) if entry.next_step else ""
+            lines.append(f"- `{code}`: {entry.message.format(**fields)}" + (f" Next: {step}." if step else ""))
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 RENDERERS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {
@@ -460,3 +699,17 @@ def render(command: str, value: Mapping[str, Any]) -> str | None:
     """The plain text for one command's answer, or ``None`` for the generic fallback."""
     renderer = RENDERERS.get(command)
     return renderer(value) if renderer else None
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    BEGIN, END = "<!-- failure-codes:begin -->\n", "<!-- failure-codes:end -->"
+    if sys.argv[1:2] != ["--write"] or len(sys.argv) != 3:
+        raise SystemExit("usage: python -m lifecontext.cli_output --write docs/operations.md")
+    document = Path(sys.argv[2])
+    text = document.read_text(encoding="utf-8")
+    head, _, rest = text.partition(BEGIN)
+    document.write_text(head + BEGIN + "\n" + failure_codes_section() + "\n" + END + rest.partition(END)[2],
+                        encoding="utf-8")

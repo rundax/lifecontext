@@ -26,7 +26,8 @@ from lifecontext.paths import LifeContextPaths
 DEFAULT_PORT = 8765
 # Leave five seconds after Hindsight's bounded provider request for API cleanup.
 HTTP_TIMEOUT = HINDSIGHT_CLIENT_TIMEOUT + 5.0
-# Reads answer from the catalog and the vault: a GET that takes longer is stuck, not working.
+# A read normally answers from the catalog and the vault in milliseconds. One that takes longer means the
+# service is busy, for example extracting text from an import, which blocks every request until it is done.
 GET_TIMEOUT = 30.0
 MAX_TEXT_BYTES = LIMIT_CEILINGS["max_text_bytes"]
 MAX_QUERY_BYTES = LIMIT_CEILINGS["max_query_bytes"]
@@ -71,6 +72,17 @@ class CLIError(RuntimeError):
         self.request_id = request_id
         # The service accepted the connection but did not answer in time: it may still be working.
         self.timed_out = timed_out
+
+    @property
+    def message_code(self) -> str | None:
+        """The table entry that words this failure when it is not the code's own: a timeout.
+
+        Only a timed-out read is ``retryable`` (``_http_exchange`` sets it); a write or a recall that
+        timed out may still finish, so it is never resent blindly.
+        """
+        if not self.timed_out:
+            return None
+        return "api_timeout_read" if self.retryable else "api_timeout"
 
 
 def _positive_int(value: str) -> int:
@@ -630,7 +642,7 @@ def _http_exchange(
         raise
     except TimeoutError:
         # The code stays api_unavailable for scripts; the message says the service may still be working.
-        raise CLIError("api_unavailable", timed_out=True) from None
+        raise CLIError("api_unavailable", timed_out=True, retryable=method == "GET") from None
     except (http.client.HTTPException, OSError):
         raise CLIError("api_unavailable") from None
     finally:
@@ -1077,11 +1089,14 @@ def _coverage_line(coverage: dict[str, object]) -> str:
         line = "Coverage: " + ("complete" if coverage.get("complete") else "incomplete")
     unresolved, partial = coverage.get("unresolved"), coverage.get("partial")
     if isinstance(unresolved, list) and unresolved:
-        line += "; unresolved: " + ", ".join(map(str, unresolved))
+        line += "; unresolved: " + _first_pages(unresolved)
     if isinstance(partial, list) and partial:
-        shown = ", ".join(map(str, partial[:20]))
-        line += f"; {len(partial)} with unread parts: {shown}" + (", ..." if len(partial) > 20 else "")
+        line += f"; {len(partial)} with unread parts: {_first_pages(partial)}"
     return line
+
+
+def _first_pages(pages: list[object], limit: int = 20) -> str:
+    return ", ".join(map(str, pages[:limit])) + (f", and {len(pages) - limit} more" if len(pages) > limit else "")
 
 
 def _human_result(value: dict[str, object]) -> str:
@@ -1150,25 +1165,30 @@ def _print_success(args: argparse.Namespace, value: dict[str, object]) -> None:
         return
     from lifecontext import cli_output
 
-    rendered = cli_output.render(_command_name(args), value)
+    command = _command_name(args)
+    rendered = cli_output.render(command, value)
     print(_human_result(value) if rendered is None else rendered)
+    if command == "wiki show":
+        note = cli_output.wiki_show_note(value, revision_asked=getattr(args, "revision", None) is not None)
+        if note:
+            print(note, file=sys.stderr)
 
 
 def _print_error(args: argparse.Namespace, error: CLIError) -> None:
     """One failure, from the shared table: ``--json`` keeps ``error`` and adds the explanation."""
     from lifecontext import cli_output
 
+    if args.as_json:
+        failure = cli_output.error_json(error.code, port=args.port, retryable=error.retryable,
+                                        request_id=error.request_id, message_code=error.message_code,
+                                        message=error.message)
+        print(json.dumps(failure, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        return
     start = None
     if error.code in {"api_unavailable", "token_unavailable"}:
         start = cli_output.start_hint(args.port, service_installed=_service_installed())
-    message_code = "api_timeout" if error.timed_out else None
-    if args.as_json:
-        failure = cli_output.error_json(error.code, port=args.port, start=start, retryable=error.retryable,
-                                        request_id=error.request_id, message_code=message_code)
-        print(json.dumps(failure, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        return
-    print(cli_output.error_text(error.code, port=args.port, start=start, message_code=message_code),
-          file=sys.stderr)
+    print(cli_output.error_text(error.code, port=args.port, start=start, message_code=error.message_code,
+                                message=error.message), file=sys.stderr)
 
 
 def _service_installed() -> bool:
@@ -1652,15 +1672,15 @@ def _run_local(args: argparse.Namespace) -> int:
     try:
         report, text, code = _LOCAL_COMMANDS[args.command](args)
     except CLIError as exc:
-        if args.as_json:
-            failure = {"error": exc.code, **({"message": exc.message} if exc.message else {})}
-            print(json.dumps(failure, sort_keys=True, separators=(",", ":")))
-        else:
-            from lifecontext import cli_output
+        from lifecontext import cli_output
 
-            detail = exc.message or (cli_output.error_text(exc.code, port=getattr(args, "port", DEFAULT_PORT))
-                                     if exc.code in cli_output.ERRORS else exc.code.replace('_', ' ') + '.')
-            print(f"lifecontext {args.command} failed: {detail}", file=sys.stderr)
+        port = getattr(args, "port", DEFAULT_PORT)
+        if args.as_json:
+            failure = cli_output.error_json(exc.code, port=port, message=exc.message)
+            print(json.dumps(failure, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        else:
+            print(f"lifecontext {args.command} failed: "
+                  + cli_output.error_text(exc.code, port=port, message=exc.message), file=sys.stderr)
         return 1
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -1672,10 +1692,15 @@ def _run_local(args: argparse.Namespace) -> int:
 INTERRUPTED_EXIT = 130
 
 
-def _interrupted() -> int:
+def _interrupted(*, local: bool = False) -> int:
     """Ctrl-C: one line instead of a traceback, and the shell's usual 128 + SIGINT exit status."""
-    print("Interrupted. Anything already sent may still be running in the service: check with "
-          "`lifecontext status` or `lifecontext documents list` before running it again.", file=sys.stderr)
+    if local:
+        print("Interrupted. The command stopped before it finished: check what it wrote before running it "
+              "again.", file=sys.stderr)
+    else:
+        print("Interrupted. The service may still be working on what was already sent: check with the "
+              "matching `lifecontext documents list` or `show` command before running it again.",
+              file=sys.stderr)
     return INTERRUPTED_EXIT
 
 
@@ -1686,7 +1711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return _run_local(args)
         except KeyboardInterrupt:
-            return _interrupted()
+            return _interrupted(local=True)
     if args.command == "agent-gate":
         from lifecontext.agent_gate import run as run_agent_gate
 
@@ -1695,7 +1720,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             return _preflight(args)
         except KeyboardInterrupt:
-            return _interrupted()
+            return _interrupted(local=True)
     if args.command == "serve":
         try:
             return _serve(args)
