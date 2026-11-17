@@ -306,6 +306,35 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(replay, result)
         self.assertEqual(len(self.client.retain_calls), 3)
 
+    def test_same_key_reindex_after_provider_error_indexes_the_note(self) -> None:
+        source_id = "src_retry_reindex_same_key"
+        key = "retain-retry-reindex-key"
+        request = {"action": "reindex", "source_id": source_id, "expected_version": 1}
+        self._edited_note(source_id)
+        self.client.error = RuntimeError("rate limited")
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.curate(request, idempotency_key=key))
+        self.assertEqual(caught.exception.code, "retain_failed")
+        self.client.error = None
+        calls = len(self.client.retain_calls)
+
+        # Within the retry delay the same request is answered without a provider call.
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.curate(request, idempotency_key=key))
+        self.assertEqual(caught.exception.code, "retain_failed")
+        self.assertEqual(len(self.client.retain_calls), calls)
+        self.clock[0] += 61
+        result = asyncio.run(self.app.curate(request, idempotency_key=key))
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(len(self.client.retain_calls), calls + 1)
+        self.assertEqual(self.client.retain_calls[-1][1], "first version of the note")
+        self.assertEqual(
+            self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "submitted"
+        )
+        self.assertEqual(asyncio.run(self.app.curate(request, idempotency_key=key)), result)
+        self.assertEqual(len(self.client.retain_calls), calls + 1)
+
     def test_restart_resubmits_a_failed_correction_from_custody(self) -> None:
         source_id = "src_retry_correct_restart"
         self._edited_note(source_id)
