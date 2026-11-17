@@ -565,6 +565,24 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(self.app.catalog.get_provider_state(source_id, 2)["submission_state"], "submitted")
         self.assertEqual(self.app.catalog.get_projection_state(source_id, 2)["state"], "projected")
 
+    def test_an_interrupted_correction_is_not_resent_over_a_newer_provider_version(self) -> None:
+        source_id = "src_retry_correct_interrupted_newer"
+        self._edited_note(source_id)
+        self.client.on_retain = _crash
+        with self.assertRaises(_Crash):
+            self._correct(source_id, "correction cut short", "retain-retry-correct-interrupted-newer")
+        self.client.on_retain = None
+        # The provider holds a version this catalog does not know: sending version 2 would replace it.
+        self.client.document_metadata[source_id] = {"source_version": "3", "sha256": "f" * 64}
+        calls = len(self.client.retain_calls)
+        self.app.close()
+        self.app = self._open()
+
+        asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(len(self.client.retain_calls), calls)
+        self.assertEqual(self._states("curation"), ["retryable_failed"])
+
     def _refuse_notes(self, count: int, prefix: str) -> None:
         self.client.error = RuntimeError("provider down")
         for number in range(count):

@@ -835,21 +835,15 @@ class JournalApplication:
         manifest: SourceManifest,
         report: dict[str, int],
     ) -> bool:
-        try:
-            document = await self.hindsight.get_document(manifest.source_id)
-        except Exception:
+        held = await self._provider_holds(manifest)
+        if held is None:
             self._record_recovery_failure(operation, "provider_unavailable")
             return False
-        metadata = document.get("document_metadata")
-        if (
-            document.get("id") != manifest.source_id
-            or not isinstance(metadata, Mapping)
-            or metadata.get("source_version") != str(manifest.source_version)
-            or metadata.get("sha256") != manifest.sha256
-        ):
-            # The provider does not hold this exact version: record it as refused, so it can be offered again.
-            with contextlib.suppress(CatalogError):
-                self._record_provider_failure(manifest)
+        if held != "exact":
+            if held == "older":
+                # Sending this version replaces nothing newer: record it as refused, so it is offered again.
+                with contextlib.suppress(CatalogError):
+                    self._record_provider_failure(manifest)
             self._record_recovery_failure(operation, "conflict")
             return False
         if operation["state"] == "pending":
@@ -1071,10 +1065,13 @@ class JournalApplication:
             ):
                 return False
             target_manifest = target.manifest
-            held = await self._provider_has_exact_manifest(target_manifest)
+            held = await self._provider_holds(target_manifest)
             if held is None:
                 return False
-            if not held:
+            if held == "other":
+                self._record_recovery_failure(operation, "conflict")
+                return False
+            if held == "older":
                 # The provider refused the correction, or the call was interrupted: offer it once more.
                 try:
                     if (
@@ -1119,25 +1116,31 @@ class JournalApplication:
                     return False
                 return self._complete_recovered_curation(operation, manifest, report)
             if history is not None and history["source_version"] == source_version:
-                if await self._provider_has_exact_manifest(manifest):
+                if await self._provider_holds(manifest) == "exact":
                     return self._complete_recovered_curation(operation, manifest, report)
             return False
 
         return False
 
-    async def _provider_has_exact_manifest(self, manifest: SourceManifest) -> bool | None:
-        """Whether the provider holds this exact version; None when it could not be asked."""
+    async def _provider_holds(self, manifest: SourceManifest) -> str | None:
+        """What the provider holds for this source: "exact" (this version), "older" (nothing or an
+        older version), "other" (a newer or different one); None when it could not be asked."""
         try:
             document = await self.hindsight.get_document(manifest.source_id)
         except Exception:
             return None
         metadata = document.get("document_metadata")
-        return (
-            document.get("id") == manifest.source_id
-            and isinstance(metadata, Mapping)
-            and metadata.get("source_version") == str(manifest.source_version)
+        if document.get("id") != manifest.source_id or not isinstance(metadata, Mapping):
+            return "older"
+        if (
+            metadata.get("source_version") == str(manifest.source_version)
             and metadata.get("sha256") == manifest.sha256
-        )
+        ):
+            return "exact"
+        held_version = metadata.get("source_version")
+        if isinstance(held_version, str) and held_version.isdecimal() and int(held_version) < manifest.source_version:
+            return "older"
+        return "other"
 
     def _complete_recovered_curation(
         self,
