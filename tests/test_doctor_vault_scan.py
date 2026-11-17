@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lifecontext.doctor import render, run_doctor
+from lifecontext.doctor import _vault_refusals, render, run_doctor
 from test_doctor import _service_down, _set_up, _temporary_home, _tesseract_run
 
 
@@ -82,7 +82,7 @@ class DoctorVaultScanTests(unittest.TestCase):
             entries.mkdir(mode=0o700, exist_ok=True)
             foreign = entries / "theirs.md"
             foreign.write_text("x", encoding="utf-8")
-            real_lstat = os.lstat
+            real_lstat = os.stat
             inode = real_lstat(foreign).st_ino
 
             class _Foreign:
@@ -93,13 +93,68 @@ class DoctorVaultScanTests(unittest.TestCase):
                 def __getattr__(self, name):
                     return getattr(self._real, name)
 
-            def lstat(path, *args, **kwargs):
+            def stat_(path, *args, **kwargs):
                 info = real_lstat(path, *args, **kwargs)
                 return _Foreign(info) if info.st_ino == inode else info
 
-            with patch("lifecontext.doctor.os.lstat", side_effect=lstat):
+            with patch("lifecontext.doctor.os.stat", side_effect=stat_):
                 report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
             self.assertIn("Journal/entries/theirs.md", report["vault_refusals"]["paths"])
+
+    def test_scan_stops_at_max_entries_and_never_follows_a_symlink(self) -> None:
+        with _temporary_home() as home:
+            _set_up(home)
+            journal = self._journal(home)
+            root = journal.parent
+            outside = home / "outside"
+            outside.mkdir(mode=0o700)
+            os.mkfifo(outside / "hidden-pipe")
+            wiki = journal / "wiki"
+            wiki.mkdir(mode=0o700, exist_ok=True)
+            (wiki / "linked").symlink_to(outside, target_is_directory=True)
+            for index in range(10):
+                os.mkfifo(wiki / f"pipe{index}")
+
+            full = _vault_refusals(root, journal, limit=100)
+            self.assertEqual((full["count"], full["truncated"]), (11, False))
+            self.assertNotIn("Journal/wiki/linked/hidden-pipe", full["paths"])
+
+            cut = _vault_refusals(root, journal, max_entries=5)
+            self.assertTrue(cut["truncated"])
+            self.assertLess(cut["count"], 11)
+
+    def test_folder_on_another_device_is_skipped_and_the_lock_file_is_scanned(self) -> None:
+        with _temporary_home() as home:
+            _set_up(home)
+            journal = self._journal(home)
+            root = journal.parent
+            mounted = journal / "documents" / "mounted"
+            mounted.mkdir(parents=True, mode=0o700, exist_ok=True)
+            mounted.parent.chmod(0o700)
+            os.mkfifo(mounted / "pipe")
+            journal_device = os.lstat(journal).st_dev
+            real_stat = os.stat
+
+            def stat_(path, *args, **kwargs):
+                info = real_stat(path, *args, **kwargs)
+                if path == "mounted":
+                    class Other:
+                        st_dev = journal_device + 1
+                        def __getattr__(self, name):
+                            return getattr(info, name)
+                    return Other()
+                return info
+
+            with patch("lifecontext.doctor.os.stat", side_effect=stat_):
+                self.assertEqual(_vault_refusals(root, journal)["count"], 0)
+            self.assertEqual(_vault_refusals(root, journal)["paths"], ["Journal/documents/mounted/pipe"])
+
+            lock = root / ".journal.lock"
+            lock.write_text("", encoding="utf-8")
+            lock.chmod(0o600)
+            os.link(lock, home / "lock-link")
+            lock.chmod(0o644)
+            self.assertIn(".journal.lock", _vault_refusals(root, journal)["paths"])
 
 
 if __name__ == "__main__":
