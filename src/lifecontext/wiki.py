@@ -319,6 +319,14 @@ MAX_LABEL_TITLE_CHARACTERS = 60
 # Extraction locators kept for labels: one small list per extraction, enough for every
 # index entry and a few more, so an index with many revisions reads each artifact once.
 LOCATOR_CACHE_ENTRIES = MAX_INDEX_ENTRIES + 32
+# One workbook of 100,000 cells holds about 30 MB of locators, so the cache is also bounded
+# by the locators it holds in all; a larger extraction is read each time, not cached.
+LOCATOR_CACHE_LOCATORS = 200_000
+# What a damaged stored extraction says; anything else (storage unavailable, file
+# missing) may pass, so it is not remembered.
+PERMANENT_ARTIFACT_ERRORS = frozenset({
+    "invalid derived artifact", "derived identity mismatch", "derived checksum mismatch",
+    "noncanonical derived artifact", "invalid derived payload"})
 
 
 def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | None:
@@ -924,8 +932,9 @@ class WikiService:
     def _extraction_view(self, source_id: str, version: int, extraction_revision: int) -> dict | None:
         """The locator of each passage of one stored extraction and its coverage, or None
         when it cannot be read. Extraction artifacts are immutable, so the most recently
-        used ones are kept per checksum across renders (a failed read too, so a damaged
-        artifact is opened once). The cache is shared by threads."""
+        used ones are kept per checksum across renders, within the entry and locator bounds
+        (a damaged file too, so it is opened once; a storage error is not remembered). The
+        cache is shared by threads."""
         rows = [row for row in self.catalog.list_extractions(source_id, version)
                 if row["extraction_revision"] == extraction_revision and row["artifact_sha256"]]
         if not rows:
@@ -941,15 +950,24 @@ class WikiService:
             payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
             view = {"locators": [segment.get("locator") or {} for segment in payload.get("segments", [])],
                     "coverage": coverage_summary(payload)}
+        except ValueError as error:
+            if str(error) not in PERMANENT_ARTIFACT_ERRORS:
+                return None
+            view = None
+        except (KeyError, TypeError, AttributeError):
+            view = None
         except OSError:
             return None
-        except (ValueError, KeyError, TypeError, AttributeError):
-            view = None
+        weight = len(view["locators"]) if view else 0
+        if weight > LOCATOR_CACHE_LOCATORS:
+            return view
         with self._locator_lock:
             cache[key] = view
             cache.move_to_end(key)
-            while len(cache) > LOCATOR_CACHE_ENTRIES:
-                cache.popitem(last=False)
+            held = sum(len(item["locators"]) for item in cache.values() if item)
+            while len(cache) > LOCATOR_CACHE_ENTRIES or held > LOCATOR_CACHE_LOCATORS:
+                _, evicted = cache.popitem(last=False)
+                held -= len(evicted["locators"]) if evicted else 0
         return view
 
     def _citation_labels(self, citations: Iterable[Citation] = ()):
