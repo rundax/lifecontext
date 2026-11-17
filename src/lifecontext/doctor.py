@@ -48,8 +48,8 @@ def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: 
     Lists symlinks, special files, entries owned by another user and folders that
     group or others can write, as vault-relative paths. Entries are examined with
     ``os.fwalk`` and ``stat`` on the folder's descriptor, never followed or opened;
-    a folder on another device is skipped, and the scan stops after ``max_entries``
-    entries.
+    a folder on another device is not entered but listed under ``skipped``, and the
+    scan stops after ``max_entries`` entries.
     """
     from lifecontext.vault import LOCK_FILENAME, MANAGED_DIRECTORIES
 
@@ -61,8 +61,9 @@ def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: 
     try:
         journal_device = os.lstat(journal).st_dev
     except OSError:
-        return {"paths": [], "count": 0, "truncated": False}
+        return {"paths": [], "count": 0, "truncated": False, "skipped": []}
     paths: list[str] = []
+    skipped: list[str] = []
     count = scanned = 0
     truncated = False
 
@@ -95,6 +96,8 @@ def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: 
         except OSError:
             continue
         if stat.S_ISDIR(info.st_mode) and info.st_dev != journal_device:
+            if len(skipped) < limit:
+                skipped.append(top_relative)
             continue
         if refused(info, lock=top_relative == LOCK_FILENAME):
             refuse(top_relative)
@@ -102,37 +105,43 @@ def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: 
             continue
         walk = os.fwalk(top, follow_symlinks=False)
         try:
-            for dirpath, dirnames, filenames, dirfd in walk:
-                sub = os.path.relpath(dirpath, top)
-                base = top_relative if sub == "." else f"{top_relative}/{sub}"
-                dirnames.sort()
-                filenames.sort()
-                subfolders = set(dirnames)
-                descend = []
-                for name in (*dirnames, *filenames):
-                    if scanned >= max_entries:
-                        truncated = True
-                        break
-                    scanned += 1
-                    try:
-                        entry = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-                    except OSError:
-                        continue
-                    if stat.S_ISDIR(entry.st_mode):
-                        if entry.st_dev != journal_device:
+            try:
+                for dirpath, dirnames, filenames, dirfd in walk:
+                    sub = os.path.relpath(dirpath, top)
+                    base = top_relative if sub == "." else f"{top_relative}/{sub}"
+                    dirnames.sort()
+                    filenames.sort()
+                    subfolders = set(dirnames)
+                    descend = []
+                    for name in (*dirnames, *filenames):
+                        if scanned >= max_entries:
+                            truncated = True
+                            break
+                        scanned += 1
+                        try:
+                            entry = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                        except OSError:
                             continue
-                        if name in subfolders:
-                            descend.append(name)
-                    if refused(entry):
-                        refuse(f"{base}/{name}")
-                if truncated:
-                    break
-                dirnames[:] = descend
+                        if stat.S_ISDIR(entry.st_mode):
+                            if entry.st_dev != journal_device:
+                                if len(skipped) < limit:
+                                    skipped.append(f"{base}/{name}")
+                                continue
+                            if name in subfolders:
+                                descend.append(name)
+                        if refused(entry):
+                            refuse(f"{base}/{name}")
+                    if truncated:
+                        break
+                    dirnames[:] = descend
+            except OSError:
+                # The folder went away or became unreadable after the lstat: skip it.
+                continue
         finally:
             walk.close()
         if truncated:
             break
-    return {"paths": paths, "count": count, "truncated": truncated or count > len(paths)}
+    return {"paths": paths, "count": count, "truncated": truncated or count > len(paths), "skipped": skipped}
 
 
 def _tesseract(run: Callable[..., Any]) -> dict[str, Any]:
@@ -487,6 +496,8 @@ def render(report: Mapping[str, Any]) -> str:
         more = refused["count"] - len(refused["paths"])
         lines.append("Vault paths LifeContext would refuse to write through: " + ", ".join(refused["paths"])
                      + (f" and {more} more" if more > 0 else ""))
+    if refused.get("skipped"):
+        lines.append("Vault folders not scanned (another device): " + ", ".join(refused["skipped"]))
     lines.append(_render_engine(report.get("engine") or {}))
     if "lint" in service:
         lint = service["lint"]

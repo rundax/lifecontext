@@ -157,8 +157,8 @@ name vault-relative paths: `vault_refusals` lists (up to 20) the folders and
 files below `Journal`, and the `.journal.lock` file, that a vault write would
 refuse (a symlink, a special file, an entry owned by another user, a folder
 that group or others can write). Those paths are often document titles. The
-scan is read-only, stays on the `Journal` device, and stops after 200,000
-entries (`truncated`). `status` names the last refused path as
+scan is read-only, does not enter a folder on another device than `Journal`
+(it lists those under `skipped`), and stops after 200,000 entries (`truncated`). `status` names the last refused path as
 `dependencies.vault.refused_path` until it is acceptable again.
 
 It exits 1 only for broken prerequisites, listed in `problems`:

@@ -28,7 +28,7 @@ class DoctorVaultScanTests(unittest.TestCase):
                 (wiki / name).write_bytes(b"foreign")
                 (wiki / name).chmod(0o644)
             report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
-            self.assertEqual(report["vault_refusals"], {"paths": [], "count": 0, "truncated": False})
+            self.assertEqual(report["vault_refusals"], {"paths": [], "count": 0, "truncated": False, "skipped": []})
             self.assertNotIn("vault_files_refused", report["warnings"])
             self.assertNotIn("vault_files_refused", report["problems"])
             self.assertNotIn("would refuse", render(report))
@@ -123,6 +123,20 @@ class DoctorVaultScanTests(unittest.TestCase):
             self.assertTrue(cut["truncated"])
             self.assertLess(cut["count"], 11)
 
+    def test_a_folder_deleted_during_the_scan_is_skipped(self) -> None:
+        with _temporary_home() as home:
+            _set_up(home)
+            journal = self._journal(home)
+            (journal / "wiki").mkdir(mode=0o700, exist_ok=True)
+
+            def vanished(*args, **kwargs):
+                raise FileNotFoundError("gone")
+                yield  # pragma: no cover  (makes this a generator, like os.fwalk)
+
+            with patch("lifecontext.doctor.os.fwalk", side_effect=vanished):
+                report = _vault_refusals(journal.parent, journal)
+            self.assertEqual((report["count"], report["truncated"]), (0, False))
+
     def test_folder_on_another_device_is_skipped_and_the_lock_file_is_scanned(self) -> None:
         with _temporary_home() as home:
             _set_up(home)
@@ -146,7 +160,8 @@ class DoctorVaultScanTests(unittest.TestCase):
                 return info
 
             with patch("lifecontext.doctor.os.stat", side_effect=stat_):
-                self.assertEqual(_vault_refusals(root, journal)["count"], 0)
+                report = _vault_refusals(root, journal)
+            self.assertEqual((report["count"], report["skipped"]), (0, ["Journal/documents/mounted"]))
             self.assertEqual(_vault_refusals(root, journal)["paths"], ["Journal/documents/mounted/pipe"])
 
             lock = root / ".journal.lock"
