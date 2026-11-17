@@ -417,7 +417,8 @@ def _build_parser() -> argparse.ArgumentParser:
             command.add_argument("destination", metavar="DEST")
     retry = document_commands.add_parser("retry")
     _shared_options(retry)
-    retry.add_argument("operation_id", type=_operation_id)
+    retry.add_argument("target", metavar="SOURCE_ID_OR_OPERATION_ID", type=_source_id,
+                       help="a document's source ID, or the ID of one of its operations")
     retry.add_argument("--rerun-extraction", action="store_true")
     retry_vision = retry.add_mutually_exclusive_group()
     retry_vision.add_argument("--no-vision", dest="vision", action="store_false", default=None,
@@ -676,8 +677,10 @@ def _http_binary_response(
     return raw
 
 
-def _idempotency_headers(args: argparse.Namespace) -> dict[str, str]:
-    key = getattr(args, "idempotency_key", None) or secrets.token_hex(16)
+def _idempotency_headers(args: argparse.Namespace, *, random_key: bool = True) -> dict[str, str]:
+    key = getattr(args, "idempotency_key", None) or (secrets.token_hex(16) if random_key else None)
+    if key is None:
+        return {"Accept": "application/json"}
     return {"Accept": "application/json", "Idempotency-Key": key}
 
 
@@ -757,7 +760,7 @@ def _write_export(destination: str, content: bytes) -> None:
 
 
 def _post_json(
-    args: argparse.Namespace, target: str, payload: object
+    args: argparse.Namespace, target: str, payload: object, *, random_key: bool = True
 ) -> dict[str, object]:
     value, operation_id = _http_request(
         args,
@@ -765,7 +768,7 @@ def _post_json(
         target,
         body=_json_bytes(payload),
         headers={
-            **_idempotency_headers(args),
+            **_idempotency_headers(args, random_key=random_key),
             "Content-Type": "application/json",
         },
     )
@@ -819,7 +822,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             body = {"rerun_extraction": args.rerun_extraction}
             if args.vision is not None:
                 body["vision"] = args.vision
-            return _post_json(args, f"/v1/documents/operations/{args.operation_id}/retry", body)
+            # No random key: the server's fixed key for a rerun joins a retry already running.
+            return _post_json(args, f"/v1/documents/operations/{quote(args.target, safe='')}/retry", body,
+                              random_key=False)
         target = f"/v1/documents/{quote(args.source_id, safe='')}"
         query = "?" + urlencode({"version": args.version}) if args.version is not None else ""
         if args.document_command == "show":
