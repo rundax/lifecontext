@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -220,7 +221,6 @@ class CliHTTPTests(unittest.TestCase):
         inbox.mkdir(mode=0o700)
         (inbox / "Lake.md").write_text("# Walk by the lake\n\nThe water was calm.\n", encoding="utf-8")
         clock = [1_000_000.0]
-        self.application._clock = lambda: clock[0]
         args = cli._build_parser().parse_args(["capture", "--once", "--port", str(self.port)])
 
         def scan() -> dict:
@@ -243,6 +243,9 @@ class CliHTTPTests(unittest.TestCase):
         self.assertEqual(scan()["pending"], 1)  # within the retry delay: not sent again
         self.assertEqual(len(self.client.retain_calls), 1)
         clock[0] += 31
+        with sqlite3.connect(self.paths.catalog_path) as connection:  # a minute has passed for the API too
+            connection.execute("UPDATE operations SET created_at = datetime(created_at, '-61 seconds'), "
+                               "updated_at = datetime(updated_at, '-61 seconds')")
 
         report = scan()
 
