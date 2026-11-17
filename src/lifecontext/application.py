@@ -1062,12 +1062,14 @@ class JournalApplication:
                     self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                     return False
             try:
-                self.project(source_id, target_version)
+                self._project_indexed(source_id, target_version)
                 if history is None:
                     self.catalog.record_curation_history(
                         operation["operation_id"], source_id, target_version, action
                     )
-            except Exception:
+            except Exception as exc:
+                # Never leave a recovered correction running: it ends completed or failed.
+                self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                 return False
             return self._complete_recovered_curation(operation, target_manifest, report)
 

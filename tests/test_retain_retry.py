@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from lifecontext.api.app import _error_details
 from lifecontext.application import ApplicationError, JournalApplication
+from lifecontext.catalog import CatalogError
 from lifecontext.capture import SETTLE_SECONDS, Rejected, digest, run_once
 from lifecontext.cli import _TRANSIENT_API_ERRORS
 from lifecontext.hindsight_adapter import LifeContextHindsightAdapter
@@ -419,6 +420,46 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(report["completed"], 1)
         self.assertEqual(self._operation_state(), ("completed", None))
         self._assert_indexed_and_edit_kept(source_id, 1, path)
+
+    def _states(self, kind: str) -> list[str]:
+        with sqlite3.connect(self.paths.catalog_path) as connection:
+            return [row[0] for row in connection.execute(
+                "SELECT state FROM operations WHERE operation_kind = ? ORDER BY created_at", (kind,)
+            )]
+
+    def test_a_recovered_correction_never_stays_running(self) -> None:
+        source_id = "src_retry_correct_never_running"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "corrected, then the catalog fails", "retain-retry-never-running")
+        self.app.close()
+        self.app = self._open()
+
+        with patch.object(self.app.catalog, "record_curation_history",
+                          side_effect=CatalogError("catalog operation failed")):
+            first = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(first["resumed"], 1)
+        self.assertEqual(self._states("curation"), ["permanent_failed"])
+        calls = len(self.client.retain_calls)
+        self.app.close()
+        self.app = self._open()
+        second = asyncio.run(self.app.recover_startup())
+        self.assertEqual((second["resumed"], second["unresolved"]), (0, 0))
+        self.assertEqual(len(self.client.retain_calls), calls)
+
+    def test_a_recovered_correction_whose_entry_was_edited_completes_once(self) -> None:
+        source_id = "src_retry_correct_edited_restart"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "corrected while the entry was edited", "retain-retry-edited-restart")
+        path = self._edit_entry(source_id, 2)
+        for expected in ((1, 1), (0, 0)):
+            self.app.close()
+            self.app = self._open()
+            report = asyncio.run(self.app.recover_startup())
+            self.assertEqual((report["resumed"], report["completed"]), expected)
+            self.assertEqual(self._states("curation"), ["completed"])
+        self.assertEqual(len(self.client.retain_calls), 3)
+        self._assert_indexed_and_edit_kept(source_id, 2, path)
 
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
