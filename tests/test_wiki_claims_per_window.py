@@ -73,21 +73,82 @@ class ClaimsPerWindowTests(unittest.TestCase):
             per_page[claim.citations[0].passage_start] = per_page.get(claim.citations[0].passage_start, 0) + 1
         self.assertEqual(per_page, {page: 4 for page in range(12)})
 
-    def test_one_window_claim_failing_its_quote_still_rejects_the_response(self):
-        fixture = self.fixture(pages=3, sentences=2, filler=100)
+    def altered(self, fixture, change):
+        """Make the model's window answer pass through ``change(answer, data)``."""
         compiler = fixture.service.compiler
         original = compiler.window
 
         def window(data):
-            answer = original(data)
-            answer["claims"][-1] = {**answer["claims"][-1], "text": "A paraphrase the page never says."}
-            return answer
+            return change(original(data), data)
 
         compiler.window = window
+
+    def test_a_claim_failing_its_quote_is_dropped_and_the_others_stay(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+
+        def change(answer, data):
+            self.assertEqual(len(answer["claims"]), 4)
+            answer["claims"][1] = {**answer["claims"][1], "text": "A paraphrase the page never says."}
+            return answer
+
+        self.altered(fixture, change)
+        fixture.update()
+        claims = fixture.current().claims
+        self.assertEqual(len(claims), 3)
+        self.assertNotIn("A paraphrase the page never says.", [claim.text for claim in claims])
+        self.assertEqual(fixture.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "completed")
+
+    def test_a_quote_the_page_does_not_hold_byte_for_byte_is_dropped(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+
+        def change(answer, data):
+            claim = answer["claims"][0]
+            citation = {**claim["citations"][0], "quote": claim["citations"][0]["quote"].replace(" ", "  ", 1)}
+            answer["claims"][0] = {**claim, "text": citation["quote"], "citations": [citation]}
+            return answer
+
+        self.altered(fixture, change)
+        fixture.update()
+        self.assertEqual(len(fixture.current().claims), 3)
+
+    def test_a_window_where_every_claim_fails_rejects_the_response(self):
+        fixture = self.fixture(pages=3, sentences=2, filler=100)
+
+        def change(answer, data):
+            answer["claims"] = [{**claim, "text": "A paraphrase the page never says."} for claim in answer["claims"]]
+            return answer
+
+        self.altered(fixture, change)
         with self.assertRaises(WikiError):
             fixture.update()
         self.assertEqual(fixture.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "failed")
         self.assertIsNone(fixture.catalog.get_wiki_page(source_page_id("doc_1")))
+        # The rejected response was regenerated once, never accepted.
+        self.assertEqual(len(fixture.service.compiler.queries["window"]), 2)
+
+    def test_a_window_keeps_at_most_the_claims_it_was_asked_for(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+        self.altered(fixture, lambda answer, data: type(fixture.service.compiler).window({**data, "max_claims": 8}))
+        fixture.update()
+        data = json.loads(fixture.service.compiler.queries["window"][0].split("UNTRUSTED_DATA=", 1)[1])
+        self.assertEqual(data["max_claims"], 4)
+        claims = fixture.current().claims
+        self.assertEqual(len(claims), 4)
+        self.assertEqual(len({claim.text for claim in claims}), 4)
+
+    def test_a_repeated_claim_does_not_use_up_a_slot(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+
+        def change(answer, data):
+            first, *rest = answer["claims"]
+            answer["claims"] = [first, first, *rest]
+            return answer
+
+        self.altered(fixture, change)
+        fixture.update()
+        texts = [claim.text for claim in fixture.current().claims]
+        self.assertEqual(len(texts), 4)
+        self.assertEqual(len(set(texts)), 4)
 
 
 if __name__ == "__main__":

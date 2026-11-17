@@ -704,7 +704,7 @@ class WikiTests(unittest.TestCase):
         self.assertEqual(self.catalog.get_wiki_page("topic_old")["current_revision"], 2)
         self.assertEqual(self.current().links, ("topic_old", *(f"topic_new_{n}" for n in range(5))))
 
-    def test_count_overflow_is_a_full_page_and_titles_are_ours(self):
+    def test_each_window_keeps_its_share_of_the_page_and_titles_are_ours(self):
         self.book(60)
         calls = []
 
@@ -1318,7 +1318,10 @@ class WikiTests(unittest.TestCase):
                          {"topic_sky", *(f"topic_t{n:02}" for n in range(15))})
         self.assertEqual(set(shown), set(data["existing_claims"]))
 
+    @unittest.mock.patch("lifecontext.wiki.WINDOW_CLAIM_BYTES", 30)
     def test_fake_compiler_pipeline_in_english_and_ukrainian(self):
+        # A window is asked for one claim per 30 bytes here, so each short document is
+        # asked for as many claims as it has sentences.
         from wiki_fake_compiler import FakeCompiler
 
         from lifecontext.document_projection import DocumentProjectionService

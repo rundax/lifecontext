@@ -1308,10 +1308,27 @@ class WikiService:
             # Document titles may hold any script or punctuation; the title is ours, so a
             # mistyped copy is corrected rather than rejected. Links are computed, not proposed.
             patch = replace(patch, title=target["title"], links=())
-            dependencies = self._validate(patch)
+            # Each claim and contradiction stands on its own quote, checked byte for byte:
+            # one bad quote drops that claim, not the whole window. Only a response with
+            # nothing valid is rejected (and corrected once).
+            claims, contradictions, dependencies, failure = [], [], [], None
+            for claim in patch.claims:
+                try:
+                    dependencies += self._validate(replace(patch, claims=(claim,), contradictions=()))
+                    claims.append(claim)
+                except WikiError as exc:
+                    failure = failure or exc
+            for contradiction in patch.contradictions:
+                try:
+                    dependencies += self._validate(replace(patch, claims=(), contradictions=(contradiction,)))
+                    contradictions.append(contradiction)
+                except WikiError as exc:
+                    failure = failure or exc
+            if not claims and not contradictions:
+                raise failure or WikiError("wiki claim requires literal quote support")
             if not any(d["source_id"] == source_id and d["source_version"] == version for d in dependencies):
                 raise WikiError("wiki update lacks source evidence")
-            return patch
+            return replace(patch, claims=tuple(claims), contradictions=tuple(contradictions))
 
         return await self._request(query, validate, source_id, version, extraction_revision,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
@@ -1840,9 +1857,11 @@ class WikiService:
                            "claims": [example_claim(segment) for segment in examples], "contradictions": [], "links": []}
                 query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "max_claims": asked, "example_patch": example,
                                                            "evidence": window}, ensure_ascii=False, separators=(",", ":"))
-                # Every returned claim is checked against its quote; the window keeps its quota.
+                # Every returned claim is checked against its quote; the window keeps the
+                # first `asked` distinct ones, so a repeated claim does not use up a slot.
                 patch = await self._compile_window(query, target, source_id, version, extraction_revision)
-                substantive = tuple(claim for claim in patch.claims if not _front_matter(claim.text))[:quota]
+                substantive = tuple(dict.fromkeys(claim for claim in patch.claims
+                                                  if not _front_matter(claim.text)))[:asked]
                 if substantive:
                     patch = replace(patch, claims=substantive)
                 elif not patch.contradictions:
@@ -1851,7 +1870,7 @@ class WikiService:
                     fallback = fallback or patch
                     continue
                 combined = patch if merged is None else self._combine(merged, patch)
-                if len(combined.claims) > MAX_PAGE_CLAIMS or len(_patch_json(combined).encode()) > MAX_PATCH_BYTES:
+                if len(_patch_json(combined).encode()) > MAX_PATCH_BYTES:
                     # Claims fill the page: keep what fits and stop asking the model.
                     logging.getLogger(__name__).warning("Wiki page %s full after evidence window %s", own_id, window_count)
                     break
