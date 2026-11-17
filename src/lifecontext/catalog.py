@@ -170,8 +170,14 @@ _OPERATION_ERROR_CODES = {
     "transfer_unavailable", "conflict", "relationship_unavailable", "unsafe_path",
     "unsafe_permissions", "vault_unavailable", "internal_error",
     # Why a document's wiki stage failed; stored in the stage's error code.
-    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_interrupted",
+    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
+    "wiki_interrupted",
 }
+# Codes an earlier release rejects in a snapshot; a bundle carries ``reflect_failed`` for them.
+_WIKI_STAGE_CODES = frozenset({
+    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
+    "wiki_interrupted",
+})
 _OPERATION_RESULT_FIELDS = {
     "sources", "item_count", "size_bytes", "error_code", "recovery_intent"
 }
@@ -2990,7 +2996,10 @@ class LifeContextCatalog:
             for row in metadata:
                 for stage in _DOCUMENT_STAGE_STATES:
                     current = self.get_document_stage(row["source_id"], row["source_version"], stage)
-                    stages.append({key: current[key] for key in ("source_id", "source_version", "stage", "state", "revision", "attempt", "error_code")})
+                    exported = {key: current[key] for key in ("source_id", "source_version", "stage", "state", "revision", "attempt", "error_code")}
+                    if exported["error_code"] in _WIKI_STAGE_CODES:
+                        exported["error_code"] = "reflect_failed"
+                    stages.append(exported)
             included = [row for row in proposals if row["proposal_id"] in included_proposals]
             if any((row["source_id"], row["source_version"]) in deleted for proposal in included for row in proposal["documents"]):
                 raise CatalogError("deleted proposal evidence unavailable")

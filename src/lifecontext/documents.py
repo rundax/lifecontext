@@ -47,7 +47,9 @@ _EXTRACTION_STEPS = {
 # What a person can do about a wiki stage that failed, by the reason it stored.
 _WIKI_STEPS = {
     "wiki_provider_failed": "The model did not answer; check it with: lifecontext doctor, then run: lifecontext documents retry {source_id}",
-    "wiki_evidence_limit": "The document is too long to summarise in one pass; run: lifecontext documents retry {source_id}",
+    # A retry would fail the same way, so these two suggest none.
+    "wiki_evidence_limit": "One passage is too large for a single model request and a retry does not change that; import a version with shorter passages.",
+    "wiki_no_evidence": "The document has no readable text to summarise and a retry does not change that; check the extraction with: lifecontext documents show {source_id}",
     "wiki_update_rejected": "The page failed its checks; run: lifecontext documents retry {source_id}",
     "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
 }

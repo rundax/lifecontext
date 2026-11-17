@@ -72,6 +72,10 @@ USER_START = "<!-- life-context:user:start -->"
 USER_END = "<!-- life-context:user:end -->"
 
 
+class WikiProviderError(Exception):
+    """The model or compiler call itself failed; nothing was wrong with the document."""
+
+
 class WikiError(ValueError):
     """Redacted retryable wiki failure."""
 
@@ -1130,7 +1134,10 @@ class WikiService:
         for attempt in range(2 if self.compiler is not None else 1):
             if len(query.encode()) > MAX_QUERY_BYTES:
                 raise WikiError("wiki query size limit")
-            response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            try:
+                response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            except Exception as exc:  # any model failure is a provider failure
+                raise WikiProviderError(type(exc).__name__) from exc
             try:
                 return parse(response.get("text"))
             except WikiError as exc:
@@ -1693,18 +1700,21 @@ class WikiService:
                 merged = combined
             merged = merged or fallback
             if merged is None:
-                raise WikiError("wiki evidence window limit")
+                raise WikiError("wiki has no evidence windows")
             patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id, MAX_SOURCE_CLAIMS)
             self._validate(patch)
             patch = await self._with_summary(patch, source_id, version, extraction_revision)
             routes = await self._route(patch, source_id, version, extraction_revision)
             results = self._publish(patch, routes, source_id, version, own_links)
         except Exception as exc:  # noqa: BLE001 -- provider failures must leave retryable stage
-            reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
+            reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
             logging.getLogger(__name__).warning("Wiki update rejected at evidence window %s: %s", window_count, reason)
             # The reason is kept in the stage's error code, so documents show and doctor can name it.
-            code = ("wiki_evidence_limit" if reason == "wiki evidence window limit" else "wiki_update_rejected"
-                    if isinstance(exc, WikiError) else "wiki_provider_failed")
+            # Only the model call maps to the provider code; a bug or a conflict keeps the generic one.
+            code = ("wiki_provider_failed" if isinstance(exc, WikiProviderError)
+                    else {"wiki evidence window limit": "wiki_evidence_limit",
+                          "wiki has no evidence windows": "wiki_no_evidence"}.get(reason, "wiki_update_rejected")
+                    if isinstance(exc, WikiError) else "internal_error")
             self._stage(source_id, version, "failed", code)
             raise WikiError("wiki update failed; retry available") from None
         finally:

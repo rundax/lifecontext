@@ -13,7 +13,7 @@ from urllib.parse import unquote
 from local_paths import scratch_root
 
 from lifecontext.application import ApplicationError, JournalApplication
-from lifecontext.catalog import LifeContextCatalog
+from lifecontext.catalog import CatalogConflict, LifeContextCatalog
 from lifecontext.custody import SourceManifest
 from lifecontext.derived import DerivedStore
 from lifecontext.paths import LifeContextPaths
@@ -273,6 +273,40 @@ class WikiTests(unittest.TestCase):
         self.citation["quote"] = "The sky is blue."
         self.update()
         self.assertEqual(self.catalog.get_wiki_page(PAGE)["current_revision"], 2)
+
+    def wiki_stage_code(self):
+        stage = self.catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual(stage["state"], "failed")
+        return stage["error_code"]
+
+    def test_only_a_model_failure_is_a_provider_failure(self):
+        async def down(query, **kwargs):
+            raise ConnectionError("model unreachable")
+
+        self.service.hindsight = SimpleNamespace(reflect=down)
+        with self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_provider_failed")
+        # A conflict or a bug in LifeContext's own code says nothing about the model.
+        self.service.hindsight = SimpleNamespace(reflect=lambda query, **kwargs: None)
+        for error in (CatalogConflict("stage conflict"), KeyError("bug")):
+            with self.subTest(error=error), unittest.mock.patch.object(self.service, "_evidence", side_effect=error):
+                with self.assertRaises(WikiError):
+                    self.update()
+                self.assertEqual(self.wiki_stage_code(), "internal_error")
+
+    def test_a_document_without_evidence_windows_or_with_an_unsplittable_passage_has_its_own_code(self):
+        with unittest.mock.patch.object(self.service, "_evidence_windows", return_value=iter(())), \
+                self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_no_evidence")
+        def too_large(*args, **kwargs):
+            raise WikiError("wiki evidence window limit")
+            yield
+        with unittest.mock.patch.object(self.service, "_evidence_windows", side_effect=too_large), \
+                self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_evidence_limit")
 
     def test_invalid_refs(self):
         for key, value in (("original_sha256", "f"*64), ("extraction_revision", 2), ("passage_end", 2), ("source_id", "missing")):
