@@ -149,7 +149,10 @@ async def health() -> HealthResponse:
 
 @router.get("/v1/status", response_model=StatusResponse)
 async def status(request: Request) -> dict[str, Any]:
-    """Return redacted dependency readiness, separate from process liveness."""
+    """Return dependency readiness, separate from process liveness.
+
+    No secrets or content; it names the vault-relative path of a refused file.
+    """
     return _application(request).readiness()
 
 

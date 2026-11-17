@@ -96,10 +96,11 @@ class WikiVaultNamesTests(unittest.TestCase):
         os.symlink(self.journal / "wiki", self.journal / "wiki/history")
         with self.assertRaises(VaultError):
             self.vault.read_artifact("wiki/history/生活.md")
+        # The private root and Journal keep other users out; a page's own mode
+        # is no reason to refuse reading it, and a read never changes it.
         target.chmod(0o644)
-        with self.assertRaises(VaultError) as caught:
-            self.vault.read_artifact("wiki/生活.md")
-        self.assertEqual(caught.exception.code, "unsafe_permissions")
+        self.assertEqual(self.vault.read_artifact("wiki/生活.md"), b"wiki")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
 
 if __name__ == "__main__":

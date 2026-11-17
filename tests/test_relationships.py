@@ -171,6 +171,18 @@ class RelationshipTests(unittest.TestCase):
         self.assertEqual(len(result["edges"]), 1)
         self.assertEqual(result["edges"][0]["to"], "path:Notes/entries/ordinary.md")
 
+    def test_scan_reads_open_note_folders_outside_journal(self) -> None:
+        self._journal_entry("src_open_folders", "See [[open-note]].")
+        note = self.notes / "Projects" / "open.md"
+        self._write(note, "---\ntitle: open-note\n---\nPrivate body.\n")
+        for folder in (self.notes, note.parent):
+            folder.chmod(0o775)
+        note.chmod(0o664)
+
+        self.assertGreaterEqual(self.store.count_legacy_path_references(), 0)
+        result = self.store.scan_relationships()
+        self.assertEqual([edge["to"] for edge in result["edges"]], ["path:Notes/Projects/open.md"])
+
     def test_latest_journal_version_is_the_only_indexed_source(self) -> None:
         self._journal_entry("src_versions", "See [[old-note]].")
         self._journal_entry("src_versions", "See [[new-note]].", version=2)

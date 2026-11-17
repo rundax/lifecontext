@@ -2884,6 +2884,9 @@ class JournalApplication:
             capabilities = {name: False for name in _READINESS_CAPABILITIES}
         hindsight_ready = all(capabilities[name] for name in _READINESS_CAPABILITIES)
 
+        # The private root and Journal decide readiness; a refused file below them
+        # blocks only writes to that path, and status names it (never the API error body).
+        refused_path = None
         try:
             self.vault.verify_permissions()
         except VaultError as exc:
@@ -2893,12 +2896,18 @@ class JournalApplication:
                 if exc.code in {"unsafe_path", "unsafe_permissions"}
                 else "vault_unavailable"
             )
+            refused_path = exc.path if vault_error != "vault_unavailable" else None
         except Exception:
             vault_ready = False
             vault_error = "vault_unavailable"
         else:
             vault_ready = True
             vault_error = None
+            refusal = getattr(self.vault, "last_refusal", None)
+            if isinstance(refusal, dict):
+                refused_path = refusal.get("path")
+        if not isinstance(refused_path, str):
+            refused_path = None
 
         try:
             facts = self.catalog.list_reconciliation_facts()
@@ -2928,6 +2937,7 @@ class JournalApplication:
                     "ready": vault_ready,
                     "permissions": vault_ready,
                     "error": vault_error,
+                    "refused_path": refused_path,
                 },
                 "catalog": {"ready": catalog_ready},
             },

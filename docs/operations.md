@@ -154,7 +154,14 @@ and holds the current token, whether the daemon on the profile's port is this
 HOME's, another account's or HOME's, or not running, and, for this HOME's,
 whether it refuses a request without the token; whether Postgres runs and
 listens on its socket only or on TCP); and free disk space. It prints no
-journal, document or wiki content, and no key, token or password.
+journal, document or wiki content, and no key, token or password. It does
+name vault-relative paths: `vault_refusals` lists (up to 20) the folders and
+files below `Journal`, and the `.journal.lock` file, that a vault write would
+refuse (a symlink, a special file, an entry owned by another user, a folder
+that group or others can write). Those paths are often document titles. The
+scan is read-only, does not enter a folder on another device than `Journal`
+(it lists those under `skipped`), and stops after 200,000 entries (`truncated`). `status` names the last refused path as
+`dependencies.vault.refused_path` until it is acceptable again.
 
 It exits 1 only for broken prerequisites, listed in `problems`:
 `python_unsupported`, `hindsight_packages`, `home_missing`, `home_unsafe`,
@@ -171,7 +178,9 @@ why). `warnings` do not change the exit code: `service_not_running`,
 `service_not_ready`, `tesseract_missing`, `tesseract_languages_missing`,
 `models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
 `model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
-that do not work yet) and, with `--model-probe`, `model_reflect_check_failed`.
+that do not work yet), `vault_files_refused` (`vault_refusals` lists paths a
+write would refuse; other files in the vault are never reported) and, with
+`--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 

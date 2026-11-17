@@ -268,13 +268,16 @@ class ManagedVaultWriteTests(unittest.TestCase):
         target.write_text(original, encoding="utf-8")
         target.chmod(0o644)
 
-        with self.assertRaises(VaultError):
+        with self.assertRaises(VaultError) as raised:
             self.vault.safe_write_text(
                 "entries/unsafe-mode.md",
                 self._owned("replacement"),
                 overwrite=True,
             )
 
+        # A file's extra mode bits are tightened only on a byte-identical replay; a changed
+        # replacement is a conflict, not a permission refusal.
+        self.assertEqual(raised.exception.code, "conflict")
         self.assertEqual(target.read_text(encoding="utf-8"), original)
         self.assertEqual(stat.S_IMODE(target.lstat().st_mode), 0o644)
 
