@@ -596,20 +596,6 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), 4)
         self.assertEqual(self._states("retain"), ["retryable_failed"] * 3)
 
-    def test_a_reindex_brings_a_missing_entry_back(self) -> None:
-        source_id = "src_retry_reindex_projects"
-        self._edited_note(source_id)
-        path = self.journal / self.app.catalog.get_projection_state(source_id, 1)["projection_path"]
-        path.unlink()
-
-        result = asyncio.run(self.app.curate({
-            "action": "reindex", "source_id": source_id, "expected_version": 1,
-        }, idempotency_key="retain-retry-reindex-projects"))
-
-        self.assertEqual(result["state"], "completed")
-        self.assertTrue(path.is_file())
-        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
-
     def test_recovery_that_finds_the_note_indexed_writes_its_missing_entry(self) -> None:
         source_id = "src_retry_reconciled_projects"
         self.client.on_retain = _crash  # the provider stores the note, then the process stops

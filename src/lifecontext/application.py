@@ -2400,7 +2400,6 @@ class JournalApplication:
                 manifest = evidence.manifest
                 submission_content = evidence.original_bytes
                 await self._submit_curation_source(manifest, submission_content)
-                self._try_project(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
                 )
