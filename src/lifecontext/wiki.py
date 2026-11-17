@@ -1002,7 +1002,7 @@ class WikiService:
                 failed = stage["state"] in {"failed", "blocked", "conflict"}
                 detail = f"{name}: {stage['state']}" + (f" ({stage['error_code']})" if stage.get("error_code") else "")
                 add("stage_failed" if failed else "stage_pending", "error" if failed else "warning",
-                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry OPERATION_ID --json",
+                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry {source_id} --json",
                     source_id=source_id, detail=detail)
                 reported = name
                 break
