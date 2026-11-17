@@ -255,6 +255,25 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), 4)
         self.assertEqual(self._operation_state(), ("completed", None))
 
+    def test_a_retry_after_the_clock_went_back_is_not_held_back(self) -> None:
+        source_id = "src_retry_clock_back"
+        original = b"note refused before the clock was set back"
+        key = "retain-retry-clock-back"
+        self.client.error = RuntimeError("provider down")
+        with self.assertRaises(ApplicationError):
+            asyncio.run(self.app.retain(
+                source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+            ))
+        self.client.error = None
+        self._age(-86400)  # the refusal now looks a day in the future
+
+        asyncio.run(self.app.retain(
+            source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+        ))
+
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self._operation_state(), ("completed", None))
+
     def test_a_refused_operation_stays_readable_by_the_previous_release(self) -> None:
         # The result keys and retain intent keys 7d2bbbf's catalog accepts; anything else makes it
         # reject the stored operation, and its startup recovery then fails.

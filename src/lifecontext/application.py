@@ -3241,7 +3241,9 @@ class JournalApplication:
         except (KeyError, TypeError, ValueError):
             return False
         delay = min(max(updated - created, _MIN_RETRY_DELAY_SECONDS), _MAX_RETRY_DELAY_SECONDS)
-        return updated + delay > datetime.now(UTC).timestamp()
+        wait = updated + delay - datetime.now(UTC).timestamp()
+        # A wait longer than the longest delay means the wall clock went back: the retry is due.
+        return 0 < wait <= _MAX_RETRY_DELAY_SECONDS
 
     @staticmethod
     def _retain_error_code(error: Exception) -> str:
