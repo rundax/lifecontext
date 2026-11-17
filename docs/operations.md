@@ -340,14 +340,14 @@ in its text, tagged `vision:<model>` in its locator and recorded as
 `vision_page:N` (or `_figure`, `_frame`, `_picture`) in the warnings, and model
 text is indexed in its own chunks. Readings are cached per source under
 `~/.lifeweave/vision-cache/` and deleted with the source. If the endpoint is
-unreachable, the import fails retryably; `documents retry OPERATION_ID` resumes
+unreachable, the import fails retryably; `documents retry SOURCE_ID` resumes
 the same extraction revision from the cache. Changing the model never rewrites
-existing documents; `documents retry OPERATION_ID --rerun-extraction` re-reads
+existing documents; `documents retry SOURCE_ID --rerun-extraction` re-reads
 them, and only the routed pages call the new model.
 
 An item the model refuses, or answers twice with unusable JSON, stays unresolved
 (`vision_refused:...`, `vision_failed:...`) and the document completes without it.
-A plain retry does not ask again. `documents retry OPERATION_ID
+A plain retry does not ask again. `documents retry SOURCE_ID
 --rerun-extraction` makes a new extraction revision with its own re-index: it
 asks again for `vision_failed` items, while a refusal stays cached and is not
 asked again until the vision provider or model changes.
@@ -364,6 +364,51 @@ on Linux and `~/Library/Logs/lifecontext/` on macOS (see
 including its later versions; the choice is recorded in its extraction ledger
 and honoured by recovery and every rerun. `documents retry ... --rerun-extraction
 --vision` lifts it.
+
+### A failed or partial import, and retrying it
+
+An operation can be `completed` while the document's wiki page or vault note did
+not come out. The document and operation responses therefore carry an `outcome`
+beside the unchanged catalog `state`: `completed` (every stage is done),
+`completed_with_errors` (the import finished but the wiki or vault stage failed),
+`running` (a configured wiki or vault stage has not finished yet), or the
+operation's own state (`pending`, `retryable_failed`, `permanent_failed`,
+`cancelled`). A document also lists `problems` (each with `stage`, `code`,
+`reason` and the `next_step` to run), its `last_operation_id`, and, once the page's
+note is in the vault, `wiki_page_id` and `vault_path` (from the vault root, for
+example `Journal/wiki/Lease.md`). `lifecontext operations get OPERATION_ID --json`
+and `GET /v1/operations` show the same `outcome` for document imports and retries;
+`GET /v1/operations?state=retryable_failed` or `?outcome=completed_with_errors`
+(among the newest 1000 operations) finds what a retry can pick up. `lifecontext
+doctor` counts a failed import only until a later import, retry or rebuild
+completes for the same document at the same or a newer version.
+
+`lifecontext documents retry SOURCE_ID` is the one command to run; the
+operation ID of any of the document's operations works too. It runs again every
+stage of the current version that is not completed: indexing, then the wiki page
+and the vault note, so an indexing failure that is fixed also puts the page in the
+vault. A completed stage is not repeated, and a version a newer one replaced does
+not rebuild its page. If the last extraction could not read the file, the retry
+reads it again; `--rerun-extraction` (with `--vision` or `--no-vision`) does it
+on demand. A retry of a document that is still being processed by the running
+service does not start a second run: it returns the operation's current state.
+A deleted document is not found, and a forgotten one is not retried.
+
+Idempotency: without `--idempotency-key`, each retry is a new attempt, so a
+failed wiki stage can be retried as often as needed, and the key a repeated
+`--rerun-extraction` uses is fixed per revision, so it never creates two. With
+`--idempotency-key KEY`, the key is binding: repeating the same key and request
+returns the same retry (and resumes it if it did not finish) instead of running
+it again, and the same key with a different request is refused as a conflict. Use
+a fresh key for every deliberate new attempt.
+
+A wiki stage that failed keeps its reason as the stage's error code:
+`wiki_provider_failed` (the model call failed), `wiki_update_rejected` (the page
+failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
+`wiki_evidence_limit` (one passage is too large for a model request) and
+`wiki_no_evidence` (the document has no text to summarise). The last two come back
+the same way on every retry, so their `next_step` suggests none. Any other failure
+inside LifeContext reports `internal_error`.
 
 ## Startup checks
 
