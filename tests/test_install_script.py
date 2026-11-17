@@ -394,7 +394,8 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.calls = root / "calls.log"
         venv_bin = root / "venv" / "bin"
         venv_bin.mkdir(parents=True)
-        os.symlink(sys.executable, venv_bin / "python")
+        # The venv's python with this checkout's package; -I would ignore the PYTHONPATH that finds it.
+        _stub(venv_bin / "python", f'[ "$1" != -I ] || shift\nPYTHONPATH="{ROOT / "src"}" exec "{sys.executable}" "$@"\n')
         report = json.dumps({"home": "/h/.lifeweave", "config_state": "written", "provider": "p", "model": "m",
                              "credentials_state": "stored", "vault_root": "/v", "timezone": "UTC", "warnings": []})
         _stub(venv_bin / "lifecontext",
@@ -408,7 +409,8 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
             + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_no",
-                         "choose_provider", "ask_anthropic_model", "print_init_report", "configure_interactive")
+                         "choose_provider", "ask_anthropic_model", "check_base_url", "ask_base_url",
+                         "print_init_report", "configure_interactive")
             + '\nconfigure_interactive\necho "capture=$capture"\n')
 
     def converse(self, answers: list[tuple[str, str]], **environ: str) -> tuple[int, str]:
@@ -467,6 +469,43 @@ class InstallEndpointPromptTests(unittest.TestCase):
             (f"init --non-interactive --json --provider openai_compatible --model llama3.3 "
              f"--vault {self.home}/LifeContext/vault --base-url http://127.0.0.1:11434/v1")])
         self.assertIn("capture=0", transcript)
+
+    def test_a_url_lifecontext_refuses_is_asked_again_before_init_runs(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"),
+            ("API base URL", "https://api.example.com/v1/chat/completions"),
+            # The check is LifeContext's own, so the refusal says why in its words.
+            ("API base URL", "http://models.example.com:8000/v1"),
+            ("anyway? [y/N]", "n"),
+            ("API base URL", "http://192.168.1.20:8000/v1"),
+            ("Model ID (exactly as your endpoint names it)", "m"), ("API key", ""), ("Vault folder", "/v"),
+            ("Turn notes", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertIn("names one endpoint", transcript)
+        self.assertIn("http on a host that is not on this machine or a private network", transcript)
+        # init ran once, with the accepted URL and without the flag.
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json --provider openai_compatible --model m --vault /v "
+            "--base-url http://192.168.1.20:8000/v1"])
+
+    def test_plain_http_on_another_host_is_accepted_only_when_the_person_confirms_and_passes_the_flag(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"), ("API base URL", "http://models.example.com:8000/v1"),
+            ("anyway? [y/N]", "y"),
+            ("Model ID (exactly as your endpoint names it)", "m"), ("API key", ""), ("Vault folder", "/v"),
+            ("Turn notes", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json --provider openai_compatible --model m --vault /v "
+            "--base-url http://models.example.com:8000/v1 --allow-insecure-http"])
+
+    def test_three_refused_urls_end_the_installer_before_init(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"), ("API base URL", "ftp://a.example/v1"), ("API base URL", "ftp://b.example/v1"),
+            ("API base URL", "ftp://c.example/v1")])
+        self.assertNotEqual(code, 0, transcript)
+        self.assertIn("no usable base URL was given", transcript)
+        self.assertFalse(self.calls.exists())
 
     def test_the_key_is_hidden_reaches_init_only_through_a_private_file_and_is_removed(self) -> None:
         key = "sk-typed-secret-0123456789"
@@ -591,6 +630,18 @@ class InstallEndingTests(unittest.TestCase):
         self.assertIn("Existing settings in ~/.lifeweave kept", result.stdout)
         self.assertEqual((self.tmp / "next-steps").read_text().splitlines()[1],
                          "  2. Import a document: lifecontext documents import ~/path/to/lease.pdf")
+
+    def test_unattended_setup_passes_the_insecure_http_flag_only_when_asked(self) -> None:
+        for environ, expected in (({}, "init --non-interactive --json\n"),
+                                  ({"LIFECONTEXT_ALLOW_INSECURE_HTTP": "1"},
+                                   "init --non-interactive --json --allow-insecure-http\n"),
+                                  ({"LIFECONTEXT_ALLOW_INSECURE_HTTP": "yes"}, "init --non-interactive --json\n")):
+            with self.subTest(environ=environ):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_functions("configure\n", "print_init_report", "configure",
+                                            LIFECONTEXT_PROVIDER="openai_compatible", **environ)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.calls.read_text(), expected)
 
     def test_capture_is_added_when_chosen_or_already_installed(self) -> None:
         body = "service_command\n"

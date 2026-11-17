@@ -73,6 +73,8 @@ API_KEY_FILE is set (without a terminal and without them, init is skipped):
   LIFECONTEXT_VAULT         vault folder (default: ~/LifeContext/vault)
   LIFECONTEXT_TIMEZONE      IANA time zone (default: the system's)
   LIFECONTEXT_API_KEY_FILE  file whose single line is the provider key
+  LIFECONTEXT_ALLOW_INSECURE_HTTP=1  accept an http base URL on any host (the
+                            key and your text then travel unencrypted)
   LIFECONTEXT_CAPTURE=1     also turn notes in Journal/Inbox into entries
   LIFECONTEXT_SKIP_MODEL_PROBE=1  same as --skip-model-probe
 On a re-run, existing settings and the services installed are kept; a key
@@ -577,24 +579,67 @@ ask_anthropic_model() {
 	die "no usable model was chosen; run the installer again"
 }
 
+# check_base_url URL: LifeContext's own check of a model server URL (no network). Prints why a URL
+# was refused. Exit 1: refused; exit 2: refused only because it is plain http on a host that is not
+# on this machine or a private network, so --allow-insecure-http would accept it.
+check_base_url() {
+	"$venv/bin/python" -I -c '
+import sys
+from lifecontext.hindsight import HindsightStartupError, validate_model_endpoint
+def check(allow):
+    validate_model_endpoint("openai_compatible", "model", sys.argv[1], requires_base_url=True,
+                            allow_insecure_http=allow)
+try:
+    check(False)
+except HindsightStartupError as error:
+    print(error.message or "the base URL is not valid")
+    try:
+        check(True)
+    except HindsightStartupError:
+        sys.exit(1)
+    sys.exit(2)
+' "$1" </dev/null
+}
+
+# ask_base_url QUESTION DEFAULT: ask for the URL until LifeContext accepts it. A plain-http URL on
+# another host is accepted only when the person confirms; then $allow_insecure_http is 1.
+ask_base_url() {
+	for attempt in 1 2 3; do
+		ask_required "$1" "$2"
+		base_url=$reply
+		if reason=$(check_base_url "$base_url"); then
+			return 0
+		elif [ "$?" -eq 2 ]; then
+			warn "$reason"
+			ask_no "Send your key and the text of your documents unencrypted over http to that host anyway?"
+			if [ "$reply" -eq 1 ]; then
+				allow_insecure_http=1
+				return 0
+			fi
+		else
+			warn "$reason"
+		fi
+	done
+	die "no usable base URL was given; run the installer again"
+}
+
 # Ask for the model endpoint, then run init with the answers. The key is read hidden and
 # reaches init through a private file, never through an argument.
 configure_interactive() {
 	choose_provider
 	base_url=""
+	allow_insecure_http=0
 	case "$choice" in
 	1) ask_anthropic_model ;;
 	2) ask_required "Model ID (see https://platform.openai.com/docs/models)" "" ;;
 	3) ask_required "Model ID (see https://ai.google.dev/gemini-api/docs/models)" "" ;;
 	4) ask_required "Model ID (see https://openrouter.ai/models)" "" ;;
 	5)
-		ask_required "Base URL of the server" "${LIFECONTEXT_BASE_URL:-http://127.0.0.1:11434/v1}"
-		base_url=$reply
+		ask_base_url "Base URL of the server" "${LIFECONTEXT_BASE_URL:-http://127.0.0.1:11434/v1}"
 		ask_required "Model ID (as your server lists it, for example in ollama list)" ""
 		;;
 	6)
-		ask_required "API base URL (the API root, for example https://api.example.com/v1)" "${LIFECONTEXT_BASE_URL:-}"
-		base_url=$reply
+		ask_base_url "API base URL (the API root, for example https://api.example.com/v1)" "${LIFECONTEXT_BASE_URL:-}"
 		ask_required "Model ID (exactly as your endpoint names it)" ""
 		;;
 	esac
@@ -612,6 +657,7 @@ configure_interactive() {
 
 	set -- init --non-interactive --json --provider "$provider" --model "$model" --vault "$vault"
 	[ -z "$base_url" ] || set -- "$@" --base-url "$base_url"
+	[ "$allow_insecure_http" -eq 0 ] || set -- "$@" --allow-insecure-http
 	[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
 	# Every answer is a flag: a LIFECONTEXT_BASE_URL left in the environment must not
 	# attach a URL to a provider chosen without one.
@@ -649,6 +695,8 @@ notes = {
     "existing_key_kept": "kept the stored key; replace it with lifecontext init --replace-key",
     "model_rejects_forced_tool_use": "this model refuses the forced tool choice that retain and reflect use, "
                                      "so they will fail",
+    "key_over_plain_http": "the key and the text of your documents and notes travel unencrypted over http to "
+                           "the model server; use https if you can",
 }
 for warning in report.get("warnings") or []:
     print("Note: " + notes.get(warning, warning.replace("_", " ")))
@@ -717,6 +765,7 @@ configure() {
 	if [ -n "${LIFECONTEXT_PROVIDER:-}${LIFECONTEXT_MODEL:-}${LIFECONTEXT_API_KEY_FILE:-}" ]; then
 		set -- init --non-interactive --json
 		[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
+		[ "${LIFECONTEXT_ALLOW_INSECURE_HTTP:-}" != 1 ] || set -- "$@" --allow-insecure-http
 		report=$("$lc" "$@" </dev/null) || true
 		printf '%s' "$report" | print_init_report || die "setup did not finish; fix the settings and run the installer again"
 	elif [ "$interactive" != no ] && tty_available; then
