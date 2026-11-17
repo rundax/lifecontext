@@ -34,6 +34,11 @@ SECRETS = ("Coffee is a stimulant.", "stimulant", "Copywriting", "persuasive", "
 
 class ForgetWithdrawsWikiTextTests(unittest.TestCase):
     def setUp(self):
+        # The fake model gives a claim per sentence; a window is asked for as many here,
+        # not for one per 3 KB, so short documents keep several claims.
+        patcher = patch("lifecontext.wiki.WINDOW_CLAIM_BYTES", 30)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         home = Path(temporary.name) / "home"

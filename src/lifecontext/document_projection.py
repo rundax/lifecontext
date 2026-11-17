@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import unicodedata
 from pathlib import PurePosixPath
 from urllib.parse import quote
@@ -128,6 +129,7 @@ class DocumentProjectionService:
         self.vault = vault
         self.wiki_service = wiki_service
         self._headings = {}
+        self._headings_lock = threading.Lock()
 
     @staticmethod
     def _move_id(artifact_id):
@@ -577,8 +579,9 @@ class DocumentProjectionService:
         if not rows or rows[-1]["extraction_revision"] != extraction_revision or not rows[-1]["artifact_sha256"]:
             return None
         key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
-        if key in self._headings:
-            return self._headings[key]
+        with self._headings_lock:
+            if key in self._headings:
+                return self._headings[key]
         try:
             payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=rows[-1]["artifact_sha256"])
         except (ValueError, OSError, KeyError, TypeError):
@@ -588,9 +591,10 @@ class DocumentProjectionService:
             heading = _segment_heading(segment.get("locator", {}))
             current = current if heading is None else heading
             headings.append(current)
-        if len(self._headings) >= 32:
-            self._headings.pop(next(iter(self._headings)))
-        self._headings[key] = headings
+        with self._headings_lock:
+            if len(self._headings) >= 32:
+                self._headings.pop(next(iter(self._headings)), None)
+            self._headings[key] = headings
         return headings
 
     def _citation_links(self):
@@ -684,7 +688,7 @@ class DocumentProjectionService:
             expected = _hash(existing)
         results = []
         for row in self.catalog.list_wiki_revisions(page_id):
-            historical = self.wiki_service.show(page_id, row["revision"])
+            historical = self.wiki_service.show(page_id, row["revision"], history=True, markdown=True)
             history_id = page_id + "_history"
             self._recover_publication(history_id, row["revision"], layer="wiki")
             history_path = self._wiki_filename(PurePosixPath(path).stem, directory="wiki/history",

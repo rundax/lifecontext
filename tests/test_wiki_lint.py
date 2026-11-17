@@ -220,6 +220,10 @@ class WikiLintTests(WikiFixture):
         self.assertRegex(found[0][4], rf"^116/128 claims, \d+/{MAX_PATCH_BYTES} bytes$")
         self.assertRegex(found[1][4], rf"^20/128 claims, 4[3-7]\d\d\d/{MAX_PATCH_BYTES} bytes$")
 
+    def test_the_index_fills_its_page_by_design(self):
+        self.publish("index", "Index", [f"The sky is blue. {index}" for index in range(116)])
+        self.assertEqual(self.found(self.lint(), "page_near_limit"), [])
+
     def test_coverage_gaps(self):
         self.publish(PAGE, "Original")
         coverage = {"unit": "page", "total": 4, "resolved": 2, "text": 2, "ocr": 0, "blank": 0, "vision": 0,

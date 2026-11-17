@@ -306,6 +306,17 @@ class APIHTTPTests(unittest.TestCase):
             self.assertEqual(replay, result)
             update.assert_awaited_once()
 
+    def test_wiki_show_http_names_the_source_behind_each_citation_label(self):
+        citation = {"claim": 1, "source_id": "doc_a", "source_version": 2, "extraction_revision": 3,
+                    "passage_start": 4, "passage_end": 5, "label": "Lease v2, p. 3"}
+        shown = {"page": {"page_id": "source_doc_a", "title": "Lease", "current_revision": 1, "state": "current"},
+                 "revision": None, "managed": "1. Rent is due. [Lease v2, p. 3]", "citations": [citation]}
+        with patch.object(self.application.wiki, "show", return_value=shown):
+            status, _, result = self._request("/v1/wiki/source_doc_a")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["citations"], [citation])
+        self.assertNotIn("\\[", result["managed"])
+
     def test_wiki_lint_and_review_queue_over_http(self):
         status, _, wiki = self._request("/v1/wiki/status")
         self.assertEqual((status, wiki["semantic_support_verified"], wiki["summary_model_generated"]), (200, False, True))

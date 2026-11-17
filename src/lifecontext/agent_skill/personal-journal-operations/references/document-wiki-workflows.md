@@ -162,8 +162,10 @@ projection automatically. Inspect the resulting pages and history:
 "$CLI" wiki history PAGE_ID --json
 ```
 
-Read the resulting managed text and citations; match the intended source
-ID/version. `semantic_support_verified: false` means the system does not
+Read the resulting managed text and its `citations` list: each citation shows
+as a `Title, p. 3` label in the text, and `citations` gives that label's source ID,
+version, extraction revision and passages; match the intended source ID/version
+there. `semantic_support_verified: false` means the system does not
 certify semantic entailment; it is not a service-down flag. The service compiles supplied evidence with the configured LLM without
 agentic retrieval. A rejected model response can be regenerated once for the
 same window after rechecking the source; failed checks are never bypassed.
@@ -279,7 +281,8 @@ There is currently no CLI for reading the complete extracted-text artifact.
 Use available document-reading tools on the downloaded original as necessary;
 do not pretend a truncated response or an OCR warning is complete evidence.
 
-Cite source ID, version, and page/passage locator when available. Separate
+Cite the document and page as the page's `Title, p. 3` label shows them, and take the
+source ID and version from the `citations` field of `wiki show` when available. Separate
 quoted facts, synthesis, recommendations, and open questions. Do not invent
 missing dates, commitments, or facts. If indexing/wiki is unavailable, a
 requested output may still use the supplied original, but explicitly say
