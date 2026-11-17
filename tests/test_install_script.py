@@ -824,7 +824,7 @@ class InstallModelCheckTests(unittest.TestCase):
         self.harness = root / "harness.sh"
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
-            'skip_model_probe=${SKIP:-0}\n' + _functions("say", "check_model")
+            'skip_model_probe=${SKIP:-0}\ninteractive=no\n' + _functions("say", "check_model")
             + '\ncheck_model\necho "model_state=$model_state"\n')
 
     def check(self, output: str, status: int = 0, **environ: str) -> str:
@@ -851,6 +851,55 @@ class InstallModelCheckTests(unittest.TestCase):
                       "Fix it with: lifecontext llm set --api-key-stdin < FILE\n", out)
         self.assertTrue(out.endswith("model_state=failed\n"))
         self.assertIn("the provider rejected the key", (self.tmp / "model-check").read_text())
+
+    def test_a_rejected_key_is_offered_a_new_one_once_at_a_terminal_and_the_check_runs_again(self) -> None:
+        # A keyless OpenAI-compatible endpoint that turns out to want a key: the installer never asked, the
+        # probe says "key rejected", and at a terminal the person can enter one now.
+        root = Path(self.temp.name)
+        report = json.dumps({"home": "/h/.lifeweave", "config_state": "kept", "provider": "p", "model": "m",
+                             "credentials_state": "replaced", "vault_root": "/v", "timezone": "UTC",
+                             "warnings": []})
+        rejected = json.dumps({"model_probe": {"status": "fail", "cause": "key_rejected",
+                                               "message": "the provider rejected the key",
+                                               "fix": "lifecontext llm set", "reflect": {"status": "skipped"}}})
+        passed = json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {"status": "pass"}}})
+        stored = root / "stored"
+        _stub(self.lc, f'echo "$*" >> "{self.calls}"\n'
+              'case "$1" in\n'
+              f'  init) cat "$LIFECONTEXT_API_KEY_FILE" > "{stored}"; printf \'%s\' \'{report}\' ;;\n'
+              f'  preflight) if [ -e "{stored}" ]; then printf \'%s\' \'{passed}\'; '
+              f'else printf \'%s\' \'{rejected}\'; exit 3; fi ;;\nesac\n')
+        harness = root / "harness2.sh"
+        harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
+            'skip_model_probe=0\ninteractive=${INTERACTIVE:-auto}\nkey_changed=0\n'
+            + _functions("say", "warn", "check_model", "ask_key_again", "print_init_report")
+            + '\ntty_available() { return 0; }\nask_secret() { reply=${TYPED:-}; }\n'
+              'check_model\necho "model_state=$model_state key_changed=$key_changed"\n')
+
+        def run(**environ: str) -> str:
+            stored.unlink(missing_ok=True)
+            self.calls.unlink(missing_ok=True)
+            result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                    env={"PATH": os.defpath, **environ}, stdin=subprocess.DEVNULL, timeout=60,
+                                    check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        out = run(TYPED="sk-typed-key-1234567890")
+        self.assertIn("The model check failed: the provider rejected the key.", out)
+        self.assertIn("The model answered", out)
+        self.assertTrue(out.endswith("model_state=passed key_changed=1\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "preflight --model-probe", "init --non-interactive --replace-key --json", "preflight --model-probe"])
+        self.assertEqual(stored.read_text().strip(), "sk-typed-key-1234567890")
+        # An empty answer leaves the failure as it is; --non-interactive and unattended runs never ask.
+        out = run(TYPED="")
+        self.assertTrue(out.endswith("model_state=failed key_changed=0\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), ["preflight --model-probe"])
+        out = run(TYPED="sk-typed-key-1234567890", INTERACTIVE="no")
+        self.assertTrue(out.endswith("model_state=failed key_changed=0\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), ["preflight --model-probe"])
 
     def test_a_reflect_warning_and_a_check_that_did_not_run(self) -> None:
         out = self.check(json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {

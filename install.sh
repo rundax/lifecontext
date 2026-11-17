@@ -588,7 +588,7 @@ import sys
 from lifecontext.hindsight import HindsightStartupError, validate_model_endpoint
 def check(allow):
     validate_model_endpoint("openai_compatible", "model", sys.argv[1], requires_base_url=True,
-                            allow_insecure_http=allow)
+                            allow_insecure_http=allow, private_http=True)
 try:
     check(False)
 except HindsightStartupError as error:
@@ -683,7 +683,7 @@ if "error" in report:
     print("lifecontext init failed: " + report.get("message", report["error"].replace("_", " ")))
     sys.exit(1)
 key = {"stored": "stored in .env", "replaced": "replaced in .env", "kept": "already in .env",
-       "missing": "MISSING", "not_required": "not needed for this loopback endpoint"}
+       "missing": "MISSING", "not_required": "not set (optional for this endpoint)"}
 print("Settings: %s (config %s)" % (report["home"], report["config_state"]))
 print("Model: %s %s" % (report["provider"], report["model"]))
 print("API key: " + key.get(report["credentials_state"], report["credentials_state"]))
@@ -695,8 +695,9 @@ notes = {
     "existing_key_kept": "kept the stored key; replace it with lifecontext init --replace-key",
     "model_rejects_forced_tool_use": "this model refuses the forced tool choice that retain and reflect use, "
                                      "so they will fail",
-    "key_over_plain_http": "the key and the text of your documents and notes travel unencrypted over http to "
-                           "the model server; use https if you can",
+    "model_uses_plain_http": "your text, and the key if one is stored, travel unencrypted over http to the "
+                             "model server; use https if you can",
+    "insecure_http_flag_not_needed": "--allow-insecure-http was not saved: this URL does not need it",
 }
 for warning in report.get("warnings") or []:
     print("Note: " + notes.get(warning, warning.replace("_", " ")))
@@ -719,8 +720,10 @@ sys.exit(0 if report.get("credentials_state") == "missing" else 1)
 
 # A re-run that finds settings without a key asks for it, hidden; the key reaches init
 # only through a private file, as in configure_interactive.
+# ask_key_again [PROMPT]: $key_entered is 1 when a key was stored.
 ask_key_again() {
-	ask_secret "API key for this provider (none is stored yet; hidden; empty to add it later with lifecontext llm set)"
+	key_entered=0
+	ask_secret "${1:-API key for this provider (none is stored yet; hidden; empty to add it later with lifecontext llm set)}"
 	api_key=$reply
 	[ -n "$api_key" ] || return 0
 	key_file="$tmp/api-key"
@@ -730,6 +733,7 @@ ask_key_again() {
 	rm -f "$key_file"
 	if printf '%s' "$report" | print_init_report; then
 		key_changed=1
+		key_entered=1
 	else
 		warn "the key was not stored; add it later with lifecontext llm set"
 	fi
@@ -788,16 +792,19 @@ check_model() {
 		say "Skipped until the setup is complete"
 		return
 	fi
-	say "Sending one small request to the model (up to a minute)"
-	# stderr stays hidden: only the stable cause in the JSON is shown, never provider text.
-	report=$("$lc" preflight --model-probe </dev/null 2>/dev/null) || true
-	if printf '%s' "$report" | "$venv/bin/python" -I -c '
+	for round in 1 2; do
+		say "Sending one small request to the model (up to a minute)"
+		# stderr stays hidden: only the stable cause in the JSON is shown, never provider text.
+		report=$("$lc" preflight --model-probe </dev/null 2>/dev/null) || true
+		if printf '%s' "$report" | "$venv/bin/python" -I -c '
 import json, sys
 try:
     probe = json.loads(sys.stdin.read())["model_probe"]
 except (ValueError, KeyError, TypeError):
     probe = {"status": "fail", "message": "the model check did not run",
              "fix": "lifecontext preflight --model-probe  (to see whether it runs)"}
+with open(sys.argv[1], "w") as cause:
+    cause.write(probe.get("cause") or "")
 if probe["status"] == "pass":
     print("The model answered with the structured output LifeContext needs.")
     reflect = probe.get("reflect") or {}
@@ -808,12 +815,19 @@ print("The model check failed: %s." % probe["message"])
 print("Fix it with: %s" % probe["fix"])
 print("Then check it again with: lifecontext preflight --model-probe")
 sys.exit(3)
-' >"$tmp/model-check"; then
-		model_state="passed"
-	else
-		model_state="failed"
-	fi
-	cat "$tmp/model-check"
+' "$tmp/model-cause" >"$tmp/model-check"; then
+			model_state="passed"
+		else
+			model_state="failed"
+		fi
+		cat "$tmp/model-check"
+		# A server that wanted a key the setup did not have (the key is optional for an
+		# OpenAI-compatible endpoint, so none was asked for): offer to enter one, once.
+		[ "$model_state" = failed ] && [ "$round" -eq 1 ] && [ "$(cat "$tmp/model-cause")" = key_rejected ] &&
+			[ "$interactive" != no ] && tty_available || break
+		ask_key_again "The model server rejected the key (or wants one). API key (hidden; empty to leave it)"
+		[ "$key_entered" -eq 1 ] || break
+	done
 }
 
 # Whether an earlier run installed note capture, so that a re-run keeps it.
