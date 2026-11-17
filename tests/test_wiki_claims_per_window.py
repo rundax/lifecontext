@@ -150,6 +150,40 @@ class ClaimsPerWindowTests(unittest.TestCase):
         self.assertEqual(len(texts), 4)
         self.assertEqual(len(set(texts)), 4)
 
+    def test_dropped_claims_are_logged_with_counts_and_codes_only(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+
+        def change(answer, data):
+            answer["claims"][1] = {**answer["claims"][1], "text": "A paraphrase the page never says."}
+            return answer
+
+        self.altered(fixture, change)
+        with self.assertLogs("lifecontext.wiki", "WARNING") as logged:
+            fixture.update()
+        dropped = [line for line in logged.output if "dropped" in line]
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("doc_1", dropped[0])
+        self.assertIn("1 of 4", dropped[0])
+        self.assertIn("wiki claim requires literal quote support", dropped[0])
+        self.assertNotIn("paraphrase", dropped[0])
+        self.assertNotIn("fact", dropped[0])
+
+    def test_a_valid_contradiction_does_not_rescue_a_window_without_a_valid_claim(self):
+        fixture = self.fixture(pages=3, sentences=2, filler=100)
+
+        def change(answer, data):
+            side = answer["claims"][0]
+            answer["contradictions"] = [{"left": side, "right": side, "left_date": "2024-01-01", "right_date": "2025-06-30"}]
+            answer["claims"] = [{**claim, "text": "A paraphrase the page never says."} for claim in answer["claims"]]
+            return answer
+
+        self.altered(fixture, change)
+        with self.assertRaises(WikiError):
+            fixture.update()
+        self.assertEqual(fixture.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "failed")
+        # The window was regenerated once before the document failed.
+        self.assertEqual(len(fixture.service.compiler.queries["window"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

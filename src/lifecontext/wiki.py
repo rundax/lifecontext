@@ -1366,7 +1366,7 @@ class WikiService:
                 self._evidence(source_id, version, extraction_revision)
                 query = "Correct the rejected JSON response: " + str(exc) + ". " + correction + query
 
-    async def _compile_window(self, query, target, source_id, version, extraction_revision) -> WikiPatch:
+    async def _compile_window(self, query, target, source_id, version, extraction_revision, window_index=0) -> WikiPatch:
         """One evidence window's claims for the document's own page; shared pages come from routing."""
         def validate(text):
             patches = parse_patches(text)
@@ -1396,7 +1396,13 @@ class WikiService:
                     contradictions.append(contradiction)
                 except WikiError as exc:
                     failure = failure or exc
-            if not claims and not contradictions:
+            dropped = len(patch.claims) - len(claims) + len(patch.contradictions) - len(contradictions)
+            if dropped:
+                # Codes and counts only: the quotes are the user's document text.
+                logging.getLogger(__name__).warning(
+                    "Wiki window %s of %s: %s of %s checked items dropped (%s)", window_index, source_id, dropped,
+                    len(patch.claims) + len(patch.contradictions), failure)
+            if not claims:
                 raise failure or WikiError("wiki claim requires literal quote support")
             if not any(d["source_id"] == source_id and d["source_version"] == version for d in dependencies):
                 raise WikiError("wiki update lacks source evidence")
@@ -1935,7 +1941,8 @@ class WikiService:
                                                            "evidence": window}, ensure_ascii=False, separators=(",", ":"))
                 # Every returned claim is checked against its quote; the window keeps the
                 # first `asked` distinct ones, so a repeated claim does not use up a slot.
-                patch = await self._compile_window(query, target, source_id, version, extraction_revision)
+                patch = await self._compile_window(query, target, source_id, version, extraction_revision,
+                                                   window_count)
                 substantive = tuple(dict.fromkeys(claim for claim in patch.claims
                                                   if not _front_matter(claim.text)))[:asked]
                 if substantive:
