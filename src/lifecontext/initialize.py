@@ -25,6 +25,7 @@ from lifecontext.hindsight import (
     _validated_profile_settings,
     is_loopback_host,
     llm_key_required,
+    needs_plain_http_grant,
 )
 from lifecontext.paths import LifeContextPaths, atomic_write
 
@@ -82,8 +83,10 @@ ENVIRONMENT = {"provider": "LIFECONTEXT_PROVIDER", "model": "LIFECONTEXT_MODEL",
 # The key never comes from the environment itself, only from the file this names.
 KEY_FILE_VARIABLE = "LIFECONTEXT_API_KEY_FILE"
 _LLM_ORDER = ("provider", "model", "base_url", "reasoning_effort", "allow_insecure_http")
-_PLAIN_HTTP_WARNING = ("Warning: the key and the text of your documents and notes travel unencrypted over http to "
-                       "this address on the network; use https if you can.")
+_PLAIN_HTTP_WARNING = ("Warning: your text, and the key if one is stored, travel unencrypted over http to this "
+                       "address on the network; use https if you can.")
+_FLAG_NOT_NEEDED = ("Warning: --allow-insecure-http was not saved: this URL does not need it (https, this machine "
+                    "or a private network address).")
 
 
 class InitError(RuntimeError):
@@ -409,8 +412,9 @@ def run_init(
                    "vault": str(root), "timezone": timezone}
         ignored = sorted(name for name, wanted in given.items() if wanted is not None and wanted != current[name]
                          and not (name == "vault" and os.path.realpath(os.path.expanduser(wanted)) == str(root)))
-        if options.allow_insecure_http and not llm.get("allow_insecure_http"):
-            ignored = sorted([*ignored, "allow_insecure_http"])
+        # Kept settings that need a grant carry it (or they would not have validated above).
+        if options.allow_insecure_http and not needs_plain_http_grant(llm.get("base_url")):
+            report["warnings"].append("insecure_http_flag_not_needed")
         if ignored:
             report["warnings"].append("flags_ignored")
             report["ignored"] = ignored
@@ -427,10 +431,14 @@ def run_init(
         llm_input.pop("base_url", None)
         if base_url:
             llm_input["base_url"] = base_url
-        # The flag belongs to the URL it was given for: kept while that URL stays, else it has to be given again.
+        # The grant is the URL it was given for: kept while the URL stays exactly that, else it has to be
+        # given again. A URL that needs none (https, a private address) saves none.
         llm_input.pop("allow_insecure_http", None)
-        if options.allow_insecure_http or (base.get("allow_insecure_http") and base_url == base.get("base_url")):
-            llm_input["allow_insecure_http"] = True
+        if base_url and needs_plain_http_grant(base_url):
+            if options.allow_insecure_http or base.get("allow_insecure_http") == base_url:
+                llm_input["allow_insecure_http"] = base_url
+        elif options.allow_insecure_http:
+            report["warnings"].append("insecure_http_flag_not_needed")
         try:
             llm = _validated_profile_settings({"llm": llm_input})
         except HindsightStartupError as exc:
@@ -506,17 +514,17 @@ def run_init(
             report["warnings"].append("existing_key_kept")
     else:
         report["credentials_state"] = "missing" if required else "not_required"
-    if sends_over_http(llm, report["credentials_state"] in {"stored", "replaced", "kept"}):
-        report["warnings"].append("key_over_plain_http")
+    if uses_plain_http(llm):
+        report["warnings"].append("model_uses_plain_http")
     report["setup_steps"] = _setup_steps(report)
     report["next_steps"] = next_steps(report["vault_root"])
     return report
 
 
-def sends_over_http(llm: Mapping[str, Any], key_stored: bool) -> bool:
-    """A stored key goes to a non-loopback http endpoint."""
+def uses_plain_http(llm: Mapping[str, Any]) -> bool:
+    """The text, and a stored key, go over plain http to somewhere other than this machine."""
     parts = urlsplit(llm.get("base_url") or "")
-    return key_stored and parts.scheme == "http" and not is_loopback_host(parts.hostname or "")
+    return parts.scheme == "http" and not is_loopback_host(parts.hostname or "")
 
 
 def _put_back(path: Path, previous: bytes | None) -> None:
@@ -558,7 +566,7 @@ def _setup_steps(report: Mapping[str, Any]) -> list[str]:
 def render(report: Mapping[str, Any]) -> str:
     credentials = {
         "stored": "stored in .env", "replaced": "replaced in .env", "kept": "already in .env",
-        "missing": "missing", "not_required": "not needed for this loopback endpoint",
+        "missing": "missing", "not_required": "not set (optional for this endpoint)",
     }[report["credentials_state"]]
     lines = [
         "LifeContext is set up." if report["credentials_state"] != "missing" else
@@ -577,8 +585,10 @@ def render(report: Mapping[str, Any]) -> str:
     if "api_key_file_readable_by_others" in report["warnings"]:
         lines.append("Warning: other users can read the file in LIFECONTEXT_API_KEY_FILE; chmod 600 it "
                      "unless it is a container secret only this service sees.")
-    if "key_over_plain_http" in report["warnings"]:
+    if "model_uses_plain_http" in report["warnings"]:
         lines.append(_PLAIN_HTTP_WARNING)
+    if "insecure_http_flag_not_needed" in report["warnings"]:
+        lines.append(_FLAG_NOT_NEEDED)
     if "flags_ignored" in report["warnings"]:
         names = ", ".join("--" + name.replace("_", "-") for name in report["ignored"])
         lines.append(f"Warning: config.yaml already exists, so {names} did not change it; add --force to apply "
@@ -624,7 +634,7 @@ def show_llm() -> dict[str, Any]:
     else:
         key = "missing" if llm_key_required(llm) else "not_required"
     shown = {"provider": llm["provider"], "model": llm["model"], "base_url": llm.get("base_url"), "api_key": key}
-    # Only when set, so the usual output keeps its shape.
+    # Only when granted for this URL, so the usual output keeps its shape.
     return {**shown, "allow_insecure_http": True} if llm.get("allow_insecure_http") else shown
 
 
@@ -655,19 +665,23 @@ def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str]
         report["warnings"].append("provider_changed_key_kept")
     if rejects_forced_tool(report):
         report["warnings"].append("model_rejects_forced_tool_use")
-    if sends_over_http(report, report["api_key"] == "set"):
-        report["warnings"].append("key_over_plain_http")
+    if uses_plain_http(report):
+        report["warnings"].append("model_uses_plain_http")
+    if options.allow_insecure_http and not needs_plain_http_grant(report["base_url"]):
+        report["warnings"].append("insecure_http_flag_not_needed")
     return report
 
 
 def render_llm(report: Mapping[str, Any]) -> str:
     key = {"set": "set", "missing": "MISSING (this provider needs one)",
-           "not_required": "not set (not needed for this loopback endpoint)"}[report["api_key"]]
+           "not_required": "not set (optional for this endpoint)"}[report["api_key"]]
     lines = ["Model settings updated." if "api_key_updated" in report else "Model settings:",
              f"- Provider: {report['provider']}",
              f"- Model: {report['model']}",
              f"- Base URL: {report['base_url'] or 'the provider default'}",
              f"- API key: {key}"]
+    if report.get("allow_insecure_http"):
+        lines.append("- Plain http: accepted for this URL (--allow-insecure-http)")
     if report["api_key"] == "missing":
         lines.append("Add it with: lifecontext llm set  (asks for the key; in scripts: "
                      "lifecontext llm set --api-key-stdin < FILE)")
@@ -677,6 +691,8 @@ def render_llm(report: Mapping[str, Any]) -> str:
                      "lifecontext llm set --api-key-stdin < FILE)")
     if "model_rejects_forced_tool_use" in report.get("warnings", ()):
         lines.append(_FORCED_TOOL_WARNING.format(model=report["model"]))
-    if sends_over_http(report, report["api_key"] == "set"):
+    if uses_plain_http(report):
         lines.append(_PLAIN_HTTP_WARNING)
+    if "insecure_http_flag_not_needed" in report.get("warnings", ()):
+        lines.append(_FLAG_NOT_NEEDED)
     return "\n".join(lines)

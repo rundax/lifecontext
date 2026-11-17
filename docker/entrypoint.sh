@@ -66,6 +66,9 @@ if "error" in report or "credentials_state" not in report:
 print("lifecontext-entrypoint: %s %s, config %s, key %s, vault %s" % (
     report["provider"], report["model"], report["config_state"], report["credentials_state"],
     report["vault_root"]), file=sys.stderr)
+if "model_uses_plain_http" in (report.get("warnings") or []):
+    print("lifecontext-entrypoint: Warning: your text, and the key if one is stored, travel unencrypted over "
+          "http to the model server; use https if you can.", file=sys.stderr)
 '
 }
 

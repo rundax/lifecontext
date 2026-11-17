@@ -222,7 +222,8 @@ def load_settings() -> dict[str, Any]:
         llm = loaded["llm"]
         if any(not isinstance(key, str) or key not in _LLM_SETTINGS for key in llm):
             raise ConfigError("invalid LifeContext config: unknown llm setting")
-        if any(not isinstance(value, bool if key == "allow_insecure_http" else str) for key, value in llm.items()):
+        if any(not isinstance(value, (str, bool) if key == "allow_insecure_http" else str)
+               for key, value in llm.items()):
             raise ConfigError("invalid LifeContext config: invalid llm setting")
     if "vision" in loaded:
         # Semantic checks (provider, exact model ID, URL rules) run at service start.

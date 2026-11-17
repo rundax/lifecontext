@@ -1514,6 +1514,9 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     import platform
 
     from lifecontext import initialize, service
+    from urllib.parse import urlsplit
+
+    from lifecontext.hindsight import is_loopback_host
 
     try:
         if args.llm_command == "show":
@@ -1523,8 +1526,10 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         bare = (args.provider is None and args.model is None and args.base_url is None
                 and not args.allow_insecure_http and not os.environ.get(initialize.KEY_FILE_VARIABLE))
         if bare and not args.api_key_stdin:
-            # Look at the setup before asking for anything.
-            if initialize.show_llm()["api_key"] == "not_required":
+            # Look at the setup before asking for anything. Only a server on this machine is known
+            # to need no key; any other endpoint may want one, so it is asked.
+            shown = initialize.show_llm()
+            if shown["api_key"] == "not_required" and is_loopback_host(urlsplit(shown["base_url"] or "").hostname or ""):
                 raise CLIError("nothing_to_change", message=(
                     "This endpoint needs no key; name what to change: --provider, --model or --base-url."))
         if args.api_key_stdin and not sys.stdin.isatty():

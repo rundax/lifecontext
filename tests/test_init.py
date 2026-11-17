@@ -270,43 +270,74 @@ class InitTests(unittest.TestCase):
             self.assertFalse(LifeContextPaths.current().config_path.exists())
             report = run_init(_options(provider="openai_compatible", model="m", base_url=url,
                                        allow_insecure_http=True))
+            # The grant is the URL it was given for.
             self.assertEqual(load_settings()["llm"], {"provider": "openai_compatible", "model": "m",
-                                                      "base_url": url, "allow_insecure_http": True})
-            # No key stored: nothing to warn about yet.
-            self.assertEqual((report["credentials_state"], report["warnings"]), ("not_required", []))
-            # The saved flag is honoured on a later run without it, and a stored key then warns.
+                                                      "base_url": url, "allow_insecure_http": url})
+            # Even without a key the text travels unencrypted: the warning does not wait for a key.
+            self.assertEqual(report["credentials_state"], "not_required")
+            self.assertEqual(report["warnings"], ["model_uses_plain_http"])
+            self.assertIn("your text, and the key if one is stored, travel unencrypted over http", render(report))
+            self.assertIn("optional for this endpoint", render(report))
+            # The saved grant is honoured on a later run without the flag.
             report = run_init(_options(api_key_stdin=True, replace_key=True), key_stream=io.BytesIO(KEY.encode()))
             self.assertEqual(report["credentials_state"], "stored")
-            self.assertIn("key_over_plain_http", report["warnings"])
-            self.assertIn("travel unencrypted over http", render(report))
+            self.assertIn("model_uses_plain_http", report["warnings"])
             self.assertNotIn(KEY, json.dumps(report))
-            # A private address needs no flag and still warns when a key is stored; loopback does not.
+            # A private address needs no flag and still warns; loopback does not.
             report = run_init(_options(provider="openai_compatible", model="m", base_url="http://10.0.0.5/v1",
                                        force=True))
             self.assertNotIn("allow_insecure_http", load_settings()["llm"])
-            self.assertIn("key_over_plain_http", report["warnings"])
+            self.assertIn("model_uses_plain_http", report["warnings"])
             report = run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1",
                                        force=True))
-            self.assertNotIn("key_over_plain_http", report["warnings"])
+            self.assertNotIn("model_uses_plain_http", report["warnings"])
+
+    def test_the_flag_on_a_url_that_needs_none_saves_nothing(self) -> None:
+        with _temporary_home():
+            for url in ("https://api.example.com/v1", "http://10.0.0.5/v1", "http://127.0.0.1:1/v1"):
+                with self.subTest(url=url):
+                    report = run_init(_options(provider="openai_compatible", model="m", base_url=url,
+                                               allow_insecure_http=True, force=True))
+                    self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+                    self.assertIn("insecure_http_flag_not_needed", report["warnings"])
+                    self.assertIn("does not need it", render(report))
+
+    def test_a_hand_edited_base_url_with_a_stale_grant_is_refused(self) -> None:
+        from lifecontext.hindsight import HindsightStartupError, _validated_profile_settings
+
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://models.lan/v1",
+                              allow_insecure_http=True))
+            paths = LifeContextPaths.current()
+            text = paths.config_path.read_text()
+            self.assertIn('base_url: "http://models.lan/v1"', text)
+            paths.config_path.write_text(text.replace('base_url: "http://models.lan/v1"',
+                                                      'base_url: "http://elsewhere.lan/v1"'))
+            with self.assertRaises(HindsightStartupError):
+                _validated_profile_settings({"llm": load_settings()["llm"]})
+            # init without --force reports the stored settings as invalid rather than starting on them.
+            with self.assertRaises(InitError) as caught:
+                run_init(_options())
+            self.assertEqual(caught.exception.code, "invalid_llm_settings")
 
     def test_the_flag_stays_only_with_the_url_it_was_given_for(self) -> None:
         with _temporary_home():
             run_init(_options(provider="openai_compatible", model="m", base_url="http://models.lan/v1",
                               allow_insecure_http=True))
             run_init(_options(model="other", force=True))
-            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], "http://models.lan/v1")
             with self.assertRaises(InitError):
                 run_init(_options(base_url="http://other.lan/v1", force=True))
-            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], "http://models.lan/v1")
             run_init(_options(base_url="https://api.example.com/v1", force=True))
             self.assertNotIn("allow_insecure_http", load_settings()["llm"])
 
-    def test_the_flag_without_force_on_an_existing_config_is_reported_as_ignored(self) -> None:
+    def test_the_flag_on_a_kept_config_that_needs_none_is_said_not_to_matter(self) -> None:
         with _temporary_home():
             run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1"))
             report = run_init(_options(allow_insecure_http=True))
-            self.assertEqual((report["warnings"], report["ignored"]), (["flags_ignored"], ["allow_insecure_http"]))
-            self.assertIn("--allow-insecure-http did not change it", render(report))
+            self.assertEqual(report["warnings"], ["insecure_http_flag_not_needed"])
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
 
     def test_invalid_input_fails_before_writing(self) -> None:
         cases = (

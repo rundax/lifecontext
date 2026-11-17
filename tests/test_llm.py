@@ -105,13 +105,36 @@ class LlmSetNetworkPolicyTests(unittest.TestCase):
             self.assertEqual(code, 0, err)
             report = json.loads(out)
             self.assertTrue(report["allow_insecure_http"])
-            self.assertIn("key_over_plain_http", report["warnings"])  # the old key is still stored
-            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            self.assertIn("model_uses_plain_http", report["warnings"])
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], url)
             code, out, _ = _run("show", "--json", restart=None)
             self.assertTrue(json.loads(out)["allow_insecure_http"])
-            # The text form says the key and the text travel unencrypted.
+            # The text forms say what was granted, and that the text and a stored key travel unencrypted.
+            code, out, _ = _run("show", restart=None)
+            self.assertIn("- Plain http: accepted for this URL (--allow-insecure-http)", out)
+            self.assertIn("travel unencrypted over http", out)
             code, out, _ = _run("set", "--model", "local-2")
             self.assertIn("travel unencrypted over http", out)
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], url)
+            # Another http host needs its own grant; the old one does not carry over.
+            code, out, _ = _run("set", "--base-url", "http://other.lan/v1", "--json", restart=None)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "invalid_llm_settings"))
+            code, out, _ = _run("set", "--base-url", "https://api.example.com/v1", "--json")
+            self.assertEqual(code, 0)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+
+    def test_the_flag_on_https_or_a_private_address_saves_nothing_and_says_so(self) -> None:
+        with _home():
+            _initialize(provider="openai_compatible", model="m", base_url="https://api.example.com/v1")
+            code, out, _ = _run("set", "--allow-insecure-http", "--json")
+            report = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertIn("insecure_http_flag_not_needed", report["warnings"])
+            self.assertNotIn("allow_insecure_http", report)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+            code, out, _ = _run("set", "--allow-insecure-http", "--base-url", "http://192.168.1.4:8000/v1")
+            self.assertIn("was not saved: this URL does not need it", out)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
 
     def test_a_keyless_openai_compatible_server_on_the_network_is_accepted(self) -> None:
         with _home():
@@ -119,7 +142,30 @@ class LlmSetNetworkPolicyTests(unittest.TestCase):
                                  timezone="UTC"), environ={})
             report = json.loads(_run("show", "--json")[1])
             self.assertEqual(report["api_key"], "not_required")
-            self.assertNotIn("travel unencrypted", _run("show")[1])
+            # No key, but the text still travels over the network unencrypted.
+            self.assertIn("travel unencrypted", _run("show")[1])
+            self.assertIn("not set (optional for this endpoint)", _run("show")[1])
+
+    def test_a_remote_keyless_endpoint_is_asked_for_a_key_and_only_loopback_needs_none(self) -> None:
+        with _home() as home:
+            run_init(InitOptions(provider="openai_compatible", model="m", base_url="https://api.example.com/v1",
+                                 timezone="UTC"), environ={})
+            self.assertEqual(json.loads(_run("show", "--json")[1])["api_key"], "not_required")
+            # Bare `llm set` at a terminal asks (an empty answer changes nothing), it does not say "needs no key".
+            with patch.object(cli, "_ask_secret", return_value="") as asked:
+                code, out, err = _run("set", restart=None, tty=True)
+            self.assertEqual((code, asked.call_count), (1, 1))
+            self.assertNotIn("needs no key", out + err)
+            with patch.object(cli, "_ask_secret", return_value=NEW_KEY):
+                code, out, err = _run("set", tty=True)
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"LIFEWEAVE_LLM_API_KEY={NEW_KEY}", LifeContextPaths(home).credentials_path.read_text())
+        with _home():
+            run_init(InitOptions(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1",
+                                 timezone="UTC"), environ={})
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            self.assertIn("needs no key", json.loads(out)["message"])
 
 
 class LlmSetTests(unittest.TestCase):
