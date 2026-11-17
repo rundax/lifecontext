@@ -371,6 +371,24 @@ class InstallOcrTests(unittest.TestCase):
         self.assertIn("sudo pacman -S --needed tesseract", result.stdout)
         self.assertEqual(self.logged(), [])
 
+    def test_the_exit_trap_drops_the_sudo_ticket_when_it_was_asked_for(self) -> None:
+        # An install that is interrupted after the password was typed must not leave sudo open.
+        trap = re.search(r"^\ttrap '(rm -rf \"\$tmp\"[^']*)' EXIT$", INSTALLER.read_text(), re.MULTILINE).group(1)
+        self.assertIn("sudo -k", trap)
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n')
+        for asked, expected in (("1", ["sudo -k"]), ("0", []), ("", [])):
+            with self.subTest(sudo_asked=asked):
+                self.calls.unlink(missing_ok=True)
+                harness = Path(self.temp.name) / "trap.sh"
+                harness.write_text(f"tmp=$(mktemp -d)\nsudo_asked={asked or 'unset_placeholder'}\n"
+                                   + ("" if asked else "unset sudo_asked\n")
+                                   + _functions("restore_tty") + f"\ntrap '{trap}' EXIT\nexit 1\n")
+                result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                        env={"PATH": f"{self.stubs}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
+                                        timeout=60, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(self.logged(), expected)
+
     def test_an_existing_installation_is_left_alone(self) -> None:
         self.sudo(works=True)
         self.installed.touch()
