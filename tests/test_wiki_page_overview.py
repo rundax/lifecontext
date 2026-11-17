@@ -24,6 +24,28 @@ class CoverageLineTests(unittest.TestCase):
     def test_documents_without_pages_get_no_line(self):
         lines = [{"kind": "lines", "start": 1, "end": 3, "container": None, "schema_version": 1}]
         self.assertIsNone(coverage_line(lines, {"unit": None, "unresolved": []}, [(0, 1)]))
+        words = [{"kind": "paragraph", "start": 1, "end": 1, "container": "section:1/body", "schema_version": 1}]
+        self.assertIsNone(coverage_line(words, {"unit": None, "unresolved": []}, [(0, 1)]))
+
+    def test_more_than_ten_unread_pages_are_counted_not_listed(self):
+        locators = [page(n) for n in range(1, 4)]
+        unresolved = [f"page:{n}" for n in range(4, 29)]
+        coverage = {"unit": "page", "total": 28, "resolved": 3, "unresolved": unresolved}
+        self.assertEqual(coverage_line(locators, coverage, [(0, 1)]),
+                         "Claims come from 1 of 28 pages; not read: pages 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 and 15 more.")
+
+    def test_the_unread_count_comes_from_the_totals_not_from_the_capped_list(self):
+        locators = [page(1)]
+        coverage = {"unit": "page", "total": 1501, "resolved": 1,
+                    "unresolved": [f"page:{n}" for n in range(2, 1002)]}
+        self.assertEqual(coverage_line(locators, coverage, [(0, 1)]),
+                         "Claims come from 1 of 1501 pages; not read: pages 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 1490 more.")
+
+    def test_a_workbook_counts_the_sheets_its_claims_come_from(self):
+        cells = [{"kind": "sheet_cell", "start": 1, "end": 1, "container": f"{sheet}!A1", "schema_version": 1}
+                 for sheet in ("Budget", "Plan", "Notes")]
+        self.assertEqual(coverage_line(cells, {"unit": None}, [(0, 2)]), "Claims come from 2 of 3 sheets.")
+        self.assertIsNone(coverage_line(cells[:1], {"unit": None}, [(0, 1)]))
 
 
 class PageOverviewTests(unittest.TestCase):

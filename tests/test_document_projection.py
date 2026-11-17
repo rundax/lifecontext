@@ -618,11 +618,11 @@ raise AssertionError('kill point was not reached')
     def test_a_page_written_by_the_previous_renderer_is_rewritten_without_a_review(self):
         from test_wiki import PAGE
 
-        from lifecontext.wiki import WikiService
+        from lifecontext.wiki import WikiService, _citation_label
         fixture, projection = self.wiki_fixture()
         fixture.update()
         # Projected by v1.2.0rc1, which labelled citations with source ID and passages.
-        with patch.object(WikiService, "_citation_labels", lambda service: None):
+        with patch.object(WikiService, "_citation_labels", lambda service, citations=(): _citation_label):
             self.assertEqual(projection.project_wiki(PAGE)["state"], "completed")
         receipt = fixture.catalog.get_artifact_projection("wiki", PAGE, 1)
         page = self.journal / receipt["projection_path"]

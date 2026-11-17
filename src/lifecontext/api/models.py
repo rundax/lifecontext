@@ -530,10 +530,23 @@ class WikiHistoryResponse(APIModel):
     revisions: list[WikiRevisionRecord] = Field(max_length=4096)
 
 
+class WikiCitationRecord(APIModel):
+    """One citation the page text shows: which claim, which source passages, and its label."""
+
+    claim: int | None = Field(default=None, ge=1)
+    source_id: SourceId
+    source_version: Version
+    extraction_revision: Version
+    passage_start: int = Field(ge=0)
+    passage_end: int = Field(ge=0)
+    label: str = Field(max_length=1024)
+
+
 class WikiShowResponse(APIModel):
     page: WikiPageRecord
     revision: WikiRevisionRecord | None = None
     managed: str = Field(max_length=LIMIT_CEILINGS["max_response_bytes"])
+    citations: list[WikiCitationRecord] = Field(default_factory=list, max_length=4096)
 
 
 class WikiStatusResponse(WikiListResponse):

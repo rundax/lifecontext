@@ -306,8 +306,9 @@ def _citation_label(citation: Citation) -> str:
 
 
 # How people count each kind of extraction locator: one and several.
+# Word paragraph and table-cell numbers are not shown anywhere a reader can find them,
+# so those citations carry the title alone.
 _PLACE_UNITS = {"page": ("p.", "pp."), "slide": ("slide", "slides"), "lines": ("line", "lines"),
-                "paragraph": ("para.", "paras."), "table_cell": ("table cell", "table cells"),
                 "image": ("image", "images")}
 MAX_LABEL_TITLE_CHARACTERS = 60
 
@@ -331,12 +332,18 @@ def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | N
 
 def coverage_line(locators: list, coverage: Mapping[str, Any], passages: Iterable[tuple[int, int]]) -> str | None:
     """One line under a document page's title: of how many of the document's pages (or
-    slides, or frames) its claims come from, and which were not read. None for a
-    document without such units, where the line would say nothing."""
+    slides, frames, sheets) its claims come from, and which pages were not read. None for
+    a document without such units (text, Word), where the line would say nothing."""
+    passages = list(passages)
     unit = coverage.get("unit") or next((kind for kind in ("page", "slide")
                                          if any(locator.get("kind") == kind for locator in locators)), None)
     if unit is None:
-        return None
+        def sheet(locator):
+            return str(locator.get("container") or "").rsplit("!", 1)[0] if locator.get("kind") == "sheet_cell" else None
+
+        sheets = {name for locator in locators if (name := sheet(locator))}
+        cited = {name for start, end in passages for locator in locators[start:end] if (name := sheet(locator))}
+        return f"Claims come from {len(cited)} of {len(sheets)} sheets." if len(sheets) > 1 else None
     kind = {"frame": "image"}.get(unit, unit)
     units = {locator.get("start") for locator in locators if locator.get("kind") == kind}
     total = coverage.get("total") or len(units)
@@ -344,21 +351,33 @@ def coverage_line(locators: list, coverage: Mapping[str, Any], passages: Iterabl
              if locator.get("kind") == kind}
     unread = [item.split(":", 1)[1] for item in coverage.get("unresolved") or ()
               if item.startswith(unit + ":") and item.split(":", 1)[1].isdigit()]
+    # The listed items are capped; the count comes from the totals.
+    count = len(unread)
+    if coverage.get("total") and coverage.get("resolved") is not None:
+        count = max(count, coverage["total"] - coverage["resolved"])
     line = f"Claims come from {len(cited)} of {total} {unit}{'' if total == 1 else 's'}"
     if unread:
-        shown = ", ".join(unread[:10]) + (f" and {len(unread) - 10} more" if len(unread) > 10 else "")
-        line += f"; not read: {unit}{'' if len(unread) == 1 else 's'} {shown}"
+        shown = ", ".join(unread[:10]) + (f" and {count - 10} more" if count > 10 else "")
+        line += f"; not read: {unit}{'' if count == 1 else 's'} {shown}"
     return line + "."
 
 
-def citation_label(title: str, place: str | None, version: int | None = None) -> str:
-    """A citation as people read it: ``Title, p. 3``; ``Title v2, p. 3`` when the
-    document has more than one version. Long titles are shortened."""
+def _short_title(title: str) -> str:
     title = _line(title)
     if len(title) > MAX_LABEL_TITLE_CHARACTERS:
         title = title[:MAX_LABEL_TITLE_CHARACTERS - 1].rstrip() + "…"
+    return title
+
+
+def citation_label(title: str, place: str | None, version: int | None = None, source_tag: str | None = None) -> str:
+    """A citation as people read it: ``Title, p. 3``; ``Title v2, p. 3`` when the
+    document has more than one version; ``Title (doc_1a2b), p. 3`` when another
+    document on the same page has the same title. Long titles are shortened."""
+    title = _short_title(title)
     if version is not None:
         title = f"{title} v{version}"
+    if source_tag:
+        title = f"{title} ({source_tag})"
     return f"{title}, {place}" if place else title
 
 
@@ -403,7 +422,10 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
 
     def cite(citation: Citation) -> str:
         target = citation_link(citation) if citation_link else None
-        label = _link_label(labels(citation))
+        label = labels(citation)
+        if citation_link is None:
+            return label
+        label = _link_label(label)
         return f"[{label}]({target})" if target else label
 
     def cited(c: Claim) -> str:
@@ -912,14 +934,16 @@ class WikiService:
                 cache.pop(next(iter(cache)))
         return cache[key]
 
-    def _citation_labels(self):
+    def _citation_labels(self, citations: Iterable[Citation] = ()):
         """People's label for each citation: the document's page title (else its
         metadata title), ``v2`` when the document has more than one version, and the
-        page, slide or sheet of the cited passages. Only the label is read here; the
-        stored citation keeps source, version, extraction revision and passages."""
+        page, slide or sheet of the cited passages. When two documents cited on one
+        page read the same, each gets a short source ID. Only the label is read here;
+        the stored citation keeps source, version, extraction revision and passages.
+        ``citations`` are those the page shows."""
         titles, versions = {}, {}
 
-        def label(citation: Citation) -> str:
+        def known(citation: Citation) -> None:
             source = citation.source_id
             if source not in titles:
                 page = self.catalog.get_wiki_page(source_page_id(source))
@@ -927,13 +951,29 @@ class WikiService:
                 titles[source] = title or self._title(source, citation.source_version)
                 current = self.catalog.get_current_manifest(source)
                 versions[source] = current.source_version if current is not None else 1
+
+        shown: dict = {}
+        for citation in citations:
+            known(citation)
+            shown.setdefault(_short_title(titles[citation.source_id]).casefold(), set()).add(citation.source_id)
+        tags = {}
+        for sources in shown.values():
+            if len(sources) > 1:
+                size = 8
+                while len({source[:size] for source in sources}) < len(sources) and size < max(map(len, sources)):
+                    size += 1
+                tags.update({source: source[:size] for source in sources})
+
+        def label(citation: Citation) -> str:
+            known(citation)
+            source = citation.source_id
             view = self._extraction_view(source, citation.source_version, citation.extraction_revision)
             locators = view["locators"] if view else []
             place = None
             if citation.passage_end <= len(locators):
                 place = citation_place(locators[citation.passage_start], locators[citation.passage_end - 1])
             several = max(versions[source], citation.source_version) > 1
-            return citation_label(titles[source], place, citation.source_version if several else None)
+            return citation_label(titles[source], place, citation.source_version if several else None, tags.get(source))
         return label
 
     def _coverage_line(self, patch: WikiPatch) -> str | None:
@@ -969,7 +1009,7 @@ class WikiService:
             return None
         revision = page["current_revision"] if revision is None else revision
         row = self.catalog.get_wiki_revision(page_id, revision) if revision else None
-        managed, title, withdrawn, neutral = "", page["title"], None, False
+        managed, title, withdrawn, neutral, citations = "", page["title"], None, False, []
         cache: dict = {}
         if row:
             patch = self.store.read(page_id, revision, row["artifact_sha256"])
@@ -985,10 +1025,17 @@ class WikiService:
                 extra["index_more"] = self._index_more(visible.links, cache)
             elif not withdrawn and page_id.startswith("source_"):
                 extra["coverage"] = self._coverage_line(visible)
-            managed = render_managed(visible, titles=titles, withdrawn=withdrawn,
-                                     citation_label=self._citation_labels(), **extra, **render)
+            shown = [] if withdrawn else [
+                (number, citation) for number, claim in enumerate(visible.claims, 1) for citation in claim.citations]
+            shown += [] if withdrawn else [(None, citation) for c in visible.contradictions
+                                           for side in (c.left, c.right) for citation in side.citations]
+            label = self._citation_labels(citation for _, citation in shown)
+            managed = render_managed(visible, titles=titles, withdrawn=withdrawn, citation_label=label, **extra, **render)
+            citations = [{"claim": number, "source_id": citation.source_id, "source_version": citation.source_version,
+                          "extraction_revision": citation.extraction_revision, "passage_start": citation.passage_start,
+                          "passage_end": citation.passage_end, "label": label(citation)} for number, citation in shown]
         return {"page": {**page, "title": title}, "revision": row, "managed": managed, "title": title,
-                "title_withdrawn": neutral,
+                "citations": citations, "title_withdrawn": neutral,
                 "withdrawn": withdrawn, "reviews": [review for review in self.catalog.list_wiki_reviews(page_id)
                                                     if not self.review_withdrawn(review, cache)]}
 

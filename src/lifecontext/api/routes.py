@@ -54,7 +54,7 @@ from lifecontext.api.models import (
     CategoryProposeRequest, CategoryDecisionRequest, CategoryApproveRequest,
     CategoryRedirectRequest, CategoryRenameRequest, CategoryAliasRequest,
     CategoryMergeRequest, CategoryReassignRequest, WikiPageRecord, WikiListResponse,
-    WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
+    WikiCitationRecord, WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
     WikiLintResponse, WikiReviewListResponse, WikiReviewMutationResponse, WikiReviewRecord,
     WikiReviewResolveRequest, BriefResponse,
 )
@@ -630,7 +630,8 @@ async def show_wiki(page_id: SourceId, request: Request, revision: Annotated[int
     result = _application(request).show_wiki(page_id, revision=revision)
     return WikiShowResponse(page=_public_record(WikiPageRecord, result["page"]),
                             revision=_public_record(WikiRevisionRecord, result["revision"]) if result["revision"] else None,
-                            managed=result["managed"])
+                            managed=result["managed"],
+                            citations=[_public_record(WikiCitationRecord, item) for item in result.get("citations", ())])
 
 
 @router.get("/v1/wiki/{page_id}/history", response_model=WikiHistoryResponse)
