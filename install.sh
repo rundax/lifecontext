@@ -836,19 +836,22 @@ show_log_tail() {
 }
 
 wait_for_api() {
-	waited=0
-	while [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; do
+	# Real seconds: each check and sleep takes time of its own, so counting sleeps would undercount.
+	started=$(date +%s)
+	last_said=0
+	while :; do
 		if api_answers; then
 			return 0
 		fi
-		sleep 5
-		waited=$((waited + 5))
+		waited=$(($(date +%s) - started))
+		[ "$waited" -lt "$HEALTH_WAIT_SECONDS" ] || return 1
 		# The first start can take minutes (models, the memory engine); say it is still going.
-		if [ $((waited % 20)) -eq 0 ] && [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; then
+		if [ $((waited - last_said)) -ge 20 ]; then
+			last_said=$waited
 			say "Still waiting for the API ($waited s of up to $HEALTH_WAIT_SECONDS s); follow the log with: $(log_command)"
 		fi
+		sleep 5
 	done
-	return 1
 }
 
 start_service() {

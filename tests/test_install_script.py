@@ -637,13 +637,16 @@ class InstallEndingTests(unittest.TestCase):
 class InstallWaitTests(unittest.TestCase):
     """wait_for_api with the health check, sleep and journalctl stubbed."""
 
-    def run_wait(self, answers_after: int, wait: int) -> subprocess.CompletedProcess[str]:
+    def run_wait(self, answers_after: int, wait: int, seconds_per_check: int = 5) -> subprocess.CompletedProcess[str]:
         temp = tempfile.TemporaryDirectory(prefix="lifecontext-wait-test.")
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         stubs = root / "stubs"
         stubs.mkdir()
         _stub(stubs / "sleep", "exit 0\n")
+        # The clock: every `date +%s` is `seconds_per_check` later than the one before.
+        _stub(stubs / "date", f'now=$(cat "{root}/clock" 2>/dev/null || echo 0)\necho "$now"\n'
+              f'echo $((now + {seconds_per_check})) > "{root}/clock"\n')
         _stub(stubs / "journalctl", 'echo "journalctl $*"\necho "a log line"\n')
         harness = root / "harness.sh"
         harness.write_text(
@@ -664,6 +667,15 @@ class InstallWaitTests(unittest.TestCase):
             ("Still waiting for the API (40 s of up to 900 s); follow the log with: "
              "journalctl --user -u lifecontext.service"),
             "answered"])
+
+    def test_the_progress_lines_and_the_limit_count_real_seconds_not_sleeps(self) -> None:
+        # Each round takes 30 s (a slow health check), so "20 s" progress lines come every round and the
+        # 100 s limit ends the wait after four rounds, not twenty.
+        result = self.run_wait(answers_after=99, wait=100, seconds_per_check=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        waited = re.findall(r"Still waiting for the API \((\d+) s of up to 100 s\)", result.stdout)
+        self.assertEqual(waited, ["30", "60", "90"])
+        self.assertIn("The last 20 lines of the service log:", result.stdout)
 
     def test_a_timeout_shows_the_last_20_log_lines(self) -> None:
         result = self.run_wait(answers_after=99, wait=10)
