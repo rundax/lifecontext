@@ -875,7 +875,11 @@ Contradiction (left date / right date)` callout with both quotes and their
 citations. A citation links to the projected source note of that document
 version, at the `Page N`/section heading above the cited passage when the note
 has one, and is labelled `Title, p. 3` (slide or sheet where that is the unit,
-`v2` only when the document has several versions); a document page shows under
+`v2` only when the document has several versions, a short source ID such as
+`(doc_1a2b)` when two documents on the page share a title; Word citations carry the
+title alone). `wiki show --json` returns the same labels in its `managed` text and a
+`citations` list with each citation's source ID, version, extraction revision and
+passages, so an agent can still identify the source; a document page shows under
 its title how many of the document's pages the claims come from and which were
 not read; `Related` pages link to their projected files and show a plain title
 until the target is projected. A state change or a newly projected link target
@@ -952,7 +956,10 @@ ceiling: a longer document's evidence windows are sampled evenly from its first
 to its last page, and a page that fills up early stops asking the model rather
 than failing. Each evidence window requests up to one short claim per 3 KB of
 its text (1 to 8, never more than its share of the 48) for the document's own
-page; windows never create other pages. After the summary below, one
+page; windows never create other pages. Each claim is checked on its own: a window
+keeps its valid claims when others fail their quote check, the dropped ones are
+logged as counts and an error code (never the text), and only a window with no valid
+claim is rejected and asked again once. After the summary below, one
 routing request places the own page's checked claims on shared pages: the model
 sees the claims by number, a catalog of up to 300 existing `topic_`/`entity_`
 pages (12 KB, pages that already cite the document first, then by words shared

@@ -3,9 +3,11 @@ import asyncio
 import json
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import test_wiki
 
+from lifecontext.api.models import WikiCitationRecord
 from lifecontext.wiki import (
     Citation,
     WikiPatch,
@@ -150,6 +152,24 @@ class ServiceLabelTests(unittest.TestCase):
              "passage_end": 1, "label": "Original (doc_2), line 1"},
             {"claim": 2, "source_id": "doc_3", "source_version": 1, "extraction_revision": 1, "passage_start": 0,
              "passage_end": 1, "label": "Original (doc_3), line 1"}])
+
+    def test_vault_renders_escape_labels_and_the_api_text_does_not(self):
+        fixture = self.fixture()
+        shown = self.plain_page(fixture, fixture.add_evidence("doc_2", "Grass is green."))
+        self.assertNotIn("\\[", shown["managed"])
+        with patch.object(fixture.service, "_citation_labels", return_value=lambda citation: "[[x]], p. 1"):
+            plain = fixture.service.show("plain_page")["managed"]
+            history = fixture.service.show("plain_page", 1, history=True, markdown=True)["managed"]
+        self.assertIn("1. Grass is green. [[[x]], p. 1]", plain)
+        self.assertIn("1. Grass is green. [\\[\\[x\\]\\], p. 1]", history)
+
+    def test_a_label_always_fits_the_api_record(self):
+        fixture = self.fixture()
+        fixture.payload["segments"][0]["locator"] = locator("sheet_cell", 1, container="S" * 5000 + "!A1")
+        shown = self.plain_page(fixture, fixture.add_evidence("doc_2", "Grass is green."))
+        label = shown["citations"][0]["label"]
+        self.assertLess(len(label), 200)
+        self.assertEqual(WikiCitationRecord.model_validate(shown["citations"][0]).label, label)
 
 
 if __name__ == "__main__":

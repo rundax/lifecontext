@@ -334,7 +334,7 @@ def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | N
     and last passage: ``p. 3``, ``pp. 3–4``, ``slide 2``, ``sheet Budget``; None when unknown."""
     kind = first.get("kind")
     if kind == "sheet_cell":
-        sheet = str(first.get("container") or "").rsplit("!", 1)[0]
+        sheet = _short_title(str(first.get("container") or "").rsplit("!", 1)[0])
         return f"sheet {sheet}" if sheet else None
     start = first.get("start")
     end = last.get("end") if last.get("kind") == kind else first.get("end")
@@ -417,7 +417,7 @@ def render_managed_v11(patch: WikiPatch) -> str:
 
 def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None, state: str | None = None,
                    page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None,
-                   coverage: str | None = None, index_more: int = 0) -> str:
+                   coverage: str | None = None, index_more: int = 0, markdown: bool = False) -> str:
     """Render immutable managed content only; projection must preserve user bytes/CAS.
 
     Claims are numbered; a model summary is labelled and names the claims it rests
@@ -430,6 +430,7 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     it the machine label is shown. ``coverage`` is one line under a document page's
     title; ``index_more`` counts the documents the index has no room for. A
     ``withdrawn`` page ("forgotten" or "retired") shows one fixed line instead of claims.
+    Labels are plain text unless ``markdown`` (the vault's files) or a link escapes them.
     """
     if withdrawn:
         return "\n".join([MANAGED_START, f"# {_line(patch.title)}", "", WITHDRAWN_LINES[withdrawn], MANAGED_END, ""])
@@ -439,7 +440,7 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     def cite(citation: Citation) -> str:
         target = citation_link(citation) if citation_link else None
         label = labels(citation)
-        if citation_link is None:
+        if citation_link is None and not markdown:
             return label
         label = _link_label(label)
         return f"[{label}]({target})" if target else label
