@@ -84,7 +84,7 @@ class LlmShowTests(unittest.TestCase):
     def test_show_without_setup_fails_cleanly(self) -> None:
         with _home():
             code, out, _ = _run("show", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "config_missing"))
 
 
 class LlmSetTests(unittest.TestCase):
@@ -179,10 +179,10 @@ class LlmSetTests(unittest.TestCase):
     def test_set_needs_something_to_change_and_an_existing_setup(self) -> None:
         with _home():
             code, out, _ = _run("set", "--model", "m", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "config_missing"))
             _initialize(provider="openai", model="gpt-test-model")
             code, out, _ = _run("set", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "nothing_to_change"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "nothing_to_change"))
 
     def test_changing_the_provider_warns_when_the_old_key_stays(self) -> None:
         with _home():

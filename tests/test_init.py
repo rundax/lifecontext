@@ -588,7 +588,7 @@ class InitCommandTests(unittest.TestCase):
             missing = subprocess.run(
                 [sys.executable, "-m", "lifecontext.cli", "init", "--non-interactive", "--replace-key", "--json"],
                 env=env, cwd=home, capture_output=True, text=True, timeout=60, check=False)
-            self.assertEqual((missing.returncode, json.loads(missing.stdout)), (1, {"error": "api_key_required"}))
+            self.assertEqual((missing.returncode, json.loads(missing.stdout)["error"]), (1, "api_key_required"))
 
     def test_command_without_a_provider_says_how_to_name_one(self) -> None:
         with tempfile.TemporaryDirectory(prefix="lifecontext-init-cli.", dir=scratch_root()) as temporary:

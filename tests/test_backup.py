@@ -292,7 +292,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertEqual(json.loads(again.stdout)["vault_root"], str(target / "LifeContext" / "vault"))
             refused = run(target, "restore", archive)
-            self.assertEqual((refused.returncode, json.loads(refused.stdout)), (1, {"error": "home_not_empty"}))
+            self.assertEqual((refused.returncode, json.loads(refused.stdout)["error"]), (1, "home_not_empty"))
 
     def test_backup_copies_where_hard_links_are_unsupported(self) -> None:
         with _homes(1) as (root, (source,)):

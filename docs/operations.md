@@ -112,7 +112,9 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
   with `vault_path_has_symlink`; `init --force` stores the real path. A vault
   check or a key that fails leaves `config.yaml` as it was.
 - Exit codes: 0 when set up (also when only the key is missing), 1 with
-  `{"error": CODE}` under `--json`, 2 for a usage error.
+  `{"error": CODE, "message": ..., "next_step": ..., "retryable": ...,
+  "request_id": null}` under `--json` (see [Failure codes](#failure-codes)),
+  2 for a usage error.
 - A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
 - `--non-interactive` without a provider or a model stops with
   `provider_required` or `model_required`; four Claude models are refused for
@@ -499,18 +501,171 @@ unsupported capabilities, profile setup, daemon readiness, or retain failures.
 Reports never include config lines, profile contents, credential values, or
 raw provider exceptions.
 
-Engine access adds: `unsafe_engine_token` (the token file is not a private
-regular file of 64 hex digits; delete it and start again), `daemon_port_foreign`,
-`daemon_port_unavailable` (no free port near this HOME's), `daemon_stop_failed`
-(an old daemon of this HOME did not stop), `engine_auth_disabled`,
-`engine_auth_rejected`, and for Postgres `postgres_setup_failed`,
-`postgres_binaries_missing`, `postgres_start_failed`, `postgres_stop_failed`,
-`postgres_control_failed`, `postgres_state_unknown`, `postgres_instance_invalid`,
-`postgres_instance_unsafe`, `postgres_socket_dir_unsafe`,
-`postgres_socket_path_too_long`, `postgres_socket_path_unsupported` (a quote,
-comma or backslash in the HOME path) and `postgres_instance_missing` (a data
-directory without pg0's `instance.json`, which pg0 deletes when one of its own
-starts fails; restore the file from a backup).
+Under `--json` a failure is one object: `error` (the stable code), `message`
+(one sentence), `next_step` (what to do, worded for the owner when the repair is
+theirs), `retryable` and `request_id` (the service's request ID, or `null` when
+the service did not answer). The plain message is the same sentence followed by a
+`Next:` line. A call that gets no answer reports `api_unavailable`: a refused
+connection says the service is not reachable; a timeout says it may still be
+working, and it is `retryable` only for a read, because a write or a `recall`
+that timed out may still finish.
+
+The list below is generated from the table in `src/lifecontext/cli_output.py`
+(`python -m lifecontext.cli_output --write docs/operations.md` rewrites it; a
+test fails when the two differ).
+
+<!-- failure-codes:begin -->
+
+### The API's codes
+
+- `invalid_request`: The request was refused: an argument or the input is not valid. Next: check the arguments with `lifecontext COMMAND --help`.
+- `unauthorized`: The API token was refused or cannot be read. Next: run the command as the same user, with the same HOME, as the service.
+- `body_too_large`: The input or the answer is larger than the configured limit. Next: send a smaller input; for recall and reflect lower --max-results or --max-tokens.
+- `response_too_large`: The service's answer is larger than this command accepts. Next: ask for less: lower --limit, --max-results or --max-tokens.
+- `host_not_allowed`: The service accepts requests only for 127.0.0.1. Next: connect to 127.0.0.1 directly, not through a proxy or another host name.
+- `origin_not_allowed`: The service refuses requests from a web page. Next: call it from the CLI or an agent, not from a browser.
+- `source_not_found`: No source or page has that ID. Next: `lifecontext documents list` and `lifecontext wiki list` show the IDs; a document's wiki page is `source_` followed by its ID.
+- `source_conflict`: That source ID and version already hold different content. Next: use the next version number, or look at the stored one with `lifecontext documents show ID`.
+- `evidence_unavailable`: The stored original of that source cannot be read or no longer matches its checksum. Next: run `lifecontext reconcile`; if it still fails, `lifecontext doctor` says what is wrong.
+- `invalid_source_text`: The input must be UTF-8 text. Next: convert it to UTF-8, or import the file with `lifecontext documents import`.
+- `invalid_provider_response`: The model answered, but not in the expected form. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `provider_unavailable`: The model did not answer. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `retain_failed`: The memory engine did not store the text. Next: re-run with the same --idempotency-key; `lifecontext doctor` checks the service, the engine and the model.
+- `recall_failed`: The memory engine could not search. Next: re-run in a minute; `lifecontext doctor` checks the service, the engine and the model.
+- `reflect_failed`: The memory engine could not write an answer. Next: re-run in a minute, or use `lifecontext recall`; `lifecontext doctor` checks the service, the engine and the model.
+- `unattributed_evidence`: The answer could not be tied to a stored source, so it was withheld. Next: rephrase the question, or read the passages with `lifecontext recall`.
+- `result_limit_exceeded`: More results were asked for than the configured maximum. Next: lower --max-results.
+- `operation_status_unavailable`: The state of that operation cannot be read now. Next: check the operation ID and try again; `lifecontext doctor` checks the service, the engine and the model.
+- `curation_unavailable`: That change to the source cannot be made now. Next: look at the current version with `lifecontext documents show ID`, then re-run.
+- `transfer_unavailable`: The export or import bundle cannot be processed. Next: check the bundle file; `lifecontext doctor` checks the service, the engine and the model.
+- `conflict`: It changed first: the revision or version you gave is no longer the current one. Next: read the current revision with the matching list or show command and re-run with it.
+- `relationship_unavailable`: That relationship cannot be read or decided now. Next: see the current edges with `lifecontext relationships list`, then re-run.
+- `unsafe_path`: The service refused a path outside the vault or through a symbolic link. Next: `lifecontext doctor` names the path to fix.
+- `unsafe_permissions`: Files or folders of LifeContext are open to other users. Next: `lifecontext doctor` names them; make folders 0700 and files 0600.
+- `vault_unavailable`: The vault cannot be read or written. Next: check that the vault folder exists and belongs to you; `lifecontext doctor` checks the service, the engine and the model.
+- `catalog_busy`: The catalog is busy with another change. Next: wait a few seconds and re-run.
+- `internal_error`: The service failed unexpectedly. Next: re-run once; if it fails again, run `lifecontext doctor` and look for the request ID in the service log.
+
+### The CLI's own codes
+
+- `api_unavailable`: The LifeContext service is not reachable at 127.0.0.1:PORT. Next: start it with `lifecontext serve --port PORT`.
+- `api_error`: The service answered with an error this command does not know. Next: update the CLI and restart the service so both run the same version.
+- `invalid_api_response`: The service's answer is not what this command expects. Next: update the CLI and restart the service so both run the same version.
+- `token_unavailable`: No LifeContext API token for this user: the service writes it when it starts, under the same HOME. Next: start it with `lifecontext serve --port PORT`.
+- `input_unavailable`: Unable to read the selected source input. Next: give an existing regular file, or - for standard input.
+- `vault_missing`: The vault's Journal folder does not exist. Next: create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml.
+- `destination_exists`: The output file already exists; LifeContext never overwrites one. Next: choose a new file name.
+- `output_unavailable`: The output file cannot be written. Next: check that its folder exists and that you can write to it.
+- `invalid_config`: The config file ~/.lifeweave/config.yaml cannot be read. Next: `lifecontext doctor` says what is wrong.
+- `server_start_failed`: The service could not start. Next: `lifecontext preflight` and `lifecontext doctor` say why.
+- `nothing_to_change`: Nothing to change. Next: give --provider, --model, --base-url or --api-key-stdin; `lifecontext llm show` shows the current model.
+
+### The MCP server's own codes
+
+- `busy`: A previous the tool call is still finishing. Next: report it instead of retrying.
+- `path_not_allowed`: The file is outside the import directories the owner allowed, or in a protected place (the LifeContext home, the vault, a hidden directory in the home directory, or a system directory). Next: ask the owner to import it.
+
+### Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)
+
+- `setup_failed`: The setup files could not be written. Next: check that ~/.lifeweave belongs to you and is writable, then re-run.
+- `backup_failed`: The backup could not be written. Next: check the destination folder, then re-run.
+- `restore_failed`: The restore could not read or write its files. Next: check the archive and the LifeContext home, then re-run.
+- `hindsight_failed`: The memory engine could not be stopped. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `provider_required`: No model provider was chosen. Next: give --provider, or run `lifecontext init` in a terminal to choose one.
+- `model_required`: No model was chosen. Next: give --model with the exact ID your provider lists.
+- `model_unsupported`: That model does not work with LifeContext yet. Next: choose another model with --model.
+- `invalid_llm_settings`: The model settings are not valid. Next: check --provider, --model and --base-url, or `lifecontext llm show`.
+- `invalid_api_key`: The API key is not valid: one line of printable ASCII, without quotes. Next: give it again at the hidden prompt or on stdin with --api-key-stdin.
+- `api_key_required`: A model API key is required and none was given. Next: give it at the hidden prompt, on stdin with --api-key-stdin, or in the file named by LIFECONTEXT_API_KEY_FILE.
+- `api_key_file_unreadable`: The file named by LIFECONTEXT_API_KEY_FILE cannot be read. Next: check that it exists, holds one line and is readable by you.
+- `invalid_timezone`: That time zone is not known. Next: give an IANA name such as Europe/Kyiv.
+- `invalid_vault`: That vault location is not allowed. Next: choose a folder that is not `/`, not inside ~/.lifeweave and not a parent of it.
+- `vault_path_has_symlink`: The vault path in config.yaml goes through a symbolic link. Next: run `lifecontext init --force` to store the real path.
+- `unsafe_vault`: The vault folder is not a real folder of yours. Next: choose a folder you own, or fix its owner and type.
+- `unsafe_home`: The LifeContext home is not private to you. Next: check that ~/.lifeweave belongs to you with mode 0700, then re-run.
+- `unsafe_credentials`: The credentials file is open to other users or not a regular file. Next: make it a regular file with mode 0600, or delete it and run `lifecontext init` again.
+- `invalid_credentials`: The credentials file is malformed. Next: delete it and run `lifecontext init` again to enter the key.
+- `config_incomplete`: The config file has no model section. Next: run `lifecontext init --force` with --provider and --model.
+- `config_missing`: There is no config file with model settings yet. Next: run `lifecontext init` first.
+- `executable_not_found`: The `lifecontext` program to run as a service was not found. Next: install LifeContext so `lifecontext` is on PATH, then re-run.
+- `unsupported_platform`: Services are supported on Linux (systemd) and macOS (launchd) only. Next: run the API in a terminal with `lifecontext serve`.
+- `unit_write_failed`: The service files could not be written. Next: check that the user service folder is writable, then re-run.
+- `unit_remove_failed`: The service files could not be removed. Next: remove them by hand from the user service folder.
+- `systemctl_unavailable`: The `systemctl` program was not found. Next: use a systemd session, or run the API with `lifecontext serve`.
+- `systemctl_failed`: The `systemctl` program refused the command. Next: run `systemctl --user status lifecontext` to see why.
+- `launchctl_unavailable`: The `launchctl` program was not found. Next: run the API in a terminal with `lifecontext serve`.
+- `launchctl_failed`: The `launchctl` program refused the command. Next: run `launchctl list` to see the state of the LifeContext jobs.
+- `skill_missing`: The agent skill files are missing from this installation. Next: reinstall LifeContext, then re-run.
+- `link_failed`: The skill could not be linked into the agent's folder. Next: check that the folder exists and is writable, then re-run.
+- `unlink_failed`: The skill link could not be removed. Next: remove the link by hand.
+- `capture_requires_inbox`: The capture folder must be named Inbox. Next: leave out --inbox to use Journal/Inbox of the vault, or give a folder named Inbox.
+- `capture_unavailable`: The inbox folder cannot be read. Next: check that it exists and that you can read it.
+- `unsafe_state`: The capture state in ~/.lifeweave/capture is not private to you or is damaged. Next: check that the folder is yours with mode 0700, or remove its state.json, then re-run.
+- `file_exists`: A file is already at that place in the vault. Next: choose a new name.
+- `file_too_large`: The file is larger than the vault accepts. Next: use a smaller file.
+- `invalid_file`: The vault file is not valid. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `not_found`: No such file in the vault. Next: check the name and run it again.
+- `read_only_path`: That vault path is read-only for LifeContext. Next: choose another path.
+- `unmanaged_file`: The vault file is not one LifeContext manages. Next: leave it as it is, or move it out of the way.
+- `sync_conflict`: The vault holds a sync conflict copy of a LifeContext file. Next: settle the conflict in your sync tool, then run `lifecontext reconcile`.
+- `export_durability`: The vault copy could not be made durable on disk. Next: check the free space and that the disk is writable, then re-run.
+- `locking_unavailable`: File locking is not available on this system. Next: run LifeContext on Linux or macOS.
+- `lock_timeout`: Another LifeContext process holds the vault lock. Next: wait a moment and re-run.
+- `nothing_to_back_up`: There is no LifeContext data to back up. Next: run `lifecontext init` first.
+- `service_running`: The service is running. Next: stop it, or add --stop-service where the command allows it, then re-run.
+- `hindsight_running`: The memory engine is still running. Next: run `lifecontext hindsight stop`, then re-run.
+- `backup_write_failed`: The archive could not be written. Next: check the free space and the destination, then re-run.
+- `catalog_unreadable`: The catalog database is damaged or unreadable. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `destination_inside_backup`: The archive would be written inside the data it backs up. Next: choose a destination outside the LifeContext home and the vault.
+- `source_changed`: A file changed while it was being backed up. Next: re-run the backup.
+- `archive_invalid`: The archive is not a LifeContext backup. Next: check that you gave the right file.
+- `archive_unreadable`: The archive cannot be read. Next: check the path and that you can read it.
+- `archive_incomplete`: The archive lacks files its manifest lists. Next: make a new backup.
+- `archive_changed`: The archive changed while it was being read. Next: copy it to a stable place, then re-run.
+- `archive_checksum_mismatch`: The archive does not match its checksum. Next: copy it again or use another backup.
+- `archive_config_invalid`: The config file in the archive is not valid. Next: use another backup.
+- `archive_instance_invalid`: The memory engine's instance file in the archive is not valid. Next: use another backup.
+- `home_not_empty`: This HOME already holds LifeContext data; a restore never overwrites it. Next: restore into a fresh HOME.
+- `vault_not_empty`: The vault folder to restore into is not empty. Next: restore into an empty or new folder.
+- `vault_outside_home`: The vault to restore is outside this HOME. Next: restore it into a folder inside your home directory.
+- `vault_location_refused`: The vault location is not one a restore writes to. Next: restore into a folder inside ~/LifeContext.
+- `schema_unsupported`: The archive was made by a newer LifeContext. Next: update LifeContext, then re-run.
+
+### The memory engine
+
+- `missing_package`: A package of the memory engine is not installed. Next: reinstall LifeContext.
+- `unsupported_version`: The memory engine is not the version LifeContext pins. Next: reinstall LifeContext so the packages match.
+- `missing_capability`: The memory engine lacks a capability LifeContext needs. Next: reinstall LifeContext so the packages match.
+- `missing_credentials`: The model API key is missing. Next: run `lifecontext init` and give the key.
+- `document_generation_failed`: The model could not write the document. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `daemon_unavailable`: The memory engine is not answering or not healthy. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `daemon_port_foreign`: Another program holds the port this HOME's memory engine needs. Next: stop that program, then run `lifecontext doctor`.
+- `daemon_port_unavailable`: No free port was found near this HOME's engine port. Next: free a port near it, then run `lifecontext doctor`.
+- `daemon_stop_failed`: An old memory engine daemon of this HOME did not stop. Next: stop that process by hand, then run `lifecontext doctor`.
+- `engine_auth_disabled`: The memory engine runs without its API token. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `engine_auth_rejected`: The memory engine refused LifeContext's API token. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `engine_token_missing`: The memory engine's token file is missing. Next: start the service once so it writes the token.
+- `unsafe_engine_token`: The engine token file is not a private regular file of 64 hex digits. Next: delete it and start again.
+- `unsafe_profile_paths`: The memory engine's profile folders are not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `unsafe_profile_file`: The memory engine's profile file is not a private regular file of yours. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `unsafe_profile_lock`: The profile lock file is not a private regular file of yours. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `profile_lock_unavailable`: The profile lock cannot be taken. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `profile_lock_timeout`: Another LifeContext process holds the profile lock. Next: wait a moment and re-run.
+- `profile_setup_failed`: The memory engine's profile could not be set up. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_setup_failed`: The Postgres of the memory engine could not be set up. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_binaries_missing`: The Postgres programs of the memory engine are missing. Next: reinstall LifeContext.
+- `postgres_start_failed`: The Postgres of the memory engine did not start. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_stop_failed`: The Postgres of the memory engine did not stop. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_control_failed`: The Postgres control program failed. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_state_unknown`: The state of the memory engine's Postgres cannot be told. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_instance_invalid`: The Postgres instance file of the memory engine is not valid. Next: restore it from a backup.
+- `postgres_instance_unsafe`: The Postgres instance files are not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_socket_dir_unsafe`: The Postgres socket folder is not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_socket_path_too_long`: The Postgres socket path is too long for this HOME. Next: use a shorter HOME path.
+- `postgres_socket_path_unsupported`: The HOME path has a quote, comma or backslash, which the Postgres socket path cannot hold. Next: use a HOME path without them.
+- `postgres_instance_missing`: The Postgres data folder has no `instance.json`; pg0 deletes it when one of its own starts fails. Next: restore the file from a backup.
+
+<!-- failure-codes:end -->
 
 ## Running the service
 
@@ -938,6 +1093,13 @@ not restart/retry while it is processing or infer full completion from the
 first indexed memory units. Wait for terminal remote completion before
 recovering the existing operation. Other stalled Hindsight calls may also
 wait up to 1800 seconds.
+
+Reads (every `GET`: `status`, `documents list`, `wiki show` and the like) time out
+after 30 seconds; the calls above keep their own, longer timeouts. The service
+extracts the text of an import (OCR on a scanned PDF can take minutes) before it
+answers any other request, so a read sent during an import can time out even though
+nothing is wrong: the CLI then says the service may be busy with an import and to
+try again in a few minutes.
 
 Managed wiki responses may be a single JSON object/envelope or one standalone
 JSON Markdown fence. Prose wrappers, duplicate keys, invalid schemas, and
