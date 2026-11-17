@@ -79,6 +79,7 @@ class RetainRetryTests(unittest.TestCase):
 
         self.client = ControlledClient()
         self.adapter = LifeContextHindsightAdapter(self.client, bank_id="lifeweave")
+        self.clock = [1_000_000.0]
         self.app = self._open()
 
     def tearDown(self) -> None:
@@ -87,11 +88,13 @@ class RetainRetryTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _open(self) -> JournalApplication:
-        return JournalApplication(
+        application = JournalApplication(
             paths=self.paths,
             hindsight=self.adapter,
             vault=ManagedVault(self.vault_root, self.journal),
         )
+        application._clock = lambda: self.clock[0]
+        return application
 
     def _operation_state(self) -> tuple[str, str | None]:
         with sqlite3.connect(self.paths.catalog_path) as connection:
@@ -108,6 +111,7 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "retain_failed")
         self.assertEqual(self._operation_state(), ("retryable_failed", "retain_failed"))
         self.client.error = None
+        self.clock[0] += 61  # past the first retry delay
 
     def test_same_key_after_provider_error_indexes_and_projects_the_note(self) -> None:
         source_id = "src_retry_same_key"
@@ -188,6 +192,47 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), 2)
         self.assertEqual(self._operation_state(), ("retryable_failed", "retain_failed"))
 
+    def test_same_key_retries_wait_before_the_provider_is_asked_again(self) -> None:
+        source_id = "src_retry_backoff"
+        original = b"note refused while the provider is down"
+        key = "retain-retry-backoff"
+        start = self.clock[0]
+        self.client.error = RuntimeError("provider down")
+
+        def retry() -> str | None:
+            try:
+                asyncio.run(self.app.retain(
+                    source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+                ))
+            except ApplicationError as exc:
+                return exc.code
+            return None
+
+        self.assertEqual(retry(), "retain_failed")
+        self.client.document_metadata.clear()  # the provider never held the refused note
+        for _ in range(10):
+            self.clock[0] += 5
+            self.assertEqual(retry(), "retain_failed")
+        self.assertEqual(len(self.client.retain_calls), 1)
+        # A restart within the delay does not ask the provider either.
+        self.app.close()
+        self.app = self._open()
+        asyncio.run(self.app.recover_startup())
+        self.assertEqual(len(self.client.retain_calls), 1)
+
+        # Past the delay the next retry asks again; refused again, the next delay is 5 minutes.
+        self.clock[0] = start + 60
+        self.assertEqual(retry(), "retain_failed")
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.clock[0] += 299
+        self.assertEqual(retry(), "retain_failed")
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.client.error = None
+        self.clock[0] += 1
+        self.assertIsNone(retry())
+        self.assertEqual(len(self.client.retain_calls), 3)
+        self.assertEqual(self._operation_state(), ("completed", None))
+
     def test_retry_never_indexes_an_older_version_over_a_newer_one(self) -> None:
         source_id = "src_retry_older_version"
         key = "retain-retry-old-version-key"
@@ -221,6 +266,7 @@ class RetainRetryTests(unittest.TestCase):
         # The provider kept what it had: the refused version never reached it.
         self.client.document_metadata = held
         self.client.error = None
+        self.clock[0] += 61  # past the first retry delay
 
     def _edited_note(self, source_id: str) -> None:
         asyncio.run(self.app.retain(
@@ -401,7 +447,7 @@ class RetainRetryTests(unittest.TestCase):
         inbox.mkdir(parents=True)
         note = inbox / "Lake.md"
         source_id = "obsidian_" + digest(b"Lake.md")
-        clock = [1_000_000.0]
+        clock = self.clock
 
         def scan() -> dict:
             return run_once(inbox, self.paths, InProcessCaptureApi(self.app), now=lambda: clock[0])
@@ -417,6 +463,11 @@ class RetainRetryTests(unittest.TestCase):
             self.client.document_metadata = held
             self.client.error = None
             clock[0] += 30
+            # Within the first retry delay the pending note is not sent again.
+            calls = len(self.client.retain_calls)
+            self.assertEqual(scan()["pending"], 1)
+            self.assertEqual(len(self.client.retain_calls), calls)
+            clock[0] += 31
 
             report = scan()
 

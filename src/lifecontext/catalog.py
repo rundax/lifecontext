@@ -171,7 +171,7 @@ _OPERATION_ERROR_CODES = {
     "unsafe_permissions", "vault_unavailable", "internal_error",
 }
 _OPERATION_RESULT_FIELDS = {
-    "sources", "item_count", "size_bytes", "error_code", "recovery_intent"
+    "sources", "item_count", "size_bytes", "error_code", "recovery_intent", "attempts", "next_try_at"
 }
 _MAX_OPERATION_RESULT_BYTES = 4_194_304
 _RELATIONSHIP_REVIEW_CODES = {
@@ -818,6 +818,13 @@ def _validate_operation_result(value: Any) -> str:
         ):
             raise CatalogError("invalid operation result")
         result["size_bytes"] = size_bytes
+    # Retry backoff: refused provider attempts so far, and the epoch second of the next allowed one.
+    for field in ("attempts", "next_try_at"):
+        if field in value:
+            number = value[field]
+            if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number <= 2**53:
+                raise CatalogError("invalid operation result")
+            result[field] = number
     if "error_code" in value:
         error_code = value["error_code"]
         if not isinstance(error_code, str) or error_code not in _OPERATION_ERROR_CODES:

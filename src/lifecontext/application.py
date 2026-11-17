@@ -72,6 +72,9 @@ _READINESS_CAPABILITIES = (
     "attributed_reflect",
 )
 _RETRYABLE_OPERATION_ERRORS = {"provider_unavailable", "retain_failed"}
+# How long a refused journal retain or curation waits before the provider is asked again: 1 min, 5 min,
+# 30 min, 2 h, then every 6 h. Capture repeats a pending note every 30 s.
+_RETRY_DELAYS_SECONDS = (60, 300, 1800, 7200, 21600)
 _CURATION_CONFIRMATION_TTL_SECONDS = 600
 _MAX_LISTED_REVIEWS = 50
 _MAX_LISTED_UNINDEXED = 20
@@ -100,6 +103,9 @@ class DurableResult(dict[str, Any]):
 
 class JournalApplication:
     """Coordinate the V1-owned stores without merging their authority."""
+
+    # Seconds since the epoch; tests replace it to move past a retry delay.
+    _clock = staticmethod(lambda: datetime.now(UTC).timestamp())
 
     def __init__(
         self,
@@ -768,6 +774,7 @@ class JournalApplication:
                     provider_state is not None
                     and provider_state["submission_state"] == "failed"
                     and not self._newer_version_exists(source_id, source_version)
+                    and not self._retry_waiting(current)
                 )
             except (ApplicationError, CatalogError):
                 return False
@@ -1042,6 +1049,7 @@ class JournalApplication:
                         or provider_state is None
                         or provider_state["submission_state"] != "failed"
                         or self._newer_version_exists(source_id, target_version)
+                        or self._retry_waiting(operation)
                     ):
                         return False
                 except (ApplicationError, CatalogError):
@@ -1445,7 +1453,7 @@ class JournalApplication:
             return
         result = {
             key: operation["result"][key]
-            for key in ("sources", "size_bytes", "recovery_intent")
+            for key in ("sources", "size_bytes", "recovery_intent", "attempts", "next_try_at")
             if key in operation["result"]
         }
         result["error_code"] = code
@@ -2104,6 +2112,8 @@ class JournalApplication:
             if self._newer_version_exists(source_id, source_version):
                 # The engine keeps one document per source; never index an older version over it.
                 raise ApplicationError("source_conflict")
+            if self._retry_waiting(operation):
+                raise ApplicationError(operation["error_code"] or "retain_failed")
         else:
             try:
                 operation = self.catalog.set_operation_intent(
@@ -2257,6 +2267,8 @@ class JournalApplication:
         # A correction or reindex only resubmits custody, so after a retryable failure the same request runs again.
         retrying = operation["state"] == "retryable_failed" and action in {"correct", "reindex"}
         if operation["state"] in {"retryable_failed", "permanent_failed"} and not retrying:
+            raise ApplicationError(operation["error_code"] or "retain_failed")
+        if retrying and self._retry_waiting(operation):
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if operation["state"] == "running":
             # An earlier process may have crossed an external write boundary.
@@ -3157,6 +3169,16 @@ class JournalApplication:
         if "size_bytes" not in stored_result and "size_bytes" in current["result"]:
             stored_result["size_bytes"] = current["result"]["size_bytes"]
         stored_result["error_code"] = code
+        if (
+            state == "retryable_failed"
+            and code in _RETRYABLE_OPERATION_ERRORS
+            and current["operation_kind"] in {"retain", "curation"}
+        ):
+            # The provider refused: same-key retries and recovery wait until next_try_at.
+            attempts = current["result"].get("attempts", 0) + 1
+            delay = _RETRY_DELAYS_SECONDS[min(attempts, len(_RETRY_DELAYS_SECONDS)) - 1]
+            stored_result["attempts"] = attempts
+            stored_result["next_try_at"] = int(self._clock()) + delay
         self._transition_operation(
             operation_id,
             expected_state,
@@ -3164,6 +3186,10 @@ class JournalApplication:
             result=stored_result,
             error_code=code,
         )
+
+    def _retry_waiting(self, operation: Mapping[str, Any]) -> bool:
+        """True while a refused operation's backoff has not passed; the provider is not asked yet."""
+        return self._clock() < operation["result"].get("next_try_at", 0)
 
     @staticmethod
     def _retain_error_code(error: Exception) -> str:
