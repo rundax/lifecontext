@@ -100,7 +100,10 @@ maintain it:
   and what state may already have changed. Do not try variations, another path
   or another instance; put any suspected cause in the report, never apply it.
 - Retry only where a reference names one specific transient error: same
-  idempotency key and bytes, once.
+  idempotency key and bytes, once. A failure carries `retryable`, the sentence
+  `message` and the `next_step` (`--json`; over MCP the error text reads `code:
+  message Next: step`); repairs there are worded as the owner's to make, so
+  report them. A timed-out write or `recall` is never `retryable`.
 - Run `recall` and `reflect` one at a time with a tool timeout of at least
   300 seconds, never in parallel, and never resend one that is still running or
   timed out; report it instead.
@@ -215,8 +218,11 @@ seconds to clients that asked for progress. Clients decide how long they wait:
 
 When a client gives up, the request is not cancelled: it runs to the end on
 your machine, and until then another call of the same kind answers `busy`.
-Check an import with `documents_list` or `document_show` instead of importing
-again. Closing the app also waits for a call in flight: the server exits once
+While an import extracts text (OCR on a scanned PDF takes minutes) the service
+can leave even a read unanswered: after 30 seconds the tool fails with
+`api_unavailable` and says the service may be busy with an import. Do not poll
+during an import; wait a few minutes, then check it with `documents_list` or
+`document_show` instead of importing again. Closing the app also waits for a call in flight: the server exits once
 that request has finished.
 
 The same [trust model](#operator-boundaries) applies as for the CLI: what the
