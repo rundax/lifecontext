@@ -92,7 +92,10 @@ To pass options through `curl | sh`, use `sh -s --`, for example
 
    Then the model ID (with Anthropic it suggests `claude-sonnet-5`; for the
    others, type the ID from your provider's model list), the base URL for
-   choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`),
+   choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`; the
+   installer checks the URL against LifeContext's own rules as you type it and asks
+   again if it is refused, and for plain HTTP on a host that is not on this machine or
+   a private network it asks whether to send the key and your text unencrypted anyway),
    the API key with a hidden prompt (a server on this machine needs none), the
    vault folder, and whether to turn notes you put in `Journal/Inbox` into
    journal entries automatically (the default is No; to turn it on later run
@@ -159,6 +162,7 @@ guesses a provider or a model: both must be set, or it stops with
 | `LIFECONTEXT_VAULT` | Vault folder (default `~/LifeContext/vault`) |
 | `LIFECONTEXT_TIMEZONE` | IANA time zone (default: the system's) |
 | `LIFECONTEXT_API_KEY_FILE` | A file whose single line is the provider key |
+| `LIFECONTEXT_ALLOW_INSECURE_HTTP` | `1` to accept a plain-http `LIFECONTEXT_BASE_URL` on a host that is not on this machine or a private network (`init --allow-insecure-http`); [details](#a-model-server-on-the-host) |
 | `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default, also at the terminal question |
 | `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
@@ -286,6 +290,39 @@ Without Compose, pass the same: a read-only key file at
 `LIFECONTEXT_*` variables, and volumes for `/data/home` and `/data/vault`. The
 variable `LIFECONTEXT_API_KEY` also works but is less private: anyone who can
 run `docker inspect` sees it.
+
+### A model server on the host
+
+Inside the container `127.0.0.1` is the container itself, so a model server
+(Ollama, vLLM, LM Studio) running on the host is reached through the name
+`host.docker.internal`, which LifeContext accepts over plain HTTP without a flag:
+
+```bash
+LIFECONTEXT_PROVIDER=openai_compatible
+LIFECONTEXT_MODEL=llama3.3
+LIFECONTEXT_BASE_URL=http://host.docker.internal:11434/v1
+```
+
+Docker Desktop (macOS, Windows) defines that name. On Linux add it yourself,
+with `--add-host=host.docker.internal:host-gateway` on `docker run`, or in
+`compose.yaml` under the service:
+
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+The server must listen on an address the container can reach, not only on the
+host's loopback: for Ollama set `OLLAMA_HOST=0.0.0.0`, and keep the port closed
+to other machines with a firewall, because plain HTTP is not encrypted. A model
+server on another machine is reached by its private IP address (for example
+`http://192.168.1.20:11434/v1`), also without a flag. A name such as
+`models.lan`, or any public address, is refused over HTTP unless you run
+`lifecontext init --force --allow-insecure-http` (with `docker exec`); it saves
+`allow_insecure_http: true` in `config.yaml` for that URL. When a key is stored
+and the URL is HTTP, `init` and `llm set` say that the key and the text travel
+unencrypted. With install.sh, the same flag is `LIFECONTEXT_ALLOW_INSECURE_HTTP=1`
+for an unattended install, and a yes to the question the installer asks at a terminal.
 
 ### Volumes
 

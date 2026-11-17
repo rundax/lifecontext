@@ -113,7 +113,7 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
   check or a key that fails leaves `config.yaml` as it was.
 - Exit codes: 0 when set up (also when only the key is missing), 1 with
   `{"error": CODE}` under `--json`, 2 for a usage error.
-- A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
+- An `openai_compatible` endpoint needs no key (see [API key](#api-key)).
 - `--non-interactive` without a provider or a model stops with
   `provider_required` or `model_required`; four Claude models are refused for
   the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
@@ -183,6 +183,7 @@ llm:
   model: <exact model ID>
   base_url: <provider API base URL>
   reasoning_effort: high  # optional: low, medium, high, or xhigh
+  allow_insecure_http: true  # optional, default false: see the URL rules below
 ```
 
 `provider` and `model` are required. `base_url` is required for
@@ -223,9 +224,18 @@ provider-specific key lookup. It rejects unknown provider IDs, unknown fields in
 `hindsight.llm_provider`/`llm_model`/`llm_base_url` fields, invalid URLs, and
 credentials in YAML.
 
-Remote URLs must use HTTPS. HTTP is allowed only for loopback (`localhost`,
-`127.0.0.0/8`, or `::1`). URLs cannot contain credentials, query strings, or
-fragments. Never put a key in `base_url`.
+Remote URLs must use HTTPS. Plain HTTP is accepted without a flag only for
+loopback (`localhost`, `127.0.0.0/8`, `::1`), for IP addresses written out in
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale and
+carrier-grade NAT) or `fc00::/7`, and for the name `host.docker.internal`. A
+name is never looked up, so a name other than those two (`models.lan`) is
+refused over HTTP, and so are `169.254.0.0/16`, `fe80::/10`, `0.0.0.0` and `::`.
+Any other HTTP host needs `allow_insecure_http: true`, which `lifecontext init
+--allow-insecure-http` and `lifecontext llm set --allow-insecure-http` write. The
+flag stays only while the `base_url` it was given for stays. Over HTTP the key
+and the text of your documents and notes travel unencrypted on the network: init
+and `llm set` print that when a key is stored. URLs cannot contain credentials,
+query strings, or fragments. Never put a key in `base_url`.
 
 ## API key
 
@@ -239,9 +249,8 @@ LIFEWEAVE_LLM_API_KEY=<your provider API key>
 `.env` holds at most two keys: `LIFEWEAVE_LLM_API_KEY` for the `llm` provider
 and, optionally, `LIFEWEAVE_VISION_API_KEY` for the vision model (see below).
 LifeContext requires a non-empty LLM key for every provider except
-`openai_compatible` with a loopback `base_url` (`localhost`, `127.0.0.0/8` or
-`::1`): a local Ollama, llama.cpp or vLLM server needs none, `.env` may then be
-absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
+`openai_compatible`: an Ollama, llama.cpp or vLLM server usually needs none,
+`.env` may then be absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
 used when present. It does not read provider-specific variables
 (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HINDSIGHT_LLM_API_KEY`), Hermes
 credentials, or ambient shell variables. The key file must be owned by the
