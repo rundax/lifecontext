@@ -362,6 +362,64 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), calls)
         self.assertNotIn("PRIVATE second version", [call[1] for call in self.client.retain_calls[calls:]])
 
+    def _edit_entry(self, source_id: str, version: int) -> Path:
+        path = self.journal / self.app.catalog.get_projection_state(source_id, version)["projection_path"]
+        path.write_text(path.read_text(encoding="utf-8") + "\nAdded in Obsidian before indexing.\n",
+                        encoding="utf-8")
+        return path
+
+    def _assert_indexed_and_edit_kept(self, source_id: str, version: int, path: Path) -> None:
+        self.assertEqual(
+            self.app.catalog.get_provider_state(source_id, version)["submission_state"], "submitted"
+        )
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, version)["state"], "conflict")
+        self.assertIn("Added in Obsidian before indexing.", path.read_text(encoding="utf-8"))
+        facts = self.app.catalog.list_reconciliation_facts(source_id, version)
+        self.assertIn("stale_projection", [fact["fact"] for fact in facts])
+        status = self.app.readiness()
+        self.assertGreaterEqual(status["reconciliation"]["facts"]["stale_projection"], 1)
+        self.assertEqual(status["indexing_pending"]["count"], 0)
+
+    def test_an_entry_edited_before_a_retry_indexed_it_completes_and_keeps_the_edit(self) -> None:
+        source_id = "src_retry_edited_entry"
+        original = b"note the owner edited in the vault"
+        key = "retain-retry-edited-entry"
+        self._fail_once(source_id, original, key)
+        path = self._edit_entry(source_id, 1)
+
+        result = asyncio.run(self.app.retain(
+            source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+        ))
+
+        self.assertEqual(result["submission_state"], "submitted")
+        self.assertEqual(self._operation_state(), ("completed", None))
+        self._assert_indexed_and_edit_kept(source_id, 1, path)
+
+    def test_a_correction_edited_before_its_retry_completes_and_keeps_the_edit(self) -> None:
+        source_id = "src_retry_edited_correction"
+        key = "retain-retry-edited-correction"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "second version, edited in the vault", key)
+        path = self._edit_entry(source_id, 2)
+
+        result = self._correct(source_id, "second version, edited in the vault", key)
+
+        self.assertEqual(result["state"], "completed")
+        self._assert_indexed_and_edit_kept(source_id, 2, path)
+
+    def test_an_entry_edited_before_startup_recovery_indexed_it_completes(self) -> None:
+        source_id = "src_retry_edited_recovered"
+        self._fail_once(source_id, b"note recovered after an edit", "retain-retry-edited-recovered")
+        path = self._edit_entry(source_id, 1)
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual(report["completed"], 1)
+        self.assertEqual(self._operation_state(), ("completed", None))
+        self._assert_indexed_and_edit_kept(source_id, 1, path)
+
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
 

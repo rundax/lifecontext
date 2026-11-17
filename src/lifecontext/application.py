@@ -785,7 +785,7 @@ class JournalApplication:
                     submitted = await self._submit_retained_manifest(
                         manifest, evidence.original_bytes
                     )
-                    self.project(source_id, source_version)
+                    self._project_indexed(source_id, source_version)
                 except Exception as exc:
                     code = self._retain_error_code(exc)
                     self._fail_operation(
@@ -2152,7 +2152,7 @@ class JournalApplication:
         operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
-            self.project(source_id, source_version)
+            self._project_indexed(source_id, source_version)
         except Exception as exc:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
@@ -2343,7 +2343,7 @@ class JournalApplication:
                 self._project_unindexed(source_id, target_version)
                 submission_content = content_bytes
                 await self._submit_curation_source(manifest, submission_content)
-                self.project(source_id, target_version)
+                self._project_indexed(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
                 )
@@ -3444,6 +3444,15 @@ class JournalApplication:
         """Render and project one exact local source version through ManagedVault."""
         with self.vault.writer_transaction():
             return self._project_journal_locked(source_id, source_version)
+
+    def _project_indexed(self, source_id: str, source_version: int) -> None:
+        """Project a version the provider has indexed; an entry edited meanwhile is a review item, not a failure."""
+        try:
+            self.project(source_id, source_version)
+        except ApplicationError as exc:
+            # The edit stays in the vault, recorded as a projection conflict for status, doctor and reconcile.
+            if exc.code != "conflict":
+                raise
 
     def _project_unindexed(self, source_id: str, source_version: int) -> None:
         """Show an entry in the vault before or without indexing; a vault failure never stops indexing."""
