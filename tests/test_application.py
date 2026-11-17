@@ -320,18 +320,18 @@ class JournalApplicationTests(unittest.TestCase):
         self.assertEqual(frontmatter["title"], content)
         self.assertEqual(frontmatter["aliases"], [f"{source_id}-v1"])
 
-    def test_retain_fails_durably_when_projection_fails(self) -> None:
+    def test_retain_completes_when_projection_fails_and_leaves_the_entry_to_reconcile(self) -> None:
         source_id = "src_proj_fail"
         original = b"content where projection fails"
         provenance = {"source": "test"}
         key = "proj-fail-key"
 
         with patch.object(self.app.vault, "safe_write_text", side_effect=VaultError("unsafe_permissions")):
-            with self.assertRaises(ApplicationError) as caught:
-                asyncio.run(
-                    self.app.retain(source_id, 1, original, provenance=provenance, idempotency_key=key)
-                )
-            self.assertEqual(caught.exception.code, "unsafe_permissions")
+            result = asyncio.run(
+                self.app.retain(source_id, 1, original, provenance=provenance, idempotency_key=key)
+            )
+        # Indexed: a vault failure never fails the operation, so its key never answers a vault error.
+        self.assertEqual(result["submission_state"], "submitted")
 
         with sqlite3.connect(self.paths.catalog_path) as connection:
             row = connection.execute(
@@ -339,8 +339,12 @@ class JournalApplicationTests(unittest.TestCase):
                 (hashlib.sha256(key.encode()).hexdigest(),),
             ).fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(row[1], "permanent_failed")
-        self.assertEqual(row[2], "unsafe_permissions")
+        self.assertEqual((row[1], row[2]), ("completed", None))
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "failed")
+        self.app.reconcile_projections()
+        projection = self.app.catalog.get_projection_state(source_id, 1)
+        self.assertEqual(projection["state"], "projected")
+        self.assertTrue((self.journal / projection["projection_path"]).is_file())
 
     def test_startup_reconciles_running_retain_only_from_exact_provider_metadata(self) -> None:
         source_id = "src_recovery_exact"

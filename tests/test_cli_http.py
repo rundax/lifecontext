@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -63,6 +64,7 @@ class ControlledClient:
         self.documents = ControlledDocuments()
         self.memory = ControlledMemory()
         self.retain_calls: list[tuple[str, str]] = []
+        self.error: Exception | None = None
         self.recall_response: dict[str, object] = {"results": []}
         self.reflect_response: dict[str, object] = {"text": "", "based_on": {"memories": []}}
 
@@ -72,6 +74,8 @@ class ControlledClient:
         tags: list[str] | None = None,
     ) -> SimpleNamespace:
         self.retain_calls.append((document_id, content))
+        if self.error is not None:
+            raise self.error
         self.documents.items[document_id] = {
             "id": document_id,
             "bank_id": bank_id,
@@ -208,6 +212,50 @@ class CliHTTPTests(unittest.TestCase):
         else:
             assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
         return json.loads(result.stdout.decode("utf-8"))
+
+    def test_capture_completes_a_note_the_provider_refused_once(self) -> None:
+        from lifecontext import cli
+        from lifecontext.capture import SETTLE_SECONDS, run_once
+
+        inbox = self.journal / "Inbox"
+        inbox.mkdir(mode=0o700)
+        (inbox / "Lake.md").write_text("# Walk by the lake\n\nThe water was calm.\n", encoding="utf-8")
+        clock = [1_000_000.0]
+        args = cli._build_parser().parse_args(["capture", "--once", "--port", str(self.port)])
+
+        def scan() -> dict:
+            # The real route, Idempotency-Key header and operation-status GET, through capture's client.
+            return run_once(inbox, self.paths, cli._CaptureApi(args), now=lambda: clock[0])
+
+        def unindexed() -> dict:
+            return cli._http_request(args, "GET", "/v1/status")[0]["indexing_pending"]
+
+        scan()
+        clock[0] += SETTLE_SECONDS + 1
+        self.client.error = RuntimeError("rate limited")
+        self.assertEqual(scan()["pending"], 1)
+        self.assertEqual(len(self.client.retain_calls), 1)
+        self.client.error = None
+        self.assertEqual(unindexed()["count"], 1)
+        entry = self.vault_root / unindexed()["entries"][0]
+        self.assertTrue(entry.is_file())
+        clock[0] += 30
+        self.assertEqual(scan()["pending"], 1)  # within the retry delay: not sent again
+        self.assertEqual(len(self.client.retain_calls), 1)
+        clock[0] += 31
+        with sqlite3.connect(self.paths.catalog_path) as connection:  # a minute has passed for the API too
+            connection.execute("UPDATE operations SET created_at = datetime(created_at, '-61 seconds'), "
+                               "updated_at = datetime(updated_at, '-61 seconds')")
+
+        report = scan()
+
+        self.assertEqual((report["captured"], report["pending"], report["failed"]), (1, 0, 0))
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self.client.retain_calls[-1][1], "# Walk by the lake\n\nThe water was calm.\n")
+        self.assertEqual(unindexed(), {"count": 0, "entries": []})
+        self.assertTrue(entry.is_file())
+        self.assertEqual(scan()["captured"], 0)
+        self.assertEqual(len(self.client.retain_calls), 2)
 
     def test_documents_categories_and_wiki_use_authenticated_http(self) -> None:
         source = self.base / "résumé.txt"

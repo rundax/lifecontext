@@ -256,6 +256,10 @@ def _service_report(fetch: Callable[[str], dict]) -> dict[str, Any]:
     reconciliation = status.get("reconciliation")
     if isinstance(reconciliation, dict):
         report["reconciliation_facts"] = reconciliation.get("fact_count")
+    pending = status.get("indexing_pending")
+    if isinstance(pending, dict):
+        # The count only: entry names come from journal content; ``lifecontext status`` lists them.
+        report["indexing_pending"] = pending.get("count")
     try:
         lint = fetch("/v1/wiki/lint")
         report["lint"] = {**dict(lint.get("counts") or {}), "omitted": lint.get("omitted")}
@@ -499,6 +503,9 @@ def render(report: Mapping[str, Any]) -> str:
     if refused.get("skipped"):
         lines.append("Vault folders not scanned (another device): " + ", ".join(refused["skipped"]))
     lines.append(_render_engine(report.get("engine") or {}))
+    if service.get("indexing_pending"):
+        lines.append(f"Journal entries waiting for indexing: {service['indexing_pending']} "
+                     "(`lifecontext status` lists them)")
     if "lint" in service:
         lint = service["lint"]
         lines.append(f"Wiki lint: {lint.get('error')} errors, {lint.get('warning')} warnings, {lint.get('info')} info")

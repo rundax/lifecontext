@@ -290,11 +290,17 @@ class ReconciliationSummary(APIModel):
     facts: dict[Literal["missing_original", "corrupt_original", "stale_projection"], int]
 
 
+class IndexingPending(APIModel):
+    count: int = Field(ge=0)
+    entries: list[str] = Field(max_length=20)
+
+
 class StatusResponse(APIModel):
     ready: bool
     max_file_bytes: int = Field(ge=1, le=LIMIT_CEILINGS["max_file_bytes"])
     dependencies: ReadinessDependencies
     reconciliation: ReconciliationSummary
+    indexing_pending: IndexingPending | None = None
 
 
 class SourceVersionSummary(APIModel):

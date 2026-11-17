@@ -215,7 +215,12 @@ def build_server(port: int = cli.DEFAULT_PORT, *, allow_writes: bool = False,
         "start, restart or repair anything. Fast, no model call."
     ))
     def status() -> dict[str, Any]:
-        return call(command="status")
+        value = call(command="status")
+        pending = value.get("indexing_pending")
+        if isinstance(pending, dict):
+            # Entry paths carry note titles; an agent gets the count, `lifecontext status` the paths.
+            value["indexing_pending"] = {"count": pending.get("count")}
+        return value
 
     @server.tool(annotations=_READ, description=(
         "Search the owner's journal and documents. Returns ranked passages, each cited to the "
