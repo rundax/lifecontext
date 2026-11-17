@@ -65,17 +65,24 @@ def _operation_counts(catalog: Path) -> dict[str, int] | None:
         connection = sqlite3.connect(f"{catalog.as_uri()}?mode=ro", uri=True, timeout=5)
         try:
             try:
-                # A failure is not counted once a later operation on the same source completed.
+                # A failed document import, retry or rebuild is not counted once a later one
+                # completed for the same source at the same or a newer version. Other kinds
+                # (a category decision, a review) never hide it. rowid is the order.
                 rows = connection.execute(
                     """SELECT state, COUNT(*) FROM operations o
                        WHERE NOT (state IN ('retryable_failed', 'permanent_failed')
-                         AND json_extract(result_json, '$.recovery_intent.source_id') IS NOT NULL
-                         AND EXISTS (SELECT 1 FROM operations n WHERE n.state = 'completed' AND n.rowid > o.rowid
-                           AND json_extract(n.result_json, '$.recovery_intent.source_id')
-                             = json_extract(o.result_json, '$.recovery_intent.source_id')))
+                         AND operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')
+                         AND EXISTS (
+                           SELECT 1 FROM json_each(o.result_json, '$.sources') failed
+                           WHERE EXISTS (
+                             SELECT 1 FROM operations n, json_each(n.result_json, '$.sources') done
+                             WHERE n.state = 'completed' AND n.rowid > o.rowid
+                               AND n.operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')
+                               AND json_extract(done.value, '$.source_id') = json_extract(failed.value, '$.source_id')
+                               AND json_extract(done.value, '$.source_version') >= json_extract(failed.value, '$.source_version'))))
                        GROUP BY state"""
                 ).fetchall()
-            except sqlite3.OperationalError:  # an old or partial catalog without the result column
+            except sqlite3.OperationalError:  # an old or partial catalog, or unreadable result JSON
                 rows = connection.execute("SELECT state, COUNT(*) FROM operations GROUP BY state").fetchall()
         finally:
             connection.close()

@@ -181,14 +181,37 @@ class DoctorTests(unittest.TestCase):
         with _temporary_home() as home:
             paths = _set_up(home)
             with sqlite3.connect(paths.catalog_path) as connection:
-                connection.execute("CREATE TABLE operations (operation_id TEXT, state TEXT, result_json TEXT)")
-                intent = lambda source: json.dumps({"recovery_intent": {"source_id": source}})
-                connection.executemany("INSERT INTO operations VALUES (?, ?, ?)", [
-                    ("a", "retryable_failed", intent("doc_1")), ("b", "completed", intent("doc_1")),
-                    ("c", "permanent_failed", intent("doc_2")), ("d", "retryable_failed", "{}"),
-                    ("e", "completed", intent("doc_3")), ("f", "retryable_failed", intent("doc_3"))])
+                connection.execute("CREATE TABLE operations (operation_id TEXT, operation_kind TEXT, state TEXT, result_json TEXT)")
+                def intent(source, version=1):
+                    return json.dumps({"sources": [{"source_id": source, "source_version": version}]})
+                connection.executemany("INSERT INTO operations VALUES (?, ?, ?, ?)", [
+                    ("a", "document_import", "retryable_failed", intent("doc_1")),
+                    ("b", "document_retry", "completed", intent("doc_1")),
+                    ("c", "document_import", "permanent_failed", intent("doc_2")),
+                    ("d", "document_import", "retryable_failed", "{}"),
+                    ("e", "document_import", "completed", intent("doc_3")),
+                    ("f", "document_retry", "retryable_failed", intent("doc_3")),
+                    # A completed category decision does not hide an indexing failure.
+                    ("g", "document_import", "retryable_failed", intent("doc_4")),
+                    ("h", "category_decision", "completed", intent("doc_4")),
+                    # An older version's success does not replace a newer version's failure.
+                    ("i", "document_import", "completed", intent("doc_5", 1)),
+                    ("j", "document_import", "retryable_failed", intent("doc_5", 2)),
+                    # A later rebuild of a newer version does.
+                    ("k", "document_import", "retryable_failed", intent("doc_6", 1)),
+                    ("l", "wiki_rebuild", "completed", intent("doc_6", 2))])
             report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
-            self.assertEqual(report["operations"], {"pending": 0, "retryable_failed": 2, "permanent_failed": 1})
+            self.assertEqual(report["operations"], {"pending": 0, "retryable_failed": 4, "permanent_failed": 1})
+
+    def test_a_catalog_without_the_columns_to_match_counts_every_operation(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, state TEXT)")
+                connection.executemany("INSERT INTO operations VALUES (?, ?)", [
+                    ("a", "retryable_failed"), ("b", "completed"), ("c", "running"), ("d", "permanent_failed")])
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"], {"pending": 1, "retryable_failed": 1, "permanent_failed": 1})
 
     def test_engine_auth_port_owner_and_postgres_listen_are_reported_without_secrets(self) -> None:
         from lifecontext import hindsight
