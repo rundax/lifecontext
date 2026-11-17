@@ -836,7 +836,8 @@ resubmits up to five refused journal notes from custody and stops at the first
 one the provider refuses again. A deleted or forgotten note is never
 resubmitted. `lifecontext status --json` reports `indexing_pending`: how many
 current journal entries are not indexed yet (pending or failed) and up to 20 of
-their vault-relative paths; `doctor` shows the count. For a known provider
+their vault-relative paths; `doctor` and the MCP `status` tool show only the
+count. For a known provider
 failure you can also run `curate reindex <source-id> --expected-version <N>`
 with an explicit new idempotency key after repairing the route. For projection
 failure, use reconciliation after resolving permissions or reviewing the edit;

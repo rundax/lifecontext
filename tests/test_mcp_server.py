@@ -353,6 +353,17 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--import-dir", stderr.getvalue())
 
+    def test_status_gives_agents_the_unindexed_count_but_no_entry_paths(self) -> None:
+        status = {"ready": True, "indexing_pending": {
+            "count": 2, "entries": ["Journal/entries/2026-11-17 - Private lawyer call.md"]}}
+        self.api.routes[("GET", "/v1/status")] = (200, json.dumps(status).encode(), {})
+
+        result = self.call("status", {})
+
+        self.assertFalse(result.is_error, result.content)
+        self.assertEqual(result.structured_content, {"ready": True, "indexing_pending": {"count": 2}})
+        self.assertNotIn("Private lawyer call", json.dumps([item.text for item in result.content]))
+
     def test_api_errors_become_tool_errors_with_the_redacted_code(self) -> None:
         self.api.routes[("GET", "/v1/wiki/missing")] = (404, _typed_error("source_not_found"), {})
         self.api.routes[("GET", "/v1/status")] = (500, b"Traceback: /home/private/secret.md", {})
