@@ -268,19 +268,23 @@ fetch_release() {
 	say "Downloading LifeContext $version from github.com/$REPOSITORY"
 	mkdir -p "$tmp/release"
 	for name in SHA256SUMS SHA256SUMS.sigstore.json "lifecontext-$version-py3-none-any.whl" "requirements-$platform.txt"; do
-		download "$base/$name" "$tmp/release/$name" || download_failed "$base/$name" "$name"
+		download "$base/$name" "$tmp/release/$name" || download_failed "$name"
 	done
 	verify_assets "$tmp/release"
 }
 
-# download_failed URL NAME: a release that does not exist says so; anything else names the file.
+# download_failed NAME: the release does not exist when its SHA256SUMS (every release has one) is
+# a 404; for any other failure the file that failed is named.
 download_failed() {
-	status=$(curl -sSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o /dev/null -w '%{http_code}' -I "$1" \
-		2>/dev/null) || status=""
+	status=$(curl -sSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o /dev/null -w '%{http_code}' -I \
+		"$base/SHA256SUMS" 2>/dev/null) || status=""
 	if [ "$status" = 404 ]; then
 		die "release v$version not found; see https://github.com/$REPOSITORY/releases or pass --version"
 	fi
-	die "could not download $2 from github.com/$REPOSITORY (curl's error is above)"
+	if [ "$status" = 200 ]; then
+		die "release v$version exists but $1 could not be downloaded from github.com/$REPOSITORY (curl's error is above); it may not be built for this system"
+	fi
+	die "could not download $1 from github.com/$REPOSITORY (curl's error is above)"
 }
 
 # Stop a running service before its files change; start_service starts it again.

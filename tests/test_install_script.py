@@ -224,15 +224,18 @@ class InstallScriptTests(unittest.TestCase):
 class FetchReleaseTests(unittest.TestCase):
     """fetch_release with curl stubbed: a release that does not exist is named, with where to look."""
 
-    def run_fetch(self, head_status: str) -> subprocess.CompletedProcess[str]:
+    def run_fetch(self, head_status: str, failing: str = "SHA256SUMS") -> subprocess.CompletedProcess[str]:
         temp = tempfile.TemporaryDirectory(prefix="lifecontext-fetch-test.")
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         stubs = root / "stubs"
         stubs.mkdir()
-        # The download fails as curl -f does on an HTTP error; the HEAD request reports the status.
-        _stub(stubs / "curl", 'for argument in "$@"; do [ "$argument" = -I ] && { printf %s '
-              f'"{head_status}"; exit 0; }}; done\necho "curl: (22) The requested URL returned error" >&2\nexit 22\n')
+        # The download of `failing` fails as curl -f does on an HTTP error; a HEAD request reports the status of
+        # SHA256SUMS as `head_status` and 404 for anything else.
+        _stub(stubs / "curl", 'case "$*" in *" -I "*) case "$*" in *SHA256SUMS) printf %s '
+              f'"{head_status}" ;; *) printf 404 ;; esac; exit 0 ;; esac\n'
+              f'case "$*" in *"{failing}"*) echo "curl: (22) The requested URL returned error" >&2; exit 22 ;; esac\n'
+              'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n: > "$out"\n')
         harness = root / "harness.sh"
         harness.write_text(f'set -eu\nREPOSITORY="rundax/lifecontext"\nversion=9.9.9\nplatform=linux-x86_64\n'
                            f'tmp="{root}"\n' + _functions("say", "warn", "die", "download", "download_failed",
@@ -251,6 +254,13 @@ class FetchReleaseTests(unittest.TestCase):
         result = self.run_fetch("503")
         self.assertEqual(result.returncode, 1)
         self.assertIn("could not download SHA256SUMS from github.com/rundax/lifecontext", result.stderr)
+        self.assertNotIn("not found", result.stderr)
+
+    def test_a_release_whose_checksums_exist_but_whose_other_file_is_missing_names_that_file(self) -> None:
+        result = self.run_fetch("200", failing="requirements-linux-x86_64.txt")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("release v9.9.9 exists but requirements-linux-x86_64.txt could not be downloaded",
+                      result.stderr)
         self.assertNotIn("not found", result.stderr)
 
 
