@@ -604,6 +604,24 @@ class RetainRetryTests(unittest.TestCase):
         self.assertNotIn("note whose first write failed", "\n".join(logged.output))
         self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
 
+    def test_a_retry_over_a_damaged_custody_copy_is_refused_for_good(self) -> None:
+        source_id = "src_retry_damaged_custody"
+        original = b"note whose custody copy was damaged"
+        key = "retain-retry-damaged-custody"
+        self._fail_once(source_id, original, key)
+        damaged = self.app.custody.original_path(source_id, 1)
+        damaged.chmod(0o600)
+        damaged.write_bytes(b"tampered")
+
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.retain(
+                source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+            ))
+
+        self.assertEqual(caught.exception.code, "evidence_unavailable")
+        self.assertEqual(_error_details("evidence_unavailable")[1], False)
+        self.assertEqual(len(self.client.retain_calls), 1)
+
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
 

@@ -2175,7 +2175,11 @@ class JournalApplication:
             except CustodyConflict:
                 if not (_allow_existing or retrying):
                     raise
-                existing = self.custody.resolve_exact(source_id, source_version)
+                try:
+                    existing = self.custody.resolve_exact(source_id, source_version)
+                except CustodyError:
+                    # A damaged custody copy is never sent; a retry cannot repair it.
+                    raise ApplicationError("evidence_unavailable") from None
                 if (
                     existing.original_bytes != original_bytes
                     or existing.manifest.to_dict()["provenance"] != normalized_provenance
