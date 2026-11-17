@@ -292,7 +292,8 @@ class InstallOcrTests(unittest.TestCase):
     @unittest.skipIf(pty is None, "needs pseudo-terminals")
     def test_an_interactive_run_asks_before_using_sudo_with_a_password(self) -> None:
         # sudo -n fails (a password is needed); plain sudo "asks" and runs the command.
-        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n[ "$1" = -n ] && exit 1\nexec "$@"\n')
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n[ "$1" = -n ] && exit 1\n'
+              '[ "$1" = -k ] && exit 0\nexec "$@"\n')
         for answer, expected in (("", "ocr_state=ready"), ("n", "ocr_state=missing: sudo pacman")):
             with self.subTest(answer=answer):
                 self.calls.unlink(missing_ok=True)
@@ -327,8 +328,9 @@ class InstallOcrTests(unittest.TestCase):
                 self.assertIn(expected, text)
                 packages = "tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
                 self.assertEqual(self.logged(), ["sudo -n true"] + (
-                    [f"sudo pacman -S --needed --noconfirm {packages}", f"pacman -S --needed --noconfirm {packages}"]
-                    if answer == "" else []))
+                    # The ticket the password opened is dropped right after the install.
+                    [f"sudo pacman -S --needed --noconfirm {packages}", f"pacman -S --needed --noconfirm {packages}",
+                     "sudo -k"] if answer == "" else []))
 
     def logged(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []

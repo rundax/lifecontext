@@ -460,6 +460,8 @@ install_ocr() {
 				tesseract-data-ukr </dev/null || warn "pacman could not install Tesseract"
 		fi
 	fi
+	# Nothing later needs root: do not leave the password's sudo ticket open in this terminal.
+	[ "${sudo_asked:-0}" -ne 1 ] || sudo -k 2>/dev/null || true
 	if ocr_ready; then
 		say "Tesseract with eng, rus and ukr is installed"
 		ocr_state="ready"
