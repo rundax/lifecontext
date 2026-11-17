@@ -44,6 +44,13 @@ _EXTRACTION_STEPS = {
     "ocr_backend_not_configured": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
     "ocr_executable_unavailable": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
 }
+# What a person can do about a wiki stage that failed, by the reason it stored.
+_WIKI_STEPS = {
+    "wiki_provider_failed": "The model did not answer; check it with: lifecontext doctor, then run: lifecontext documents retry {source_id}",
+    "wiki_evidence_limit": "The document is too long to summarise in one pass; run: lifecontext documents retry {source_id}",
+    "wiki_update_rejected": "The page failed its checks; run: lifecontext documents retry {source_id}",
+    "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
+}
 
 
 def document_outcome(stages, operation_state=None):
@@ -75,7 +82,8 @@ def document_problems(source_id, stages, extractions):
         reason = code
         if name == "extraction" and extractions and extractions[-1].get("reason"):
             reason = extractions[-1]["reason"]
-        next_step = _EXTRACTION_STEPS.get(reason, retry) if name == "extraction" else retry
+        steps = {"extraction": _EXTRACTION_STEPS, "wiki": _WIKI_STEPS}.get(name, {})
+        next_step = steps.get(reason, retry)
         if stage["state"] == "conflict":
             next_step = "The vault copy was edited; resolve the conflict, then " + retry[0].lower() + retry[1:]
         problems.append({"stage": name, "code": code, "reason": reason,
@@ -927,6 +935,8 @@ class DocumentService:
         last = self.catalog.latest_document_operation(source_id, source_version)
         page_id = source_page_id(source_id)
         page = self.catalog.get_wiki_page(page_id)
+        receipts = [row for row in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id)
+                    if row["state"] == "projected"]
         return {
             **metadata,
             "accepted": stages["custody"]["state"] == "accepted",
@@ -938,6 +948,8 @@ class DocumentService:
             "outcome": document_outcome(stages, last["state"] if last else None),
             "problems": document_problems(source_id, stages, extractions),
             "wiki_page_id": page_id if page and page["current_revision"] else None,
+            # Vault-relative path of the page's newest projected note.
+            "vault_path": receipts[-1]["projection_path"] if receipts else None,
         }
 
     def _coverage(self, source_id, source_version, extractions):

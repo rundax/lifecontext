@@ -264,6 +264,7 @@ class DocumentResponse(APIModel):
     last_operation_id: Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"[A-Za-z0-9_-]+")] | None = None
     extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
     wiki_page_id: SourceId | None = None
+    vault_path: str | None = Field(default=None, min_length=1, max_length=1024)
 
     @field_validator("filename")
     @classmethod

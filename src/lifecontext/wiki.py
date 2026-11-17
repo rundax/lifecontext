@@ -1645,7 +1645,7 @@ class WikiService:
         _integer(version)
         old = self.catalog.get_document_stage(source_id, version, "wiki")
         if old and old["state"] == "running":
-            self._stage(source_id, version, "failed", "reflect_failed")
+            self._stage(source_id, version, "failed", "wiki_interrupted")
         if old and old["state"] == "completed":
             self._stage(source_id, version, "pending")
         self._stage(source_id, version, "running")
@@ -1702,7 +1702,10 @@ class WikiService:
         except Exception as exc:  # noqa: BLE001 -- provider failures must leave retryable stage
             reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
             logging.getLogger(__name__).warning("Wiki update rejected at evidence window %s: %s", window_count, reason)
-            self._stage(source_id, version, "failed", "reflect_failed")
+            # The reason is kept in the stage's error code, so documents show and doctor can name it.
+            code = ("wiki_evidence_limit" if reason == "wiki evidence window limit" else "wiki_update_rejected"
+                    if isinstance(exc, WikiError) else "wiki_provider_failed")
+            self._stage(source_id, version, "failed", code)
             raise WikiError("wiki update failed; retry available") from None
         finally:
             _READS.reset(reads)

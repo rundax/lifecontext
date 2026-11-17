@@ -10,6 +10,7 @@ from lifecontext.custody import LifeContextCustody
 from lifecontext.derived import DerivedStore
 from lifecontext.documents import DocumentService
 from lifecontext.paths import LifeContextPaths
+from lifecontext.wiki import source_page_id
 from test_documents import FakeProvider
 
 
@@ -51,6 +52,31 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.problems[0].stage, "wiki")
         self.assertEqual(response.last_operation_id, result["operation_id"])
         self.assertIsNone(response.wiki_page_id)
+
+    async def test_a_failed_wiki_stage_names_its_stored_reason_in_the_next_step(self):
+        def wiki(document):
+            stage = document["stages"]["wiki"]
+            self.catalog.transition_document_stage(
+                document["source_id"], document["source_version"], "wiki", expected_state="running",
+                expected_revision=stage["revision"], state="failed", error_code="wiki_provider_failed")
+            raise RuntimeError("model down")
+
+        self.service.wiki_hook = wiki
+        result = await self.ingest()
+        problem = result["document"]["problems"][0]
+        self.assertEqual((problem["stage"], problem["code"]), ("wiki", "wiki_provider_failed"))
+        self.assertIn("lifecontext documents retry " + result["document"]["source_id"], problem["next_step"])
+        self.assertIn("doctor", problem["next_step"])
+
+    async def test_a_projected_page_names_its_vault_path(self):
+        result = await self.ingest()
+        sid = result["document"]["source_id"]
+        self.assertIsNone(result["document"]["vault_path"])
+        digest = "a" * 64
+        self.catalog.set_artifact_projection(
+            "wiki", source_page_id(sid), 1, projection_path="Wiki/Sample.md",
+            desired_hash=digest, state="projected", last_projected_hash=digest)
+        self.assertEqual(self.service.show(sid, 1)["vault_path"], "Wiki/Sample.md")
 
     async def test_a_clean_import_is_completed_without_problems(self):
         self.service.wiki_hook = lambda document: {"state": "completed"}

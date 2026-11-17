@@ -169,6 +169,8 @@ _OPERATION_ERROR_CODES = {
     "result_limit_exceeded", "operation_status_unavailable", "curation_unavailable",
     "transfer_unavailable", "conflict", "relationship_unavailable", "unsafe_path",
     "unsafe_permissions", "vault_unavailable", "internal_error",
+    # Why a document's wiki stage failed; stored in the stage's error code.
+    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_interrupted",
 }
 _OPERATION_RESULT_FIELDS = {
     "sources", "item_count", "size_bytes", "error_code", "recovery_intent"

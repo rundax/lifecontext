@@ -268,7 +268,8 @@ class WikiTests(unittest.TestCase):
         with self.assertRaises(WikiError):
             self.update()
         self.assertEqual(self.catalog.get_wiki_page(PAGE)["current_revision"], 1)
-        self.assertEqual(self.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "failed")
+        stage = self.catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_update_rejected"))
         self.citation["quote"] = "The sky is blue."
         self.update()
         self.assertEqual(self.catalog.get_wiki_page(PAGE)["current_revision"], 2)

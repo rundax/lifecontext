@@ -699,6 +699,7 @@ def _document(value: dict[str, Any]) -> DocumentResponse:
             "last_operation_id": value.get("last_operation_id"),
             "extraction_reason": value["extractions"][-1].get("reason") if value.get("extractions") else None,
             "wiki_page_id": value.get("wiki_page_id"),
+            "vault_path": value.get("vault_path"),
         })
     except (KeyError, TypeError, ValidationError):
         raise ApplicationError("invalid_provider_response") from None
