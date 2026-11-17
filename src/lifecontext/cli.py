@@ -1330,6 +1330,25 @@ def _ask_secret(question: str) -> str:
     return getpass.getpass(question + ": ", stream=sys.stderr)
 
 
+def _hidden_key_stream(args: argparse.Namespace, not_asked: str, empty: str):
+    """The key typed at the hidden prompt, as the stream ``--api-key-stdin`` would give.
+
+    Never read from an echoed terminal: with ``--json`` or no terminal nothing is asked
+    (``not_asked`` is the error), and an empty answer, Ctrl-D or Ctrl-C is ``empty``.
+    """
+    import io
+
+    if args.as_json or not sys.stdin.isatty():
+        raise CLIError(not_asked)
+    try:
+        entered = _ask_secret("API key for this provider (input hidden)").strip()
+    except (EOFError, KeyboardInterrupt):
+        entered = ""
+    if not entered:
+        raise CLIError(empty)
+    return io.StringIO(entered + "\n")
+
+
 def _init(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     from lifecontext import initialize
 
@@ -1340,10 +1359,12 @@ def _init(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         interactive=not (args.non_interactive or args.api_key_stdin) and sys.stdin.isatty(),
     )
     try:
-        report = initialize.run_init(
-            options, ask=_ask, ask_secret=_ask_secret,
-            key_stream=sys.stdin.buffer if args.api_key_stdin else None,
-        )
+        key_stream = None
+        if args.api_key_stdin:
+            # At a terminal the key is asked for hidden, never read as echoed input.
+            key_stream = (_hidden_key_stream(args, "api_key_required", "invalid_api_key")
+                          if sys.stdin.isatty() else sys.stdin.buffer)
+        report = initialize.run_init(options, ask=_ask, ask_secret=_ask_secret, key_stream=key_stream)
     except initialize.InitError as exc:
         raise CLIError(exc.code, message=exc.message) from None
     except OSError:
@@ -1490,7 +1511,6 @@ def _capture(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
 
 
 def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
-    import io
     import platform
 
     from lifecontext import initialize, service
@@ -1511,15 +1531,8 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
             key_stream = sys.stdin.buffer
         elif args.api_key_stdin or bare:
             # At a terminal the key is asked for hidden, never read as echoed stdin; --json never asks.
-            if args.as_json or not sys.stdin.isatty():
-                raise CLIError("api_key_required" if args.api_key_stdin else "nothing_to_change")
-            try:
-                entered = _ask_secret("API key for this provider (input hidden)").strip()
-            except (EOFError, KeyboardInterrupt):
-                entered = ""
-            if not entered:
-                raise CLIError("nothing_to_change")
-            key_stream = io.StringIO(entered + "\n")
+            key_stream = _hidden_key_stream(args, "api_key_required" if args.api_key_stdin else "nothing_to_change",
+                                            "nothing_to_change")
         report = initialize.set_llm(
             initialize.InitOptions(provider=args.provider, model=args.model, base_url=args.base_url,
                                    api_key_stdin=key_stream is not None,
