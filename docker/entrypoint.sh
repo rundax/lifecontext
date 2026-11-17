@@ -107,7 +107,7 @@ wait_for_key() {
 		log "no model key is stored, and there is no key file at $key_file"
 	fi
 	log "put the key in the secret file (one line), or run"
-	log "  docker exec -it CONTAINER lifecontext llm set --api-key-stdin"
+	log "  docker exec -it CONTAINER lifecontext llm set"
 	log "waiting for the model key"
 	trap 'exit 0' TERM INT
 	until key_stored; do

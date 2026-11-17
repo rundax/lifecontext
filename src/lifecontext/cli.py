@@ -1493,11 +1493,24 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
         if args.llm_command == "show":
             report = initialize.show_llm()
             return report, initialize.render_llm(report), 0
-        key_stream = sys.stdin.buffer if args.api_key_stdin else None
-        if (args.provider is None and args.model is None and args.base_url is None and not args.api_key_stdin
-                and not os.environ.get(initialize.KEY_FILE_VARIABLE)):
-            # At a terminal the bare command asks for the key, hidden; elsewhere there is nothing to change.
-            entered = _ask_secret("API key for this provider (input hidden)").strip() if sys.stdin.isatty() else ""
+        key_stream = None
+        bare = (args.provider is None and args.model is None and args.base_url is None
+                and not os.environ.get(initialize.KEY_FILE_VARIABLE))
+        if bare and not args.api_key_stdin:
+            # Look at the setup before asking for anything.
+            if initialize.show_llm()["api_key"] == "not_required":
+                raise CLIError("nothing_to_change", message=(
+                    "This endpoint needs no key; name what to change: --provider, --model or --base-url."))
+        if args.api_key_stdin and not sys.stdin.isatty():
+            key_stream = sys.stdin.buffer
+        elif args.api_key_stdin or bare:
+            # At a terminal the key is asked for hidden, never read as echoed stdin; --json never asks.
+            if args.as_json or not sys.stdin.isatty():
+                raise CLIError("api_key_required" if args.api_key_stdin else "nothing_to_change")
+            try:
+                entered = _ask_secret("API key for this provider (input hidden)").strip()
+            except (EOFError, KeyboardInterrupt):
+                entered = ""
             if not entered:
                 raise CLIError("nothing_to_change")
             key_stream = io.StringIO(entered + "\n")

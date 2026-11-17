@@ -260,7 +260,7 @@ which one is missing and waits. Set both and run `docker compose up -d` again,
 or run `docker exec -it lifecontext lifecontext init --vault /data/vault`.
 Without a stored key (unless the endpoint needs none) it also waits, on every
 start, and logs how to add one: put it in the secret file, or run
-`docker exec -it lifecontext lifecontext llm set --api-key-stdin`.
+`docker exec -it lifecontext lifecontext llm set` (it asks for the key with a hidden prompt).
 
 | Variable (shell or `.env`) | Meaning |
 |---|---|
