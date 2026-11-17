@@ -169,7 +169,8 @@ why). `warnings` do not change the exit code: `service_not_running`,
 `service_not_ready`, `tesseract_missing`, `tesseract_languages_missing`,
 `models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
 `model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
-that do not work yet) and, with `--model-probe`, `model_reflect_check_failed`.
+that do not work yet), `model_uses_plain_http` (the model server is reached over
+plain HTTP on a host other than this machine) and, with `--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 
@@ -183,7 +184,7 @@ llm:
   model: <exact model ID>
   base_url: <provider API base URL>
   reasoning_effort: high  # optional: low, medium, high, or xhigh
-  allow_insecure_http: true  # optional, default false: see the URL rules below
+  allow_insecure_http: <the same URL as base_url>  # optional: see the URL rules below
 ```
 
 `provider` and `model` are required. `base_url` is required for
@@ -227,15 +228,23 @@ credentials in YAML.
 Remote URLs must use HTTPS. Plain HTTP is accepted without a flag only for
 loopback (`localhost`, `127.0.0.0/8`, `::1`), for IP addresses written out in
 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale and
-carrier-grade NAT) or `fc00::/7`, and for the name `host.docker.internal`. A
-name is never looked up, so a name other than those two (`models.lan`) is
-refused over HTTP, and so are `169.254.0.0/16`, `fe80::/10`, `0.0.0.0` and `::`.
-Any other HTTP host needs `allow_insecure_http: true`, which `lifecontext init
---allow-insecure-http` and `lifecontext llm set --allow-insecure-http` write. The
-flag stays only while the `base_url` it was given for stays. Over HTTP the key
-and the text of your documents and notes travel unencrypted on the network: init
-and `llm set` print that when a key is stored. URLs cannot contain credentials,
-query strings, or fragments. Never put a key in `base_url`.
+carrier-grade NAT) or `fc00::/7`, and, inside the Docker image only (it sets
+`LIFECONTEXT_IN_CONTAINER=1`), for the name `host.docker.internal`. A name is
+never looked up, so any other name (`models.lan`), and `host.docker.internal`
+outside the image, is refused over HTTP, and so are `169.254.0.0/16`,
+`fe80::/10`, `0.0.0.0` and `::`. This applies to the `llm` block only: `vision`
+accepts plain HTTP for loopback only. Any other HTTP host needs a grant:
+`allow_insecure_http` holds the exact URL it was given for, which `lifecontext
+init --allow-insecure-http` and `lifecontext llm set --allow-insecure-http`
+write, and it counts only while `base_url` is still exactly that string. Edit
+`base_url` by hand and the grant stops applying, so the service refuses to start
+until you grant the new URL; a `true` from an earlier draft names no URL and
+grants nothing. The flag saves nothing for a URL that needs none (HTTPS, loopback,
+a private address). Over HTTP the text of your documents and notes, and the key
+if one is stored, travel unencrypted on the network: init and `llm set` print that,
+`llm show` lists the grant, and `doctor` reports the warning
+`model_uses_plain_http` for any non-loopback HTTP endpoint. URLs cannot contain
+credentials, query strings, or fragments. Never put a key in `base_url`.
 
 ## API key
 
@@ -330,7 +339,9 @@ No block means vision is off; it never inherits from `llm`, because sending page
 images is a separate decision. When it is on, a local router sends only the
 items that need it (pages without a usable text layer, figures on text pages,
 embedded pictures) as JPEGs of at most 2000 px to that endpoint. Everything else
-stays on the machine. `base_url` follows the same rules as for `llm`; `gemini`
+stays on the machine. `base_url` follows the same rules as for `llm`, except that plain HTTP is
+accepted for loopback only (no private-network addresses, no
+`host.docker.internal`, no `--allow-insecure-http`); `gemini`
 and `anthropic` may also set one for a compatible gateway.
 
 The key is `LIFEWEAVE_VISION_API_KEY` in `~/.lifeweave/.env`. Without it, the LLM

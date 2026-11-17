@@ -96,7 +96,9 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    installer checks the URL against LifeContext's own rules as you type it and asks
    again if it is refused, and for plain HTTP on a host that is not on this machine or
    a private network it asks whether to send the key and your text unencrypted anyway),
-   the API key with a hidden prompt (a server on this machine needs none), the
+   the API key with a hidden prompt (an OpenAI-compatible server may need none; if
+   the model check then says the server rejected the key, a terminal run asks for
+   one and checks again), the
    vault folder, and whether to turn notes you put in `Journal/Inbox` into
    journal entries automatically (the default is No; to turn it on later run
    `lifecontext service install --maintenance --capture`). The key reaches `lifecontext init` through a
@@ -295,7 +297,9 @@ run `docker inspect` sees it.
 
 Inside the container `127.0.0.1` is the container itself, so a model server
 (Ollama, vLLM, LM Studio) running on the host is reached through the name
-`host.docker.internal`, which LifeContext accepts over plain HTTP without a flag:
+`host.docker.internal`, which LifeContext accepts over plain HTTP without a flag
+inside the image (the image sets `LIFECONTEXT_IN_CONTAINER=1`; outside the image
+the name needs `--allow-insecure-http` like any other):
 
 ```bash
 LIFECONTEXT_PROVIDER=openai_compatible
@@ -313,15 +317,21 @@ with `--add-host=host.docker.internal:host-gateway` on `docker run`, or in
 ```
 
 The server must listen on an address the container can reach, not only on the
-host's loopback: for Ollama set `OLLAMA_HOST=0.0.0.0`, and keep the port closed
-to other machines with a firewall, because plain HTTP is not encrypted. A model
+host's loopback. Docker Desktop (macOS, Windows) needs no change on the server
+side. On Linux, `host-gateway` is the host's address on the `docker0` bridge
+(`172.17.0.1` by default; check with `ip addr show docker0`), so bind the server
+there and not on every interface: for Ollama set `OLLAMA_HOST=172.17.0.1`
+(`0.0.0.0` would also open the port to your network, and plain HTTP is not
+encrypted). A model
 server on another machine is reached by its private IP address (for example
 `http://192.168.1.20:11434/v1`), also without a flag. A name such as
 `models.lan`, or any public address, is refused over HTTP unless you run
 `lifecontext init --force --allow-insecure-http` (with `docker exec`); it saves
-`allow_insecure_http: true` in `config.yaml` for that URL. When a key is stored
-and the URL is HTTP, `init` and `llm set` say that the key and the text travel
-unencrypted. With install.sh, the same flag is `LIFECONTEXT_ALLOW_INSECURE_HTTP=1`
+`allow_insecure_http: "<that URL>"` in `config.yaml`; the grant covers exactly
+that URL, so after you edit `base_url` by hand you grant it again. Whenever the
+URL is HTTP off this machine, `init` and `llm set` say that your text, and the
+key if one is stored, travel unencrypted; the container's start log says it too
+and `lifecontext doctor` reports `model_uses_plain_http`. With install.sh, the same flag is `LIFECONTEXT_ALLOW_INSECURE_HTTP=1`
 for an unattended install, and a yes to the question the installer asks at a terminal.
 
 ### Volumes
