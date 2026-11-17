@@ -32,7 +32,7 @@ _SECRET_KEY_WORDS = {
 _KEY_SEPARATOR = re.compile(r"[^a-z0-9]+")
 _MAX_CONFIG_BYTES = 64 * 1024
 ROOT_SETTINGS = frozenset({"llm", "limits", "vault", "timezone", "vision"})
-_LLM_SETTINGS = {"provider", "model", "base_url", "reasoning_effort"}
+_LLM_SETTINGS = {"provider", "model", "base_url", "reasoning_effort", "allow_insecure_http"}
 _VISION_SETTINGS = {"provider", "model", "base_url", "max_pages_per_document"}
 _VAULT_SETTINGS = {"root", "journal_path", "relationship_roots"}
 _MAX_RELATIONSHIP_ROOTS = 128
@@ -222,7 +222,7 @@ def load_settings() -> dict[str, Any]:
         llm = loaded["llm"]
         if any(not isinstance(key, str) or key not in _LLM_SETTINGS for key in llm):
             raise ConfigError("invalid LifeContext config: unknown llm setting")
-        if any(not isinstance(value, str) for value in llm.values()):
+        if any(not isinstance(value, bool if key == "allow_insecure_http" else str) for key, value in llm.items()):
             raise ConfigError("invalid LifeContext config: invalid llm setting")
     if "vision" in loaded:
         # Semantic checks (provider, exact model ID, URL rules) run at service start.

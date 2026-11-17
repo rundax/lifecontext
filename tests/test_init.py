@@ -250,7 +250,7 @@ class InitTests(unittest.TestCase):
             stored = run_init(_options(api_key_stdin=True), key_stream=io.BytesIO(KEY.encode()))
             self.assertEqual((stored["config_state"], stored["credentials_state"]), ("kept", "stored"))
 
-    def test_loopback_openai_compatible_endpoint_needs_no_key(self) -> None:
+    def test_openai_compatible_endpoint_needs_no_key(self) -> None:
         with _temporary_home():
             report = run_init(_options(provider="openai_compatible", model="llama3.3",
                                        base_url="http://127.0.0.1:11434/v1"))
@@ -258,7 +258,55 @@ class InitTests(unittest.TestCase):
             self.assertEqual(load_settings()["llm"]["base_url"], "http://127.0.0.1:11434/v1")
             remote = run_init(_options(provider="openai_compatible", model="m",
                                        base_url="https://api.example.test/v1", force=True))
-            self.assertEqual(remote["credentials_state"], "missing")
+            self.assertEqual(remote["credentials_state"], "not_required")
+
+    def test_plain_http_on_another_host_needs_the_flag_which_is_saved_and_warns_about_a_stored_key(self) -> None:
+        url = "http://models.lan:8000/v1"
+        with _temporary_home():
+            with self.assertRaises(InitError) as caught:
+                run_init(_options(provider="openai_compatible", model="m", base_url=url))
+            self.assertEqual(caught.exception.code, "invalid_llm_settings")
+            self.assertIn("--allow-insecure-http", caught.exception.message)
+            self.assertFalse(LifeContextPaths.current().config_path.exists())
+            report = run_init(_options(provider="openai_compatible", model="m", base_url=url,
+                                       allow_insecure_http=True))
+            self.assertEqual(load_settings()["llm"], {"provider": "openai_compatible", "model": "m",
+                                                      "base_url": url, "allow_insecure_http": True})
+            # No key stored: nothing to warn about yet.
+            self.assertEqual((report["credentials_state"], report["warnings"]), ("not_required", []))
+            # The saved flag is honoured on a later run without it, and a stored key then warns.
+            report = run_init(_options(api_key_stdin=True, replace_key=True), key_stream=io.BytesIO(KEY.encode()))
+            self.assertEqual(report["credentials_state"], "stored")
+            self.assertIn("key_over_plain_http", report["warnings"])
+            self.assertIn("travel unencrypted over http", render(report))
+            self.assertNotIn(KEY, json.dumps(report))
+            # A private address needs no flag and still warns when a key is stored; loopback does not.
+            report = run_init(_options(provider="openai_compatible", model="m", base_url="http://10.0.0.5/v1",
+                                       force=True))
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+            self.assertIn("key_over_plain_http", report["warnings"])
+            report = run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1",
+                                       force=True))
+            self.assertNotIn("key_over_plain_http", report["warnings"])
+
+    def test_the_flag_stays_only_with_the_url_it_was_given_for(self) -> None:
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://models.lan/v1",
+                              allow_insecure_http=True))
+            run_init(_options(model="other", force=True))
+            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            with self.assertRaises(InitError):
+                run_init(_options(base_url="http://other.lan/v1", force=True))
+            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            run_init(_options(base_url="https://api.example.com/v1", force=True))
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+
+    def test_the_flag_without_force_on_an_existing_config_is_reported_as_ignored(self) -> None:
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1"))
+            report = run_init(_options(allow_insecure_http=True))
+            self.assertEqual((report["warnings"], report["ignored"]), (["flags_ignored"], ["allow_insecure_http"]))
+            self.assertIn("--allow-insecure-http did not change it", render(report))
 
     def test_invalid_input_fails_before_writing(self) -> None:
         cases = (

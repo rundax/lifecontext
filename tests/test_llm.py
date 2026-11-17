@@ -90,6 +90,38 @@ class LlmShowTests(unittest.TestCase):
             self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
 
 
+class LlmSetNetworkPolicyTests(unittest.TestCase):
+    def test_set_needs_the_flag_for_plain_http_on_another_host_and_saves_it(self) -> None:
+        url = "http://models.lan:8000/v1"
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            args = ("set", "--provider", "openai_compatible", "--model", "local", "--base-url", url)
+            code, out, _ = _run(*args, "--json", restart=None)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "invalid_llm_settings"))
+            self.assertIn("--allow-insecure-http", failure["message"])
+            self.assertEqual(load_settings()["llm"]["provider"], "openai")
+            code, out, err = _run(*args, "--allow-insecure-http", "--json")
+            self.assertEqual(code, 0, err)
+            report = json.loads(out)
+            self.assertTrue(report["allow_insecure_http"])
+            self.assertIn("key_over_plain_http", report["warnings"])  # the old key is still stored
+            self.assertTrue(load_settings()["llm"]["allow_insecure_http"])
+            code, out, _ = _run("show", "--json", restart=None)
+            self.assertTrue(json.loads(out)["allow_insecure_http"])
+            # The text form says the key and the text travel unencrypted.
+            code, out, _ = _run("set", "--model", "local-2")
+            self.assertIn("travel unencrypted over http", out)
+
+    def test_a_keyless_openai_compatible_server_on_the_network_is_accepted(self) -> None:
+        with _home():
+            run_init(InitOptions(provider="openai_compatible", model="local", base_url="http://192.168.1.20:8000/v1",
+                                 timezone="UTC"), environ={})
+            report = json.loads(_run("show", "--json")[1])
+            self.assertEqual(report["api_key"], "not_required")
+            self.assertNotIn("travel unencrypted", _run("show")[1])
+
+
 class LlmSetTests(unittest.TestCase):
     def test_set_changes_only_the_given_fields_and_keeps_the_rest(self) -> None:
         with _home() as home:
@@ -175,7 +207,7 @@ class LlmSetTests(unittest.TestCase):
             _initialize(provider="openai", model="gpt-test-model")
             compatible = ("--provider", "openai_compatible", "--model", "m", "--base-url")
             for arguments, words in (
-                ((*compatible, "http://192.168.1.5:11434/v1"), "http only with localhost, 127.0.0.1 or ::1"),
+                ((*compatible, "http://models.example.invalid:11434/v1"), "or add --allow-insecure-http"),
                 ((*compatible, "https://example.invalid/v1/chat/completions"), "give the API root instead"),
                 (("--provider", "nonsense", "--model", "m"), "use one of: anthropic, "),
                 (("--base-url", "ftp://example.invalid/v1"), "check the provider name, the exact model ID"),
@@ -185,7 +217,7 @@ class LlmSetTests(unittest.TestCase):
                     failure = json.loads(out)
                     self.assertEqual((code, failure["error"]), (1, "invalid_llm_settings"))
                     self.assertIn(words, failure["message"])
-                    self.assertNotIn("192.168.1.5", failure["message"])
+                    self.assertNotIn("models.example.invalid", failure["message"])
 
     def test_a_new_provider_without_a_model_says_to_add_one(self) -> None:
         with _home():

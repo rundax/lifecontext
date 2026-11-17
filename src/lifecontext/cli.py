@@ -174,6 +174,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="apply these flags to an existing config.yaml, keeping every other setting")
     init.add_argument("--replace-key", action="store_true",
                       help="replace the stored provider key with the one given; changes only .env")
+    init.add_argument("--allow-insecure-http", action="store_true",
+                      help="accept an http base URL on any host (without it: https, or http on this machine, a "
+                           "private network address or host.docker.internal); saved in config.yaml")
 
     doctor = commands.add_parser(
         "doctor", help="report safe diagnostics; exit 1 only for broken prerequisites"
@@ -210,6 +213,8 @@ def _build_parser() -> argparse.ArgumentParser:
     llm_set.add_argument("--provider", help="model provider ID")
     llm_set.add_argument("--model", help="exact model ID")
     llm_set.add_argument("--base-url", help="provider API root, required for openai_compatible")
+    llm_set.add_argument("--allow-insecure-http", action="store_true",
+                         help="accept an http base URL on any host (see init --allow-insecure-http); saved in config.yaml")
     llm_set.add_argument("--api-key-stdin", action="store_true",
                          help="replace the stored key with one line from stdin (else from $LIFECONTEXT_API_KEY_FILE)")
 
@@ -1331,6 +1336,7 @@ def _init(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     options = initialize.InitOptions(
         provider=args.provider, model=args.model, base_url=args.base_url, vault=args.vault,
         timezone=args.timezone, api_key_stdin=args.api_key_stdin, force=args.force, replace_key=args.replace_key,
+        allow_insecure_http=args.allow_insecure_http,
         interactive=not (args.non_interactive or args.api_key_stdin) and sys.stdin.isatty(),
     )
     try:
@@ -1495,7 +1501,7 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
             return report, initialize.render_llm(report), 0
         key_stream = None
         bare = (args.provider is None and args.model is None and args.base_url is None
-                and not os.environ.get(initialize.KEY_FILE_VARIABLE))
+                and not args.allow_insecure_http and not os.environ.get(initialize.KEY_FILE_VARIABLE))
         if bare and not args.api_key_stdin:
             # Look at the setup before asking for anything.
             if initialize.show_llm()["api_key"] == "not_required":
@@ -1516,7 +1522,8 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
             key_stream = io.StringIO(entered + "\n")
         report = initialize.set_llm(
             initialize.InitOptions(provider=args.provider, model=args.model, base_url=args.base_url,
-                                   api_key_stdin=key_stream is not None),
+                                   api_key_stdin=key_stream is not None,
+                                   allow_insecure_http=args.allow_insecure_http),
             key_stream=key_stream)
     except initialize.InitError as exc:
         raise CLIError(exc.code, message=exc.message) from None
