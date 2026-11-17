@@ -810,7 +810,7 @@ class JournalApplication:
                         manifest, evidence.original_bytes
                     )
                     self._project_indexed(source_id, source_version)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- any failure fails the operation
                     self._startup_resubmits = 0  # the provider still refuses: the rest wait too
                     code = self._retain_error_code(exc)
                     self._fail_operation(
@@ -1089,7 +1089,7 @@ class JournalApplication:
                 report["resumed"] += 1
                 try:
                     await self._submit_curation_source(target_manifest, target.original_bytes)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- any failure fails the operation
                     self._startup_resubmits = 0  # the provider still refuses: the rest wait too
                     self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                     return False

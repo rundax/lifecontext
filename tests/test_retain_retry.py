@@ -10,16 +10,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from local_paths import scratch_root
+from test_application import ControlledClient
+
 from lifecontext.api.app import _error_details
 from lifecontext.application import ApplicationError, JournalApplication
-from lifecontext.catalog import CatalogError
 from lifecontext.capture import SETTLE_SECONDS, Rejected, digest, run_once
+from lifecontext.catalog import CatalogError
 from lifecontext.cli import _TRANSIENT_API_ERRORS
 from lifecontext.hindsight_adapter import LifeContextHindsightAdapter
 from lifecontext.paths import LifeContextPaths
 from lifecontext.vault import ManagedVault, VaultError
-from local_paths import scratch_root
-from test_application import ControlledClient
 
 
 class InProcessCaptureApi:
