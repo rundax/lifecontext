@@ -2195,10 +2195,33 @@ class LifeContextCatalog:
                    WHERE operation_kind IN ('document_import', 'document_retry')
                      AND json_extract(result_json, '$.recovery_intent.source_id') = ?
                      AND json_extract(result_json, '$.recovery_intent.source_version') = ?
-                   ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                   ORDER BY rowid DESC LIMIT 1""",
                 (source_id, source_version),
             ).fetchone()
             return self._operation_from_row(row) if row is not None else None
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def latest_document_operations(self) -> dict[tuple[str, int], dict[str, Any]]:
+        """The newest import or retry operation of every document version, in one query."""
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json, error_code,
+                          created_at, updated_at
+                   FROM operations WHERE rowid IN (
+                       SELECT MAX(rowid) FROM operations
+                       WHERE operation_kind IN ('document_import', 'document_retry')
+                       GROUP BY json_extract(result_json, '$.recovery_intent.source_id'),
+                                json_extract(result_json, '$.recovery_intent.source_version'))"""
+            ).fetchall()
+            found = {}
+            for row in rows:
+                operation = self._operation_from_row(row)
+                intent = operation["result"].get("recovery_intent") or {}
+                if "source_id" in intent:
+                    found[(intent["source_id"], intent["source_version"])] = operation
+            return found
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 
@@ -2214,7 +2237,7 @@ class LifeContextCatalog:
                 """SELECT operation_id, operation_kind, state, result_json,
                           error_code, created_at, updated_at
                    FROM operations WHERE (? IS NULL OR state = ?)
-                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                   ORDER BY rowid DESC LIMIT ?""",
                 (state, state, limit),
             ).fetchall()
             return [self._operation_from_row(row) for row in rows]

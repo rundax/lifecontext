@@ -1,11 +1,13 @@
 """An import says whether it ended with problems, why, and how to retry it."""
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lifecontext.api.routes import _document
-from lifecontext.catalog import CatalogError, LifeContextCatalog, OperationConflict
+from lifecontext.catalog import CatalogConflict, CatalogError, LifeContextCatalog, OperationConflict
 from lifecontext.custody import LifeContextCustody
 from lifecontext.derived import DerivedStore
 from lifecontext.documents import DocumentService
@@ -73,10 +75,25 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         sid = result["document"]["source_id"]
         self.assertIsNone(result["document"]["vault_path"])
         digest = "a" * 64
-        self.catalog.set_artifact_projection(
-            "wiki", source_page_id(sid), 1, projection_path="Wiki/Sample.md",
-            desired_hash=digest, state="projected", last_projected_hash=digest)
-        self.assertEqual(self.service.show(sid, 1)["vault_path"], "Wiki/Sample.md")
+        page = {"page_id": source_page_id(sid), "current_revision": 1}
+        with patch.object(self.catalog, "get_wiki_page", return_value=page):
+            # The page is named only once its note is in the vault.
+            self.assertIsNone(self.service.show(sid, 1)["wiki_page_id"])
+            self.catalog.set_artifact_projection(
+                "wiki", source_page_id(sid), 1, projection_path="wiki/Sample.md",
+                desired_hash=digest, state="projected", last_projected_hash=digest)
+            shown = self.service.show(sid, 1)
+        # The receipt is relative to Journal; the response is relative to the vault.
+        self.assertEqual(shown["vault_path"], "Journal/wiki/Sample.md")
+        self.assertEqual(shown["wiki_page_id"], source_page_id(sid))
+
+    async def test_a_completed_import_whose_wiki_stages_have_not_finished_is_running(self):
+        self.service.wiki_hook = lambda document: {"state": "pending"}
+        self.service.projection_hook = lambda document: {"state": "completed"}
+        result = await self.ingest()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["document"]["outcome"], "running")
+        self.assertEqual(self.service.operation_outcome(self.catalog.get_operation(result["operation_id"])), "running")
 
     async def test_a_clean_import_is_completed_without_problems(self):
         self.service.wiki_hook = lambda document: {"state": "completed"}
@@ -108,6 +125,108 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         failed = self.catalog.list_operations(state="retryable_failed")
         self.assertEqual([row["operation_id"] for row in failed], [result["operation_id"]])
         self.assertEqual(self.catalog.list_operations(state="completed"), [])
+
+
+class OperationOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    setUp = DocumentOutcomeTests.setUp
+    ingest = DocumentOutcomeTests.ingest
+
+    async def test_operation_status_and_list_show_completed_with_errors_and_filter_by_it(self):
+        from lifecontext.application import JournalApplication
+
+        def wiki(document):
+            raise RuntimeError("private model failure")
+
+        self.service.wiki_hook = wiki
+        self.service.projection_hook = lambda document: {"state": "completed"}
+        broken = await self.ingest(key="broken")
+        self.service.wiki_hook = lambda document: {"state": "completed"}
+        fine = await self.ingest(b"another document", key="fine")
+        plain = self.catalog.begin_operation("plain", "c" * 64, "retain")
+        application = JournalApplication.__new__(JournalApplication)
+        application.catalog, application.documents = self.catalog, self.service
+        self.assertEqual(application.operation_status(broken["operation_id"])["outcome"], "completed_with_errors")
+        self.assertEqual(application.operation_status(fine["operation_id"])["outcome"], "completed")
+        self.assertNotIn("outcome", application.operation_status(plain["operation_id"]))
+        listed = application.list_operations()
+        self.assertEqual([item["operation_id"] for item in listed],
+                         [plain["operation_id"], fine["operation_id"], broken["operation_id"]])
+        self.assertNotIn("outcome", listed[0])
+        found = application.list_operations(outcome="completed_with_errors")
+        self.assertEqual([item["operation_id"] for item in found], [broken["operation_id"]])
+        self.assertEqual([item["operation_id"] for item in application.list_operations(outcome="completed", limit=1)],
+                         [fine["operation_id"]])
+
+
+class DeletedDocumentRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_deleted_document_is_not_found_by_its_source_id_but_an_operation_id_is_left_to_the_service(self):
+        from unittest.mock import AsyncMock, Mock
+
+        from lifecontext.application import ApplicationError, JournalApplication
+
+        application = JournalApplication.__new__(JournalApplication)
+        application.catalog = Mock(list_tombstones=Mock(return_value=[{"tombstone_type": "deleted"}]))
+        application.documents = Mock(retry=AsyncMock(side_effect=CatalogError("document operation unavailable")))
+        with self.assertRaises(ApplicationError) as caught:
+            await application.retry_document("doc_gone")
+        self.assertEqual(caught.exception.code, "source_not_found")
+        application.documents.retry.assert_not_awaited()
+        with self.assertRaises(ApplicationError) as caught:
+            await application.retry_document("op_" + "a" * 32)
+        self.assertEqual(caught.exception.code, "invalid_request")
+        application.documents.retry.assert_awaited_once()
+
+
+class DocumentRunGuardTests(unittest.IsolatedAsyncioTestCase):
+    setUp = DocumentOutcomeTests.setUp
+    ingest = DocumentOutcomeTests.ingest
+
+    async def test_a_retry_while_the_import_runs_reports_it_and_starts_nothing(self):
+        release, started = asyncio.Event(), asyncio.Event()
+        retain = self.provider.retain
+
+        async def slow(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return await retain(*args, **kwargs)
+
+        self.provider.retain = slow
+        running = asyncio.create_task(self.ingest())
+        await started.wait()
+        (operation,) = self.catalog.list_operations()
+        sid = operation["result"]["recovery_intent"]["source_id"]
+        for target in (operation["operation_id"], sid):
+            for key in (None, "same-key"):
+                with self.subTest(target=target, key=key):
+                    seen = await self.service.retry(target, idempotency_key=key)
+                    self.assertEqual((seen["operation_id"], seen["state"]), (operation["operation_id"], "running"))
+        self.assertEqual(len(self.provider.documents), 0)
+        self.assertEqual([row["operation_id"] for row in self.catalog.list_operations()], [operation["operation_id"]])
+        release.set()
+        finished = await running
+        self.assertEqual(finished["state"], "completed")
+        self.assertFalse(self.service._inflight)
+        # Once it is done a retry is an ordinary one again.
+        self.assertEqual((await self.service.retry(sid))["state"], "completed")
+
+    async def test_two_retries_with_one_new_key_run_once(self):
+        calls = []
+
+        async def wiki(document):
+            calls.append(1)
+            await asyncio.sleep(0)
+            if len(calls) == 1:
+                raise RuntimeError("model down")
+            return {"state": "completed"}
+
+        self.service.wiki_hook = wiki
+        first = await self.ingest()
+        sid = first["document"]["source_id"]
+        one, two = await asyncio.gather(self.service.retry(sid, idempotency_key="k"),
+                                        self.service.retry(sid, idempotency_key="k"))
+        self.assertEqual(one["operation_id"], two["operation_id"])
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(self.service._inflight)
 
 
 class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
@@ -174,6 +293,36 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         retried = await self.service.retry(sid)
         self.assertEqual(retried["state"], "retryable_failed")
         self.assertEqual([r["extraction_revision"] for r in self.catalog.list_extractions(sid, 1)], [1, 2])
+
+    async def test_a_forgotten_document_is_not_retried_by_its_source_id(self):
+        first = await self.ingest()
+        with patch.object(self.catalog, "source_withdrawn", return_value=True), self.assertRaises(CatalogConflict):
+            await self.service.retry(first["document"]["source_id"])
+
+    async def test_a_retry_never_rebuilds_the_page_of_an_old_version(self):
+        calls = self.flaky_wiki()
+        first = await self.ingest()
+        sid = first["document"]["source_id"]
+        await self.service.import_document(b"second version", "sample.txt", "text/plain", {}, "v2",
+                                           source_id=sid, source_version=2)
+        self.assertEqual(len(calls), 2)
+        before = len(calls)
+        old = await self.service.retry(first["operation_id"])
+        self.assertEqual(old["document"]["source_version"], 1)
+        rerun = await self.service.retry(first["operation_id"], rerun_extraction=True)
+        self.assertEqual(rerun["state"], "completed")
+        self.assertEqual(len(calls), before)
+        self.assertEqual(self.service._unfinished_stages(sid, 1), [])
+
+    async def test_list_asks_for_every_latest_operation_in_one_query(self):
+        await self.ingest(key="one")
+        await self.ingest(b"another document", key="two")
+        with patch.object(self.catalog, "latest_document_operation", side_effect=AssertionError("per document scan")):
+            documents = self.service.list()
+        self.assertEqual(len(documents), 2)
+        self.assertTrue(all(document["last_operation_id"] and document["outcome"] == "completed" for document in documents))
+        self.assertEqual({d["last_operation_id"] for d in documents},
+                         {row["operation_id"] for row in self.catalog.list_operations()})
 
     async def test_an_unknown_identifier_is_refused(self):
         for target in ("doc_missing", "op_" + "0" * 32, "../etc"):

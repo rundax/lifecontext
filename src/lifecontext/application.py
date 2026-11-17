@@ -205,6 +205,11 @@ class JournalApplication:
                              vision: bool | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
         """Retry by operation ID or by source ID (its current version's latest operation)."""
         try:
+            if not re.fullmatch(r"op_[0-9a-f]{32}", operation_id) and any(
+                item["tombstone_type"] == "deleted" for item in self.catalog.list_tombstones(operation_id)
+            ):
+                # Like show_document: a deleted document is not found.
+                raise ApplicationError("source_not_found")
             outcome = await self.documents.retry(operation_id, rerun_extraction, vision,
                                                  idempotency_key=idempotency_key)
             document = outcome.get("document")
@@ -2944,14 +2949,19 @@ class JournalApplication:
             },
         }
 
-    def list_operations(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        """Newest operations first, optionally in one state, with the same bounded summary."""
+    def list_operations(self, *, state: str | None = None, outcome: str | None = None,
+                        limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state or with one document outcome."""
         try:
-            rows = self.catalog.list_operations(state=state, limit=limit)
+            # An outcome is computed, so it is matched among the newest 1000 operations.
+            rows = self.catalog.list_operations(state=state, limit=1000 if outcome else limit)
         except CatalogError:
             raise ApplicationError("invalid_request") from None
-        return [{**self.operation_status(row["operation_id"]), "operation_kind": row["operation_kind"],
-                 "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+        items = [{**self.operation_status(row["operation_id"]), "operation_kind": row["operation_kind"],
+                  "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+        if outcome:
+            items = [item for item in items if item.get("outcome") == outcome][:limit]
+        return items
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         """Expose durable state with only the API's bounded summary fields."""
@@ -2973,11 +2983,17 @@ class JournalApplication:
             summary["item_count"] = 1
         if operation["error_code"] is not None:
             summary["error_code"] = operation["error_code"]
-        return {
+        status = {
             "operation_id": operation["operation_id"],
             "state": operation["state"],
             "summary": summary,
         }
+        # A document import or retry also says whether its wiki page and vault note came out.
+        if operation["operation_kind"] in {"document_import", "document_retry"}:
+            outcome = self.documents.operation_outcome(operation)
+            if outcome is not None:
+                status["outcome"] = outcome
+        return status
 
     @staticmethod
     def _request_digest(action: str, request: Mapping[str, Any]) -> str:

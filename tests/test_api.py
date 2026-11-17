@@ -1182,14 +1182,100 @@ class APIHTTPTests(unittest.TestCase):
         finally:
             self.application.limits = original_limits
 
-    def test_operations_are_listed_by_state(self) -> None:
-        status, _, body = self._request("/v1/operations?state=retryable_failed")
-        self.assertEqual(status, 200)
-        self.assertTrue(all(item["state"] == "retryable_failed" for item in body["operations"]))
+    def test_operations_are_listed_newest_first_and_by_state(self) -> None:
+        # The service owns its connection in its own thread; seed through another one.
+        catalog = LifeContextCatalog(self.paths)
+        self.addCleanup(catalog.close)
+        made = {}
+        for name, final in (("one", "pending"), ("two", "running"), ("three", "retryable_failed"),
+                            ("four", "completed"), ("five", "retryable_failed"), ("six", "running")):
+            operation = catalog.begin_operation(f"listed-{name}", hashlib.sha256(name.encode()).hexdigest(), "retain")
+            if final != "pending":
+                operation = catalog.transition_operation(operation["operation_id"], "pending", "running")
+            if final in {"retryable_failed", "completed"}:
+                operation = catalog.transition_operation(
+                    operation["operation_id"], "running", final,
+                    error_code="provider_unavailable" if final == "retryable_failed" else None)
+            made[name] = operation["operation_id"]
         status, _, body = self._request("/v1/operations")
         self.assertEqual(status, 200)
-        self.assertIsInstance(body["operations"], list)
+        listed = [item["operation_id"] for item in body["operations"]]
+        self.assertEqual(listed, list(reversed(list(made.values()))))
+        self.assertEqual(body["operations"][0]["operation_kind"], "retain")
+        status, _, body = self._request("/v1/operations?state=retryable_failed")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["operation_id"] for item in body["operations"]], [made["five"], made["three"]])
+        self.assertEqual({item["state"] for item in body["operations"]}, {"retryable_failed"})
+        status, _, body = self._request("/v1/operations?state=running&limit=1")
+        self.assertEqual([item["operation_id"] for item in body["operations"]], [made["six"]])
+        status, _, body = self._request("/v1/operations?state=cancelled")
+        self.assertEqual(body["operations"], [])
         self._assert_error(self._request("/v1/operations?state=unknown"), 422, "invalid_request")
+        # An operation that is not a document import has no outcome to show.
+        status, _, single = self._request(f"/v1/operations/{made['four']}")
+        self.assertEqual(set(single), {"operation_id", "state", "summary"})
+
+    def test_a_document_import_shows_its_outcome_on_the_plain_operation_responses(self) -> None:
+        self.client.retain_calls.clear()
+        headers = {"Content-Type": "application/octet-stream", "Idempotency-Key": "outcome-doc",
+                   "X-Document-Filename": "lease.txt"}
+        status, _, imported = self._request("/v1/documents", method="POST", data=b"The rent is due monthly.", headers=headers)
+        self.assertEqual(status, 200, repr(imported))
+        outcome = imported["outcome"]
+        self.assertEqual(outcome, imported["state"])
+        status, _, single = self._request(f"/v1/operations/{imported['operation_id']}")
+        self.assertEqual((single["state"], single["outcome"]), (imported["state"], outcome))
+        status, _, body = self._request(f"/v1/operations?outcome={outcome}")
+        self.assertEqual([item["operation_id"] for item in body["operations"]], [imported["operation_id"]])
+        self.assertEqual(body["operations"][0]["outcome"], outcome)
+        status, _, body = self._request("/v1/operations?outcome=completed_with_errors")
+        self.assertEqual(body["operations"], [])
+        self._assert_error(self._request("/v1/operations?outcome=unknown"), 422, "invalid_request")
+        self.assertRegex(imported["document"]["last_operation_id"], r"^op_[0-9a-f]{32}$")
+
+    def test_status_reports_the_upload_ceiling_not_a_larger_configured_limit(self) -> None:
+        original_limits = self.application.limits
+        try:
+            self.application.limits = replace(original_limits, max_file_bytes=64 * 1024 * 1024)
+            _, _, readiness = self._request("/v1/status")
+            self.assertEqual(readiness["max_file_bytes"], 32 * 1024 * 1024)
+            self.application.limits = replace(original_limits, max_file_bytes=1024)
+            _, _, readiness = self._request("/v1/status")
+            self.assertEqual(readiness["max_file_bytes"], 1024)
+        finally:
+            self.application.limits = original_limits
+
+    def test_a_body_above_the_limit_is_read_to_its_end_before_the_413(self) -> None:
+        # A client still sending when the server answers and closes can see a reset
+        # connection instead of the 413, so the rest of the body is read and dropped.
+        original_limits = self.application.limits
+        chunks = [b"x" * 65536] * 8
+        received, sent = [], []
+
+        async def receive():
+            if len(received) < len(chunks):
+                received.append(1)
+                return {"type": "http.request", "body": chunks[len(received) - 1], "more_body": len(received) < len(chunks)}
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append((message, len(received)))
+
+        scope = {"type": "http", "method": "POST", "path": "/v1/documents", "query_string": b"", "root_path": "",
+                 "http_version": "1.1", "scheme": "http", "server": ("127.0.0.1", 80), "client": ("127.0.0.1", 1),
+                 "headers": [(b"host", b"127.0.0.1"), (b"authorization", ("Bearer " + self.api.state.api_token).encode()),
+                             (b"content-type", b"application/octet-stream"), (b"idempotency-key", b"drain"),
+                             (b"x-document-filename", b"large.txt")]}
+        try:
+            self.application.limits = replace(original_limits, max_file_bytes=64)
+            asyncio.run(self.api(scope, receive, send))
+        finally:
+            self.application.limits = original_limits
+        start, read_at_answer = next(item for item in sent if item[0]["type"] == "http.response.start")
+        self.assertEqual(start["status"], 413)
+        self.assertEqual(read_at_answer, len(chunks))
+        body = json.loads(b"".join(m.get("body", b"") for m, _ in sent if m["type"] == "http.response.body"))
+        self.assertEqual((body["error_code"], set(body)), ("body_too_large", {"request_id", "error_code", "retryable"}))
 
     def test_a_document_above_the_configured_file_limit_is_too_large(self) -> None:
         original_limits = self.application.limits

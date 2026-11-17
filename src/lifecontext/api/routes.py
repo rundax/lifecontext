@@ -56,11 +56,11 @@ from lifecontext.api.models import (
     CategoryMergeRequest, CategoryReassignRequest, WikiPageRecord, WikiListResponse,
     WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
     WikiLintResponse, WikiReviewListResponse, WikiReviewMutationResponse, WikiReviewRecord,
-    WikiReviewResolveRequest, BriefResponse, OperationListResponse,
+    WikiReviewResolveRequest, BriefResponse, OperationListResponse, OperationStatusResponse,
 )
+from lifecontext.api.models import _OUTCOMES
 from lifecontext.categories import CategoryClassification
 from lifecontext.catalog import CatalogError
-from lifecontext.documents import document_outcome
 from lifecontext.api.app import DOCUMENT_MAX_BYTES
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -152,7 +152,9 @@ async def health() -> HealthResponse:
 @router.get("/v1/status", response_model=StatusResponse)
 async def status(request: Request) -> dict[str, Any]:
     """Return redacted dependency readiness, separate from process liveness."""
-    return _application(request).readiness()
+    value = _application(request).readiness()
+    # An upload stops at the 32 MiB ceiling whatever the configured limit.
+    return {**value, "max_file_bytes": min(DOCUMENT_MAX_BYTES, value["max_file_bytes"])}
 
 
 @router.post("/v1/projections/reconcile")
@@ -713,7 +715,7 @@ def _document_operation(application, result: dict[str, Any]) -> DocumentOperatio
         value.document = _document(result["document"])
         if value.state == "completed" and value.document.stages.indexing.state != "completed":
             value.state = "running"
-        value.outcome = document_outcome(result["document"]["stages"], value.state)
+        value.outcome = application.documents.outcome(result["document"], value.state)
     return value
 
 
@@ -770,11 +772,14 @@ async def import_document(
         try:
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > limit:
-                    raise PublicAPIError(413, "body_too_large")
-                staged.write(chunk)
+                # Past the limit the rest is read and dropped (the guard stops it at the
+                # 32 MiB ceiling), so the client reads the 413 instead of a reset connection.
+                if size <= limit:
+                    staged.write(chunk)
         except ClientDisconnect:
             raise PublicAPIError(400, "invalid_request") from None
+        if size > limit:
+            raise PublicAPIError(413, "body_too_large")
         if not size:
             raise PublicAPIError(422, "invalid_request")
         staged.seek(0)
@@ -842,23 +847,28 @@ async def download_document(source_id: SourceId, request: Request, version: Anno
 async def list_operations(
     request: Request,
     state: Literal["pending", "running", "retryable_failed", "permanent_failed", "completed", "cancelled"] | None = None,
+    outcome: _OUTCOMES | None = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> OperationListResponse:
-    """Newest operations first; ``state=retryable_failed`` lists what a retry can pick up."""
-    rows = _application(request).list_operations(state=state, limit=limit)
+    """Newest operations first; ``state=retryable_failed`` lists what a retry can pick up.
+
+    ``outcome=completed_with_errors`` finds imports that finished without their wiki page,
+    among the newest 1000 operations.
+    """
+    rows = _application(request).list_operations(state=state, outcome=outcome, limit=limit)
     try:
         return OperationListResponse.model_validate({"operations": rows})
     except ValidationError:
         raise ApplicationError("invalid_provider_response") from None
 
 
-@router.get("/v1/operations/{operation_id}", response_model=OperationResponse)
+@router.get("/v1/operations/{operation_id}", response_model=OperationStatusResponse)
 async def operation_status(
     operation_id: Annotated[str, Path(min_length=1, max_length=128)],
     request: Request,
-) -> OperationResponse:
+) -> OperationStatusResponse:
     value = _application(request).operation_status(operation_id)
     try:
-        return OperationResponse.model_validate(value)
+        return OperationStatusResponse.model_validate(value)
     except ValidationError:
         raise ApplicationError("invalid_provider_response") from None

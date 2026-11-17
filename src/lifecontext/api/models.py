@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_serializer
 
 from lifecontext.config import LIMIT_CEILINGS, JournalLimits
 
@@ -261,7 +261,7 @@ class DocumentResponse(APIModel):
     # Added in 1.2.0; optional so older clients and servers keep working.
     outcome: _OUTCOMES | None = None
     problems: list[DocumentProblem] = Field(default_factory=list, max_length=5)
-    last_operation_id: Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"[A-Za-z0-9_-]+")] | None = None
+    last_operation_id: Annotated[str, StringConstraints(pattern=r"^op_[0-9a-f]{32}$")] | None = None
     extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
     wiki_page_id: SourceId | None = None
     vault_path: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -346,7 +346,20 @@ class OperationResponse(APIModel):
     summary: OperationSummary = Field(default_factory=OperationSummary)
 
 
-class OperationListItem(OperationResponse):
+class OperationStatusResponse(OperationResponse):
+    """An operation as ``operations get`` and the list show it; ``outcome`` appears for document imports and retries."""
+
+    outcome: _OUTCOMES | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_outcome(self, handler):
+        data = handler(self)
+        if data.get("outcome") is None:
+            data.pop("outcome", None)
+        return data
+
+
+class OperationListItem(OperationStatusResponse):
     operation_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     created_at: str = Field(max_length=64)
     updated_at: str = Field(max_length=64)
@@ -356,10 +369,8 @@ class OperationListResponse(APIModel):
     operations: list[OperationListItem] = Field(max_length=1000)
 
 
-class DocumentOperationResponse(OperationResponse):
+class DocumentOperationResponse(OperationStatusResponse):
     document: DocumentResponse | None = None
-    # ``completed_with_errors`` when the operation finished but a wiki or vault stage failed.
-    outcome: _OUTCOMES | None = None
 
 
 class RelationshipRecord(APIModel):
