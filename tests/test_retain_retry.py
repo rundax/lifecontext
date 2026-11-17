@@ -17,7 +17,7 @@ from lifecontext.capture import SETTLE_SECONDS, Rejected, digest, run_once
 from lifecontext.cli import _TRANSIENT_API_ERRORS
 from lifecontext.hindsight_adapter import LifeContextHindsightAdapter
 from lifecontext.paths import LifeContextPaths
-from lifecontext.vault import ManagedVault
+from lifecontext.vault import ManagedVault, VaultError
 from local_paths import scratch_root
 from test_application import ControlledClient
 
@@ -545,6 +545,42 @@ class RetainRetryTests(unittest.TestCase):
 
         self.assertEqual(len(self.client.retain_calls), 4)
         self.assertEqual(self._states("retain"), ["retryable_failed"] * 3)
+
+    def test_a_reindex_brings_a_missing_entry_back(self) -> None:
+        source_id = "src_retry_reindex_projects"
+        self._edited_note(source_id)
+        path = self.journal / self.app.catalog.get_projection_state(source_id, 1)["projection_path"]
+        path.unlink()
+
+        result = asyncio.run(self.app.curate({
+            "action": "reindex", "source_id": source_id, "expected_version": 1,
+        }, idempotency_key="retain-retry-reindex-projects"))
+
+        self.assertEqual(result["state"], "completed")
+        self.assertTrue(path.is_file())
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
+
+    def test_recovery_that_finds_the_note_indexed_writes_its_missing_entry(self) -> None:
+        source_id = "src_retry_reconciled_projects"
+        self.client.on_retain = _crash  # the provider stores the note, then the process stops
+        with patch.object(self.app.vault, "safe_write_text", side_effect=VaultError("vault_unavailable")), \
+                self.assertRaises(_Crash):
+            asyncio.run(self.app.retain(
+                source_id, 1, b"note indexed before the crash", provenance={"source": "test"},
+                idempotency_key="retain-retry-reconciled-projects",
+            ))
+        self.client.on_retain = None
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "failed")
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual((report["resumed"], report["completed"]), (0, 1))
+        self.assertEqual(len(self.client.retain_calls), 1)
+        projection = self.app.catalog.get_projection_state(source_id, 1)
+        self.assertEqual(projection["state"], "projected")
+        self.assertTrue((self.journal / projection["projection_path"]).is_file())
 
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]

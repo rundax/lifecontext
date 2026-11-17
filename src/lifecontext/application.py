@@ -769,6 +769,7 @@ class JournalApplication:
                 result=self._manifest_result(submitted),
             )
             report["completed"] += 1
+            self._try_project(source_id, source_version)
             return completed["state"] == "completed"
         reconciled = False
         try:
@@ -871,6 +872,7 @@ class JournalApplication:
             result=self._manifest_result(manifest),
         )
         report["completed"] += 1
+        self._try_project(manifest.source_id, manifest.source_version)
         return completed["state"] == "completed"
 
     async def _recover_curation_operation(
@@ -2187,7 +2189,7 @@ class JournalApplication:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
             raise ApplicationError(code) from None
-        self._project_unindexed(source_id, source_version)
+        self._try_project(source_id, source_version)
         operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
@@ -2379,7 +2381,7 @@ class JournalApplication:
                         raise ApplicationError("conflict") from None
                     manifest = existing.manifest
                 self.catalog.register_manifest(manifest)
-                self._project_unindexed(source_id, target_version)
+                self._try_project(source_id, target_version)
                 submission_content = content_bytes
                 await self._submit_curation_source(manifest, submission_content)
                 self._project_indexed(source_id, target_version)
@@ -2390,6 +2392,7 @@ class JournalApplication:
                 manifest = evidence.manifest
                 submission_content = evidence.original_bytes
                 await self._submit_curation_source(manifest, submission_content)
+                self._try_project(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
                 )
@@ -3493,8 +3496,8 @@ class JournalApplication:
             if exc.code != "conflict":
                 raise
 
-    def _project_unindexed(self, source_id: str, source_version: int) -> None:
-        """Show an entry in the vault before or without indexing; a vault failure never stops indexing."""
+    def _try_project(self, source_id: str, source_version: int) -> None:
+        """Project an entry where a vault failure must not stop indexing; the projection state records it."""
         try:
             self.project(source_id, source_version)
         except Exception:  # noqa: BLE001 -- the projection after indexing reports a vault failure
