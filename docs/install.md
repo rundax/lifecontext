@@ -68,10 +68,14 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    Face cache (about 0.6 GB), unless the cache already has them, so the
    service's first start makes no Hugging Face calls.
 6. Installs Tesseract with English, Russian and Ukrainian through Homebrew on
-   macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux) when `sudo`
-   works without a password prompt; it never asks for a password. Otherwise it
-   prints the exact command and goes on; scans and images stay unread (listed as unresolved) and
-   `doctor` reports OCR as missing until you run it.
+   macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux). When `sudo`
+   works without a password it uses it. In a terminal, if it does not, the
+   installer asks "Install Tesseract with sudo now?" first and then lets `sudo`
+   ask for your password on that terminal; it forgets the `sudo` password
+   (`sudo -k`) as soon as the install ends. With `--non-interactive` it never
+   asks. If `sudo` is not used it prints the exact command and goes on; scans
+   and images stay unread (listed as unresolved) and `doctor` reports OCR as
+   missing until you run it.
 7. Sets up `~/.lifeweave` and the vault. In a terminal (this works under
    `curl | sh` too) it asks which model to use, with no choice made for you:
 
@@ -91,11 +95,14 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`),
    the API key with a hidden prompt (a server on this machine needs none), the
    vault folder, and whether to turn notes you put in `Journal/Inbox` into
-   journal entries automatically. The key reaches `lifecontext init` through a
+   journal entries automatically (the default is No; to turn it on later run
+   `lifecontext service install --maintenance --capture`). The key reaches `lifecontext init` through a
    private temporary file, never as an argument. Without a terminal it takes
    the [variables below](#unattended-install). Existing settings in
    `~/.lifeweave` are kept; change them later with
-   [`lifecontext llm set`](#change-the-model-or-endpoint-later).
+   [`lifecontext llm set`](#change-the-model-or-endpoint-later). When you run
+   the installer again in a terminal and no key is stored yet, it asks for the
+   key again with the same hidden prompt.
 8. Checks the model with `lifecontext preflight --model-probe`: a short
    check, at most 60 seconds, also on a re-run that keeps the existing
    settings; it is skipped while the setup is not complete. If it fails, it
@@ -152,7 +159,7 @@ guesses a provider or a model: both must be set, or it stops with
 | `LIFECONTEXT_VAULT` | Vault folder (default `~/LifeContext/vault`) |
 | `LIFECONTEXT_TIMEZONE` | IANA time zone (default: the system's) |
 | `LIFECONTEXT_API_KEY_FILE` | A file whose single line is the provider key |
-| `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default here |
+| `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default, also at the terminal question |
 | `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
 ```bash
@@ -171,14 +178,17 @@ variables the script installs everything and links the skill, but skips
 
 ```bash
 lifecontext llm show                       # provider, model, base URL, whether a key is stored
+lifecontext llm set                        # at a terminal: asks for the key (hidden), changes nothing else
 lifecontext llm set --model MODEL          # change only what you name
-lifecontext llm set --api-key-stdin < ~/new-key.txt
+lifecontext llm set --api-key-stdin < ~/new-key.txt   # in scripts: the key on stdin
 lifecontext preflight --model-probe        # a short check of the result
 ```
 
 `llm show` never prints the key. `llm set` validates like `init`, keeps every
-other setting, replaces the key only when you give one (on stdin, or from the
-file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
+other setting, replaces the key only when you give one (with the hidden prompt
+that plain `lifecontext llm set` opens at a terminal; on stdin in scripts, and
+at a terminal `--api-key-stdin` also uses the hidden prompt, so the key is never
+echoed; or from the file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
 runs; without a usable service manager it prints the command to run. Changing
 the provider needs `--model` as well, and `openai_compatible` needs
 `--base-url`; [operations.md](operations.md#choosing-the-model) has every
