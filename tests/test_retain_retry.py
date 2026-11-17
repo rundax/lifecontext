@@ -58,6 +58,14 @@ class InProcessCaptureApi:
                 "sha256": manifest.sha256}
 
 
+class _Crash(BaseException):
+    """The process stops in the middle of the provider call."""
+
+
+def _crash(*_) -> None:
+    raise _Crash()
+
+
 class RetainRetryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
@@ -460,6 +468,52 @@ class RetainRetryTests(unittest.TestCase):
             self.assertEqual(self._states("curation"), ["completed"])
         self.assertEqual(len(self.client.retain_calls), 3)
         self._assert_indexed_and_edit_kept(source_id, 2, path)
+
+    def test_a_retain_interrupted_during_the_provider_call_is_resubmitted_at_startup(self) -> None:
+        source_id = "src_retry_interrupted"
+        original = b"note whose provider call was cut short"
+        self.client.on_retain = _crash
+        with self.assertRaises(_Crash):
+            asyncio.run(self.app.retain(
+                source_id, 1, original, provenance={"source": "test"},
+                idempotency_key="retain-retry-interrupted",
+            ))
+        self.client.on_retain = None
+        self.client.document_metadata.clear()  # the provider never stored it
+        self.assertEqual(self._operation_state(), ("running", None))
+        self.assertEqual(self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "pending")
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual((report["resumed"], report["completed"]), (1, 1))
+        self.assertEqual(len(self.client.retain_calls), 2)
+        self.assertEqual(self._operation_state(), ("completed", None))
+        self.assertEqual(self.app.catalog.get_provider_state(source_id, 1)["submission_state"], "submitted")
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
+
+    def test_a_correction_interrupted_during_the_provider_call_is_resubmitted_at_startup(self) -> None:
+        source_id = "src_retry_correct_interrupted"
+        self._edited_note(source_id)
+        held = dict(self.client.document_metadata)
+        self.client.on_retain = _crash
+        with self.assertRaises(_Crash):
+            self._correct(source_id, "correction whose provider call was cut short",
+                          "retain-retry-correct-interrupted")
+        self.client.on_retain = None
+        self.client.document_metadata = held
+        self.assertEqual(self._states("curation"), ["running"])
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual((report["resumed"], report["completed"]), (1, 1))
+        self.assertEqual(self._states("curation"), ["completed"])
+        self.assertEqual(self.client.retain_calls[-1][1], "correction whose provider call was cut short")
+        self.assertEqual(self.app.catalog.get_provider_state(source_id, 2)["submission_state"], "submitted")
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 2)["state"], "projected")
 
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]

@@ -766,6 +766,20 @@ class JournalApplication:
             )
             report["completed"] += 1
             return completed["state"] == "completed"
+        reconciled = False
+        try:
+            provider_state = self.catalog.get_provider_state(source_id, source_version)
+        except CatalogError:
+            return False
+        if provider_state is None or provider_state["submission_state"] != "failed":
+            # Interrupted during the provider call: done if the provider holds this exact version,
+            # else recorded as refused so it is offered again below.
+            if await self._reconcile_provider_metadata(current, manifest, report):
+                return True
+            reconciled = True
+            current = self.catalog.get_operation(current["operation_id"])
+            if current is None:
+                return False
         if current["state"] == "retryable_failed":
             # The provider refused the original from custody; offer it once more.
             try:
@@ -800,6 +814,8 @@ class JournalApplication:
                 )
                 report["completed"] += 1
                 return completed["state"] == "completed"
+        if reconciled:
+            return False
         return await self._reconcile_provider_metadata(current, manifest, report)
 
     async def _reconcile_provider_metadata(
@@ -820,6 +836,9 @@ class JournalApplication:
             or metadata.get("source_version") != str(manifest.source_version)
             or metadata.get("sha256") != manifest.sha256
         ):
+            # The provider does not hold this exact version: record it as refused, so it can be offered again.
+            with contextlib.suppress(CatalogError):
+                self._record_provider_failure(manifest)
             self._record_recovery_failure(operation, "conflict")
             return False
         if operation["state"] == "pending":
@@ -1040,21 +1059,23 @@ class JournalApplication:
             ):
                 return False
             target_manifest = target.manifest
-            if not await self._provider_has_exact_manifest(target_manifest):
-                # The provider refused the correction; offer it once more from custody.
+            held = await self._provider_has_exact_manifest(target_manifest)
+            if held is None:
+                return False
+            if not held:
+                # The provider refused the correction, or the call was interrupted: offer it once more.
                 try:
-                    provider_state = self.catalog.get_provider_state(source_id, target_version)
                     if (
-                        state != "retryable_failed"
-                        or provider_state is None
-                        or provider_state["submission_state"] != "failed"
+                        self.catalog.get_provider_state(source_id, target_version) is None
                         or self._newer_version_exists(source_id, target_version)
                         or self._retry_waiting(operation)
                     ):
                         return False
+                    self._record_provider_failure(target_manifest)
                 except (ApplicationError, CatalogError):
                     return False
-                operation = self._start_admitted_operation(operation)
+                if state == "retryable_failed":
+                    operation = self._start_admitted_operation(operation)
                 report["resumed"] += 1
                 try:
                     await self._submit_curation_source(target_manifest, target.original_bytes)
@@ -1090,11 +1111,12 @@ class JournalApplication:
 
         return False
 
-    async def _provider_has_exact_manifest(self, manifest: SourceManifest) -> bool:
+    async def _provider_has_exact_manifest(self, manifest: SourceManifest) -> bool | None:
+        """Whether the provider holds this exact version; None when it could not be asked."""
         try:
             document = await self.hindsight.get_document(manifest.source_id)
         except Exception:
-            return False
+            return None
         metadata = document.get("document_metadata")
         return (
             document.get("id") == manifest.source_id
