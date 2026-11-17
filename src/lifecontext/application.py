@@ -705,7 +705,8 @@ class JournalApplication:
             expected_hash = source.get("sha256")
             expected_size = result.get("size_bytes")
         try:
-            if self.catalog.list_tombstones(source_id):
+            # A deleted or forgotten source is never sent to the provider again.
+            if self.catalog.source_withdrawn(source_id, source_version):
                 self._record_recovery_failure(operation, "source_conflict")
                 return False
         except CatalogError:
@@ -873,6 +874,13 @@ class JournalApplication:
             or history["prepared_operation_id"] != intent.get("prepared_operation_id")
         ):
             return False
+        if action in {"correct", "reindex"}:
+            # A deleted or forgotten source is never sent to the provider again.
+            try:
+                if self.catalog.source_withdrawn(source_id, source_version):
+                    return False
+            except CatalogError:
+                return False
 
         if was_pending:
             operation = self._start_admitted_operation(operation)
@@ -2063,7 +2071,9 @@ class JournalApplication:
         # A retryable failure with the same key and request runs again from custody.
         retrying = operation["state"] == "retryable_failed"
         try:
-            if self.catalog.list_tombstones(source_id):
+            if self.catalog.list_tombstones(source_id) or (
+                retrying and self.catalog.source_withdrawn(source_id, source_version)
+            ):
                 self._fail_operation(
                     operation["operation_id"],
                     "source_conflict",

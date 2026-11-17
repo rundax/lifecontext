@@ -288,6 +288,34 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), calls)
         self.assertEqual(self.client.retain_calls[-1][1], "third version")
 
+    def test_a_deleted_note_s_refused_correction_is_never_sent_again(self) -> None:
+        source_id = "src_retry_correct_deleted"
+        key = "retain-retry-correct-deleted"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "PRIVATE second version", key)
+        prepared = asyncio.run(self.app.curate({
+            "action": "prepare_delete", "source_id": source_id, "expected_version": 2,
+        }, idempotency_key="retain-retry-prepare-delete"))
+        try:
+            asyncio.run(self.app.curate({
+                "action": "delete", "source_id": source_id, "expected_version": 2,
+                "prepared_operation_id": prepared["operation_id"],
+            }, idempotency_key="retain-retry-delete"))
+        except ApplicationError:
+            pass  # the provider never held version 2; the tombstones are what matter here
+        self.assertEqual(len(self.app.catalog.list_tombstones(source_id)), 2)
+        calls = len(self.client.retain_calls)
+
+        self.app.close()
+        self.app = self._open()
+        asyncio.run(self.app.recover_startup())
+        with self.assertRaises(ApplicationError) as caught:
+            self._correct(source_id, "PRIVATE second version", key)
+
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertEqual(len(self.client.retain_calls), calls)
+        self.assertNotIn("PRIVATE second version", [call[1] for call in self.client.retain_calls[calls:]])
+
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
 
