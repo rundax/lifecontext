@@ -177,6 +177,19 @@ class DoctorTests(unittest.TestCase):
             self.assertTrue(report["models"]["last_daemon_start"]["hf_hub_offline"])
             self.assertNotIn("models_not_cached", report["warnings"])
 
+    def test_a_failure_a_later_success_on_the_same_source_replaced_is_not_counted(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, state TEXT, result_json TEXT)")
+                intent = lambda source: json.dumps({"recovery_intent": {"source_id": source}})
+                connection.executemany("INSERT INTO operations VALUES (?, ?, ?)", [
+                    ("a", "retryable_failed", intent("doc_1")), ("b", "completed", intent("doc_1")),
+                    ("c", "permanent_failed", intent("doc_2")), ("d", "retryable_failed", "{}"),
+                    ("e", "completed", intent("doc_3")), ("f", "retryable_failed", intent("doc_3"))])
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"], {"pending": 0, "retryable_failed": 2, "permanent_failed": 1})
+
     def test_engine_auth_port_owner_and_postgres_listen_are_reported_without_secrets(self) -> None:
         from lifecontext import hindsight
         from lifecontext.hindsight import engine_token

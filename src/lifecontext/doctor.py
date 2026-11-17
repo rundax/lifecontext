@@ -64,7 +64,19 @@ def _operation_counts(catalog: Path) -> dict[str, int] | None:
     try:
         connection = sqlite3.connect(f"{catalog.as_uri()}?mode=ro", uri=True, timeout=5)
         try:
-            rows = connection.execute("SELECT state, COUNT(*) FROM operations GROUP BY state").fetchall()
+            try:
+                # A failure is not counted once a later operation on the same source completed.
+                rows = connection.execute(
+                    """SELECT state, COUNT(*) FROM operations o
+                       WHERE NOT (state IN ('retryable_failed', 'permanent_failed')
+                         AND json_extract(result_json, '$.recovery_intent.source_id') IS NOT NULL
+                         AND EXISTS (SELECT 1 FROM operations n WHERE n.state = 'completed' AND n.rowid > o.rowid
+                           AND json_extract(n.result_json, '$.recovery_intent.source_id')
+                             = json_extract(o.result_json, '$.recovery_intent.source_id')))
+                       GROUP BY state"""
+                ).fetchall()
+            except sqlite3.OperationalError:  # an old or partial catalog without the result column
+                rows = connection.execute("SELECT state, COUNT(*) FROM operations GROUP BY state").fetchall()
         finally:
             connection.close()
     except sqlite3.Error:
