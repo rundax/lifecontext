@@ -406,15 +406,16 @@ link_command() {
 	case ":$PATH:" in
 	*":$bin_dir:"*) ;;
 	*)
-		# The file the login shell reads: zsh reads ~/.zprofile, not ~/.profile; bash on macOS ~/.bash_profile.
+		# The file a terminal reads: on Linux a new terminal reads ~/.bashrc or ~/.zshrc (not ~/.profile, which
+		# only a login shell reads); on macOS the terminal is a login shell: ~/.zprofile, ~/.bash_profile.
 		case "${SHELL:-}" in
-		*/zsh) profile="~/.zprofile" ;;
-		*/bash) if [ "$os" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.profile"; fi ;;
+		*/zsh) if [ "$os" = Darwin ]; then profile="~/.zprofile"; else profile="~/.zshrc"; fi ;;
+		*/bash) if [ "$os" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.bashrc"; fi ;;
 		*/fish) profile="" ;;
 		*) profile="~/.profile" ;;
 		esac
 		if [ -n "$profile" ]; then
-			say "Add $bin_dir to PATH to run lifecontext by name: add this line to $profile, then open a new terminal:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+			say "Add $bin_dir to PATH to run lifecontext by name: add this line to $profile, then open a new terminal (or run the line now to use it in this one):  export PATH=\"\$HOME/.local/bin:\$PATH\""
 		else
 			say "Add $bin_dir to PATH to run lifecontext by name:  fish_add_path ~/.local/bin"
 		fi

@@ -694,13 +694,18 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
 
     def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
-        for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/bash", "Linux", "~/.profile"),
+        for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/zsh", "Linux", "~/.zshrc"),
+                                         ("/bin/bash", "Linux", "~/.bashrc"),
                                          ("/bin/bash", "Darwin", "~/.bash_profile"),
+                                         ("/bin/sh", "Linux", "~/.profile"),
                                          ("/usr/bin/fish", "Linux", "fish_add_path ~/.local/bin")):
             with self.subTest(shell=shell, os=os_name):
                 result = self.run_function("link_command", shell=shell, os_name=os_name)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(expected, result.stdout)
+                if expected.startswith("~"):
+                    # A new terminal does not pick the line up by itself: say how to use it now.
+                    self.assertIn("open a new terminal (or run the line now", result.stdout)
 
 
 class InstallModelCheckTests(unittest.TestCase):
