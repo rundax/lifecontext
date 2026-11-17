@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import functools
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -49,11 +50,13 @@ class VaultError(ValueError):
     """Stable managed-vault failure without exposing filesystem contents.
 
     ``path`` is the vault-relative path a check refused on disk, for ``status``
-    and ``doctor``; the API error body never carries it.
+    and ``doctor``; the API error body never carries it. ``depth`` is the index
+    of the refused folder in the call's path (``None``: the target itself).
     """
 
     on_disk = False
     path: str | None = None
+    depth: int | None = None
 
     def __init__(self, code: str, *, retryable: bool = False):
         super().__init__(code)
@@ -61,9 +64,12 @@ class VaultError(ValueError):
         self.retryable = retryable
 
 
-# A symlink in the way (ELOOP; EMLINK on BSD), a file where a folder belongs, or no access:
-# what is on disk refused the call. Other errors (a name too long, ...) say nothing about the disk.
-_ON_DISK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK, errno.ENOTDIR, errno.EACCES, errno.EPERM})
+# A symlink in the way (ELOOP; EMLINK on BSD), a file where a folder belongs, a socket or
+# device at the target (ENXIO, ENODEV), or no access: what is on disk refused the call.
+# Other errors (a name too long, ...) say nothing about the disk.
+_ON_DISK_ERRNOS = frozenset(
+    {errno.ELOOP, errno.EMLINK, errno.ENOTDIR, errno.EACCES, errno.EPERM, errno.ENXIO, errno.ENODEV}
+)
 _MAX_REFUSED_PATH = 4096
 
 
@@ -153,48 +159,58 @@ def _check_directory_fd(descriptor: int) -> os.stat_result:
     return info
 
 
-def _check_subdirectory_fd(descriptor: int) -> os.stat_result:
+def _check_subdirectory_info(info: os.stat_result) -> None:
     """A folder below ``Journal`` on a target's path: this user's, not group- or other-writable."""
-    try:
-        info = os.fstat(descriptor)
-    except OSError as exc:
-        raise VaultError("unsafe_path") from exc
     if not stat.S_ISDIR(info.st_mode):
         raise VaultError("unsafe_path")
     _check_owner(info)
     if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o022:
         raise VaultError("unsafe_permissions")
-    return info
 
 
-def _check_file_fd(descriptor: int) -> os.stat_result:
+def _check_file_info(info: os.stat_result) -> None:
     """An existing target: a regular file of this user. Its mode is not a reason to refuse."""
+    if not stat.S_ISREG(info.st_mode):
+        raise VaultError("unsafe_path")
+    _check_owner(info)
+
+
+def _check_subdirectory_fd(descriptor: int) -> os.stat_result:
     try:
         info = os.fstat(descriptor)
     except OSError as exc:
         raise VaultError("unsafe_path") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise VaultError("unsafe_path")
-    _check_owner(info)
+    _check_subdirectory_info(info)
     return info
 
 
-def _tighten_own_file(descriptor: int, info: os.stat_result) -> None:
+def _check_file_fd(descriptor: int) -> os.stat_result:
+    try:
+        info = os.fstat(descriptor)
+    except OSError as exc:
+        raise VaultError("unsafe_path") from exc
+    _check_file_info(info)
+    return info
+
+
+def _tighten_own_file(descriptor: int) -> None:
     """Drop extra mode bits from a target this call has proved is LifeContext's own.
 
     ``descriptor`` comes from ``_read_target`` (``O_NOFOLLOW`` below pinned,
     checked folders) and ``_check_file_fd`` has confirmed a regular file of
     this user, so ``fchmod`` cannot reach a symlink's target or another file.
+    The descriptor is checked again right before ``fchmod``: a second hard link
+    may be a file outside the vault, so its mode is left alone.
     """
-    if os.name != "posix" or info.st_nlink != 1:
-        # A second hard link may be a file outside the vault: leave its mode alone.
+    if os.name != "posix":
         return
-    mode = stat.S_IMODE(info.st_mode)
-    if mode & ~0o600:
-        try:
+    try:
+        info = os.fstat(descriptor)
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and mode & ~0o600:
             os.fchmod(descriptor, mode & 0o600)
-        except OSError:
-            pass
+    except OSError:
+        pass
 
 
 def _read_fd(descriptor: int) -> bytes:
@@ -273,8 +289,12 @@ def _open_parent(journal_fd: int, components: tuple[str, ...]) -> int:
     descriptor = os.dup(journal_fd)
     try:
         _check_directory_fd(descriptor)
-        for component in components:
-            child = _open_subdirectory(descriptor, component)
+        for index, component in enumerate(components):
+            try:
+                child = _open_subdirectory(descriptor, component)
+            except VaultError as exc:
+                exc.depth = index
+                raise
             os.close(descriptor)
             descriptor = child
         return descriptor
@@ -322,40 +342,56 @@ class VaultWriterLock:
     def __enter__(self) -> "VaultWriterLock":
         try:
             _check_directory_fd(self._parent_fd)
-            try:
-                existing = os.stat(
-                    LOCK_FILENAME, dir_fd=self._parent_fd, follow_symlinks=False
-                )
-            except FileNotFoundError:
-                existed = False
-            else:
-                existed = True
+        except VaultError:
+            self._close_fds()
+            raise
+        try:
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            for _ in range(3):
+                try:
+                    existing = os.stat(
+                        LOCK_FILENAME, dir_fd=self._parent_fd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    try:
+                        # O_EXCL: a lock file that appears meanwhile is checked, never adopted.
+                        self._handle = os.open(
+                            LOCK_FILENAME, flags | os.O_CREAT | os.O_EXCL, 0o600,
+                            dir_fd=self._parent_fd,
+                        )
+                    except FileExistsError:
+                        continue
+                    break
                 if not stat.S_ISREG(existing.st_mode):
                     raise VaultError("unsafe_path")
-
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            flags |= getattr(os, "O_CLOEXEC", 0)
-            self._handle = os.open(
-                LOCK_FILENAME, flags, 0o600, dir_fd=self._parent_fd
-            )
+                try:
+                    self._handle = os.open(LOCK_FILENAME, flags, dir_fd=self._parent_fd)
+                except FileNotFoundError:
+                    continue
+                break
+            if self._handle < 0:
+                raise VaultError("unsafe_path")
             info = os.fstat(self._handle)
             if not stat.S_ISREG(info.st_mode):
                 raise VaultError("unsafe_path")
             _check_owner(info)
-            if os.name == "posix" and (
-                not existed or (stat.S_IMODE(info.st_mode) != 0o600 and info.st_nlink == 1)
-            ):
+            if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600 and info.st_nlink == 1:
                 # LifeContext's own lock file, opened O_NOFOLLOW in the private root.
+                # A second hard link may be a file elsewhere: its mode is not touched.
                 os.fchmod(self._handle, 0o600)
                 info = os.fstat(self._handle)
             _check_owner_and_mode(info, directory=False)
-        except VaultError:
+        except VaultError as exc:
             self._close_fds()
+            if exc.code in {"unsafe_path", "unsafe_permissions"}:
+                exc.on_disk = True
+                exc.path = LOCK_FILENAME
             raise
         except OSError as exc:
             self._close_fds()
-            code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-            raise VaultError(code) from exc
+            error = _refused(exc)
+            error.path = LOCK_FILENAME if error.on_disk else None
+            raise error from exc
 
         try:
             import fcntl
@@ -413,10 +449,13 @@ def _names_refusals(to_path=lambda target: target):
     """Record the vault-relative path of a target a check refused on disk."""
 
     def decorate(method):
+        target_name = list(inspect.signature(method).parameters)[1]
+
         @functools.wraps(method)
-        def wrapper(self, target, *args, **kwargs):
+        def wrapper(self, *args, **kwargs):
+            target = args[0] if args else kwargs.get(target_name)
             with self._refusal_scope(to_path(target)):
-                return method(self, target, *args, **kwargs)
+                return method(self, *args, **kwargs)
 
         return wrapper
 
@@ -441,9 +480,8 @@ class ManagedVault:
         self._journal_fd = -1
         self._closed = False
         self._journal_prefix = journal_parts[len(root_parts) :]
-        # The last target refused on disk ({"path", "error"}), for status; cleared
-        # when a later call on the same path succeeds.
-        self.last_refusal: dict[str, str] | None = None
+        # The last folder or file refused on disk ({"path", "error", "kind"}); see last_refusal.
+        self._last_refusal: dict[str, str] | None = None
         self._transaction_lock = threading.RLock()
         self._transaction_state = threading.local()
         try:
@@ -509,12 +547,52 @@ class ManagedVault:
                 raise
         return True
 
-    def _vault_relative(self, relative_path: PathLike) -> str | None:
+    def _vault_relative(self, relative_path: PathLike, depth: int | None = None) -> str | None:
         try:
             parts = _raw_relative(relative_path)
         except VaultError:
             return None
+        if depth is not None:
+            parts = parts[: depth + 1]
         return "/".join((*self._journal_prefix, *parts))
+
+    @property
+    def last_refusal(self) -> dict[str, str] | None:
+        """The folder or file last refused on disk, dropped once it is acceptable again."""
+        refusal = self._last_refusal
+        if refusal is not None and not self._refusal_stands(refusal):
+            self._last_refusal = None
+        return self._last_refusal
+
+    def _refusal_stands(self, refusal: dict[str, str]) -> bool:
+        """Re-check a recorded path with no-follow opens and ``lstat`` below the vault root."""
+        if self._closed or self._root_fd < 0:
+            return True
+        parts = refusal["path"].split("/")
+        pinned = len(self._journal_prefix) if tuple(parts[: len(self._journal_prefix)]) == self._journal_prefix else 0
+        descriptor = os.dup(self._root_fd)
+        try:
+            for index, name in enumerate(parts[:-1]):
+                child = os.open(name, _directory_flags(), dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                if index >= pinned:
+                    _check_subdirectory_fd(descriptor)
+            info = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+            if refusal["kind"] == "directory":
+                _check_subdirectory_info(info)
+            elif refusal["path"] == LOCK_FILENAME:
+                _check_file_info(info)
+                _check_owner_and_mode(info, directory=False)
+            else:
+                _check_file_info(info)
+        except FileNotFoundError:
+            return False
+        except (OSError, VaultError):
+            return True
+        finally:
+            os.close(descriptor)
+        return False
 
     @contextmanager
     def _refusal_scope(self, relative_path: PathLike):
@@ -522,15 +600,21 @@ class ManagedVault:
             yield
         except VaultError as exc:
             if exc.on_disk:
-                path = self._vault_relative(relative_path)
+                path = exc.path or self._vault_relative(relative_path, exc.depth)
                 if path is not None and len(path) <= _MAX_REFUSED_PATH:
                     exc.path = path
-                    self.last_refusal = {"path": path, "error": exc.code}
+                    self._last_refusal = {
+                        "path": path,
+                        "error": exc.code,
+                        "kind": "directory" if exc.depth is not None else "file",
+                    }
             raise
         else:
-            refusal = self.last_refusal
-            if refusal is not None and refusal["path"] == self._vault_relative(relative_path):
-                self.last_refusal = None
+            refusal, target = self._last_refusal, self._vault_relative(relative_path)
+            if refusal is not None and target is not None and (
+                target == refusal["path"] or target.startswith(refusal["path"] + "/")
+            ):
+                self._last_refusal = None
 
     def writer_lock(self, timeout: float = 10.0) -> AbstractContextManager:
         self._ensure_open()
@@ -552,6 +636,33 @@ class ManagedVault:
                 finally:
                     self._transaction_state.active = False
 
+    def _open_vault_directory(self, components: tuple[str, ...]) -> int:
+        """Open a folder below the vault root without following symlinks.
+
+        The root and ``Journal`` are pinned and checked by ``verify_permissions``.
+        Every folder below ``Journal`` gets the checks the write side applies.
+        """
+        prefix = self._journal_prefix
+        pinned = len(prefix) if components[: len(prefix)] == prefix else 0
+        descriptor = os.dup(self._root_fd)
+        try:
+            for index, component in enumerate(components):
+                if index < pinned:
+                    child = os.open(component, _directory_flags(), dir_fd=descriptor)
+                else:
+                    try:
+                        child = _open_subdirectory(descriptor, component)
+                    except VaultError as exc:
+                        if isinstance(exc.__cause__, FileNotFoundError):
+                            raise VaultError("not_found") from exc
+                        raise
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
     def list_vault_directory(
         self, relative_path: PathLike, *, limit: int = 10_000
     ) -> tuple[list[tuple[str, str]], bool]:
@@ -559,14 +670,9 @@ class ManagedVault:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise VaultError("invalid_request")
         components = _raw_relative(relative_path)
-        descriptor = os.dup(self._root_fd)
+        descriptor = -1
         try:
-            for component in components:
-                child = os.open(component, _directory_flags(), dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = child
-                if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-                    raise VaultError("unsafe_path")
+            descriptor = self._open_vault_directory(components)
             found: list[tuple[str, str]] = []
             truncated = False
             with os.scandir(descriptor) as entries:
@@ -595,32 +701,25 @@ class ManagedVault:
             code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
             raise VaultError(code) from exc
         finally:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
 
     def read_vault_file(self, relative_path: PathLike, *, max_bytes: int) -> bytes:
         """Read one regular vault file through no-follow directory descriptors."""
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
             raise VaultError("invalid_request")
         components = _raw_relative(relative_path)
-        parent_fd = os.dup(self._root_fd)
+        parent_fd = -1
         descriptor = -1
         try:
-            for component in components[:-1]:
-                child = os.open(component, _directory_flags(), dir_fd=parent_fd)
-                os.close(parent_fd)
-                parent_fd = child
-                if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
-                    raise VaultError("unsafe_path")
+            parent_fd = self._open_vault_directory(components[:-1])
             try:
                 descriptor = os.open(components[-1], _FILE_FLAGS, dir_fd=parent_fd)
             except FileNotFoundError as exc:
                 raise VaultError("not_found") from exc
             except OSError as exc:
-                code = "unsafe_permissions" if exc.errno in (errno.EACCES, errno.EPERM) else "unsafe_path"
-                raise VaultError(code) from exc
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
-                raise VaultError("unsafe_path")
+                raise _refused(exc) from exc
+            info = _check_file_fd(descriptor)
             if info.st_size > max_bytes:
                 raise VaultError("file_too_large")
             chunks: list[bytes] = []
@@ -647,7 +746,8 @@ class ManagedVault:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            os.close(parent_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
 
     @staticmethod
     def _relationship_frontmatter(content: str) -> dict[str, str] | None:
@@ -879,13 +979,17 @@ class ManagedVault:
         descriptor = os.dup(self._journal_fd)
         try:
             _check_directory_fd(descriptor)
-            for component in components:
+            for index, component in enumerate(components):
                 if create:
                     try:
                         os.mkdir(component, 0o700, dir_fd=descriptor)
                     except FileExistsError:
                         pass
-                child = _open_subdirectory(descriptor, component)
+                try:
+                    child = _open_subdirectory(descriptor, component)
+                except VaultError as exc:
+                    exc.depth = index
+                    raise
                 os.close(descriptor)
                 descriptor = child
             return descriptor, name
@@ -955,7 +1059,7 @@ class ManagedVault:
                             raise VaultError("conflict")
                         if old == content:
                             # The catalog's hash proves these bytes are LifeContext's own.
-                            _tighten_own_file(descriptor, info)
+                            _tighten_own_file(descriptor)
                             return True
                     finally:
                         os.close(descriptor)
@@ -1149,7 +1253,7 @@ class ManagedVault:
                         # share.
                         if target_data == content_bytes:
                             # Marker-owned and byte-identical to what LifeContext writes here.
-                            _tighten_own_file(target_fd, target_info)
+                            _tighten_own_file(target_fd)
                             return True
                         raise VaultError("conflict")
                     finally:

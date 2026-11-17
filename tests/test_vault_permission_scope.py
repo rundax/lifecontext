@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import socket
 import stat
 import tempfile
 import unittest
@@ -274,6 +276,190 @@ class TargetPathTests(unittest.TestCase):
         with self.vault.writer_lock():
             pass
         self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+
+
+def _ledger(edge_from: str = "a", edge_to: str = "b") -> tuple[str, str]:
+    digest = hashlib.sha256(
+        json.dumps([edge_from, edge_to, "references"], ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+    text = (
+        "---\nownership_marker: lifeweave-relationship\nschema_version: 1\n"
+        f"edge_id: edge_{digest}\nidentity: sha256:{digest}\nfrom: {edge_from}\nto: {edge_to}\n"
+        "relation: references\nstatus: proposed\nrevision: 1\n---\n"
+    )
+    return f"edge_{digest}", text
+
+
+@unittest.skipUnless(os.name == "posix", "ownership and modes are POSIX properties")
+class RefusedComponentTests(unittest.TestCase):
+    """The refused folder or file is named; special files and bad folders are refused."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="lw-scope.", dir=scratch_root())
+        self.base = Path(self.temporary.name).resolve(strict=True)
+        self.root = self.base / "vault"
+        self.journal = self.root / "Journal"
+        self.wiki = self.journal / "wiki"
+        self.wiki.mkdir(mode=0o700, parents=True)
+        for folder in (self.root, self.journal, self.wiki):
+            folder.chmod(0o700)
+        self.vault = ManagedVault(self.root, self.journal)
+
+    def tearDown(self) -> None:
+        self.vault.close()
+        self.temporary.cleanup()
+
+    def _page(self) -> bool:
+        return self.vault.safe_write_bytes("wiki/Lease.md", b"page", expected_hash=None, artifact_id="page")
+
+    def test_fifo_socket_and_directory_at_the_target_are_named(self) -> None:
+        target = self.wiki / "Lease.md"
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        # A short path through the folder's descriptor: the full path exceeds AF_UNIX's limit.
+        wiki_fd = os.open(self.wiki, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, wiki_fd)
+        makers = {
+            "fifo": lambda: os.mkfifo(target),
+            "directory": lambda: target.mkdir(mode=0o700),
+            "socket": lambda: listener.bind(f"/proc/self/fd/{wiki_fd}/Lease.md"),
+        }
+        for kind, make in makers.items():
+            with self.subTest(kind=kind):
+                if kind == "socket" and not os.path.isdir("/proc/self/fd"):
+                    self.skipTest("needs /proc for a short socket path")
+                make()
+                with self.assertRaises(VaultError) as raised:
+                    self._page()
+                self.assertEqual(raised.exception.code, "unsafe_path")
+                self.assertTrue(raised.exception.on_disk)
+                self.assertEqual(raised.exception.path, "Journal/wiki/Lease.md")
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
+
+    def test_symlinked_and_group_writable_folders_are_refused_and_named(self) -> None:
+        edge_id, ledger = _ledger()
+        source_hash = hashlib.sha256(b"source").hexdigest()
+        calls = {
+            "entries": (
+                lambda: self.vault.safe_write_text("entries/source-v1.md", _owned("x")),
+                lambda: self.vault.safe_remove_projection(
+                    "entries/source-v1.md", expected_hash=source_hash,
+                    expected_source_hash=source_hash, allow_missing=True),
+            ),
+            "relationships": (
+                lambda: self.vault.safe_write_relationship_text(edge_id, ledger),
+            ),
+        }
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        for folder, folder_calls in calls.items():
+            path = self.journal / folder
+            for how in ("symlink", "group-writable"):
+                if how == "symlink":
+                    path.symlink_to(elsewhere, target_is_directory=True)
+                    code = "unsafe_path"
+                else:
+                    path.mkdir(mode=0o700)
+                    path.chmod(0o770)
+                    code = "unsafe_permissions"
+                for index, call in enumerate(folder_calls):
+                    with self.subTest(folder=folder, how=how, call=index):
+                        with self.assertRaises(VaultError) as raised:
+                            call()
+                        self.assertEqual(raised.exception.code, code)
+                        self.assertEqual(raised.exception.path, f"Journal/{folder}")
+                        self.assertEqual(self.vault.last_refusal["path"], f"Journal/{folder}")
+                if how == "symlink":
+                    path.unlink()
+                else:
+                    path.rmdir()
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_refusal_record_is_dropped_once_the_folder_is_acceptable(self) -> None:
+        self.wiki.chmod(0o777)
+        with self.assertRaises(VaultError):
+            self._page()
+        self.assertEqual(self.vault.last_refusal["path"], "Journal/wiki")
+        self.wiki.chmod(0o700)
+        self.assertIsNone(self.vault.last_refusal)
+
+    def test_reads_apply_the_write_side_folder_and_file_checks(self) -> None:
+        self.assertTrue(self._page())
+        self.assertEqual(self.vault.read_vault_file("Journal/wiki/Lease.md", max_bytes=100), b"page")
+        self.assertEqual(self.vault.list_vault_directory("Journal/wiki")[0], [("Lease.md", "file")])
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        (elsewhere / "Lease.md").write_bytes(b"outside")
+        self.wiki.chmod(0o770)
+        for call in (
+            lambda: self.vault.read_vault_file("Journal/wiki/Lease.md", max_bytes=100),
+            lambda: self.vault.list_vault_directory("Journal/wiki"),
+        ):
+            with self.assertRaises(VaultError) as raised:
+                call()
+            self.assertEqual(raised.exception.code, "unsafe_permissions")
+        self.wiki.chmod(0o700)
+        (self.journal / "documents").symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaises(VaultError) as raised:
+            self.vault.read_vault_file("Journal/documents/Lease.md", max_bytes=100)
+        self.assertEqual(raised.exception.code, "unsafe_path")
+        with self.assertRaises(VaultError) as raised:
+            self.vault.read_vault_file("Journal/missing/Lease.md", max_bytes=100)
+        self.assertEqual(raised.exception.code, "not_found")
+        os.mkfifo(self.wiki / "pipe.md")
+        with self.assertRaises(VaultError) as raised:
+            self.vault.read_vault_file("Journal/wiki/pipe.md", max_bytes=100)
+        self.assertEqual(raised.exception.code, "unsafe_path")
+        page = self.wiki / "Lease.md"
+        inode = (page.stat().st_dev, page.stat().st_ino)
+        real_fstat = os.fstat
+
+        def fstat(descriptor):
+            info = real_fstat(descriptor)
+            return _ForeignStat(info) if (info.st_dev, info.st_ino) == inode else info
+
+        with patch("lifecontext.vault.os.fstat", side_effect=fstat):
+            with self.assertRaises(VaultError) as raised:
+                self.vault.read_vault_file("Journal/wiki/Lease.md", max_bytes=100)
+        self.assertEqual(raised.exception.code, "unsafe_permissions")
+
+    def test_lock_file_with_a_second_hard_link_is_refused_and_named(self) -> None:
+        with self.vault.writer_lock():
+            pass
+        lock = self.root / ".journal.lock"
+        os.link(lock, self.base / "other-link")
+        lock.chmod(0o644)
+        with self.assertRaises(VaultError) as raised:
+            with self.vault.writer_lock():
+                pass
+        self.assertEqual(raised.exception.code, "unsafe_permissions")
+        self.assertEqual((raised.exception.on_disk, raised.exception.path), (True, ".journal.lock"))
+        self.assertEqual(stat.S_IMODE((self.base / "other-link").stat().st_mode), 0o644)
+        with self.assertRaises(VaultError) as raised:
+            self._page()
+        self.assertEqual(self.vault.last_refusal["path"], ".journal.lock")
+
+    def test_new_lock_file_is_private_whatever_the_umask(self) -> None:
+        old = os.umask(0o277)
+        try:
+            with self.vault.writer_lock():
+                pass
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE((self.root / ".journal.lock").stat().st_mode), 0o600)
+
+    def test_keyword_calls_keep_working_and_name_the_target(self) -> None:
+        (self.wiki / "Lease.md").symlink_to(self.base)
+        with self.assertRaises(VaultError) as raised:
+            self.vault.safe_write_bytes(
+                relative_path="wiki/Lease.md", content=b"page", expected_hash=None, artifact_id="page"
+            )
+        self.assertEqual(raised.exception.path, "Journal/wiki/Lease.md")
+        edge_id, ledger = _ledger()
+        self.assertTrue(self.vault.safe_write_relationship_text(edge_id=edge_id, content=ledger))
 
 
 if __name__ == "__main__":
