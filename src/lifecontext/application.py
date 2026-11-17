@@ -3500,8 +3500,9 @@ class JournalApplication:
         """Project an entry where a vault failure must not stop indexing; the projection state records it."""
         try:
             self.project(source_id, source_version)
-        except Exception:  # noqa: BLE001 -- the projection after indexing reports a vault failure
-            pass
+        except (ApplicationError, VaultError, CatalogError, CustodyError, RelationshipError) as exc:
+            _LOG.warning("journal entry %s v%s not projected: %s", source_id, source_version,
+                         getattr(exc, "code", type(exc).__name__))
 
     def _retained_date(self, source_id: str) -> str | None:
         """Return the local calendar day the catalog first registered a source."""

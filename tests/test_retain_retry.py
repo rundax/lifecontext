@@ -582,6 +582,28 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(projection["state"], "projected")
         self.assertTrue((self.journal / projection["projection_path"]).is_file())
 
+    def test_a_vault_failure_before_indexing_is_logged_and_indexing_goes_on(self) -> None:
+        source_id = "src_retry_vault_first_write"
+        write = self.app.vault.safe_write_text
+        failures = [VaultError("vault_unavailable")]
+
+        def flaky_write(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return write(*args, **kwargs)
+
+        with patch.object(self.app.vault, "safe_write_text", side_effect=flaky_write), \
+                self.assertLogs("lifecontext.application", "WARNING") as logged:
+            result = asyncio.run(self.app.retain(
+                source_id, 1, b"note whose first write failed", provenance={"source": "test"},
+                idempotency_key="retain-retry-vault-first-write",
+            ))
+
+        self.assertEqual(result["submission_state"], "submitted")
+        self.assertIn("not projected: vault_unavailable", "\n".join(logged.output))
+        self.assertNotIn("note whose first write failed", "\n".join(logged.output))
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
+
     def _unindexed(self) -> dict:
         return self.app.readiness()["indexing_pending"]
 
