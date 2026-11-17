@@ -10,12 +10,51 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lifecontext.api.app import _error_details
 from lifecontext.application import ApplicationError, JournalApplication
+from lifecontext.capture import SETTLE_SECONDS, Rejected, digest, run_once
+from lifecontext.cli import _TRANSIENT_API_ERRORS
 from lifecontext.hindsight_adapter import LifeContextHindsightAdapter
 from lifecontext.paths import LifeContextPaths
 from lifecontext.vault import ManagedVault
 from local_paths import scratch_root
 from test_application import ControlledClient
+
+
+class InProcessCaptureApi:
+    """What capture sees through the HTTP API (``cli._CaptureApi``), served by the application in process."""
+
+    def __init__(self, application: JournalApplication) -> None:
+        self.application = application
+
+    def _done(self, mutation) -> bool:
+        try:
+            asyncio.run(mutation)
+        except ApplicationError as exc:
+            status, _, code = _error_details(exc.code)
+            if code in _TRANSIENT_API_ERRORS or status >= 500:
+                return False
+            raise Rejected(code) from None
+        return True
+
+    def retain(self, source_id: str, raw: bytes, key: str) -> bool:
+        return self._done(self.application.retain(
+            source_id, 1, raw, provenance={"source": "capture"}, idempotency_key=key
+        ))
+
+    def correct(self, source_id: str, expected_version: int, raw: bytes, key: str) -> bool:
+        return self._done(self.application.curate({
+            "action": "correct", "source_id": source_id,
+            "expected_version": expected_version, "content": raw.decode("utf-8"),
+        }, idempotency_key=key))
+
+    def evidence(self, source_id: str, version: int):
+        try:
+            manifest = self.application.exact_evidence(source_id, version).manifest
+        except ApplicationError:
+            return None
+        return {"source_id": manifest.source_id, "source_version": manifest.source_version,
+                "sha256": manifest.sha256}
 
 
 class RetainRetryTests(unittest.TestCase):
@@ -248,6 +287,101 @@ class RetainRetryTests(unittest.TestCase):
         asyncio.run(self.app.recover_startup())
         self.assertEqual(len(self.client.retain_calls), calls)
         self.assertEqual(self.client.retain_calls[-1][1], "third version")
+
+    def _entry(self, source_id: str, version: int) -> tuple[dict, str]:
+        projection = self.app.catalog.get_projection_state(source_id, version)
+        return projection, (self.journal / projection["projection_path"]).read_text(encoding="utf-8")
+
+    def test_a_failed_note_is_in_the_vault_marked_until_it_is_indexed(self) -> None:
+        source_id = "src_retry_marked"
+        original = b"note written before it was indexed"
+        key = "retain-retry-marked"
+        # The entry is in the vault right after custody, before the provider sees it.
+        seen: list[str] = []
+        self.client.on_retain = lambda *_: seen.append(
+            self.app.catalog.get_projection_state(source_id, 1)["state"]
+        )
+        self._fail_once(source_id, original, key)
+        self.client.on_retain = None
+        self.assertEqual(seen, ["projected"])
+
+        pending, text = self._entry(source_id, 1)
+        self.assertEqual(pending["state"], "projected")
+        self.assertIn("\nindexing: pending\n", text)
+        self.assertTrue(text.endswith(original.decode()))
+        # Reconciling while the provider has not indexed it keeps the mark.
+        self.assertEqual(self.app.reconcile_projections()["already_projected"], 1)
+        self.assertEqual(self._entry(source_id, 1)[1], text)
+
+        asyncio.run(self.app.retain(
+            source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+        ))
+
+        indexed, text = self._entry(source_id, 1)
+        self.assertEqual(indexed["state"], "projected")
+        self.assertEqual(indexed["projection_path"], pending["projection_path"])
+        self.assertNotIn("indexing:", text)
+        self.assertTrue(text.endswith(original.decode()))
+        self.assertEqual(len(list((self.journal / "entries").iterdir())), 1)
+        self.assertEqual(self.app.reconcile_projections()["already_projected"], 1)
+
+    def test_a_note_indexed_on_the_first_try_is_written_once_without_a_mark(self) -> None:
+        source_id = "src_retry_written_once"
+        with patch.object(self.app.vault, "safe_remove_projection", side_effect=AssertionError):
+            self._edited_note(source_id)
+        projection, text = self._entry(source_id, 1)
+        self.assertEqual(projection["state"], "projected")
+        self.assertNotIn("indexing:", text)
+
+    def test_a_failed_correction_is_in_the_vault_marked_until_it_is_indexed(self) -> None:
+        source_id = "src_retry_correct_marked"
+        key = "retain-retry-correct-marked"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "second version, not indexed yet", key)
+
+        self.assertNotIn("indexing:", self._entry(source_id, 1)[1])
+        self.assertIn("\nindexing: pending\n", self._entry(source_id, 2)[1])
+
+        self._correct(source_id, "second version, not indexed yet", key)
+
+        projection, text = self._entry(source_id, 2)
+        self.assertEqual(projection["state"], "projected")
+        self.assertNotIn("indexing:", text)
+        self.assertTrue(text.endswith("second version, not indexed yet"))
+
+    def test_a_capture_run_after_a_failure_completes_the_note(self) -> None:
+        inbox = self.base / "notes" / "Inbox"
+        inbox.mkdir(parents=True)
+        note = inbox / "Lake.md"
+        source_id = "obsidian_" + digest(b"Lake.md")
+        clock = [1_000_000.0]
+
+        def scan() -> dict:
+            return run_once(inbox, self.paths, InProcessCaptureApi(self.app), now=lambda: clock[0])
+
+        for version, text in ((1, "# Walk by the lake\n\nThe water was calm.\n"),
+                              (2, "# Walk by the lake\n\nThe water was calm, then it rained.\n")):
+            note.write_text(text, encoding="utf-8")
+            scan()
+            clock[0] += SETTLE_SECONDS + 1
+            held = dict(self.client.document_metadata)
+            self.client.error = RuntimeError("rate limited")
+            self.assertEqual(scan()["pending"], 1)
+            self.client.document_metadata = held
+            self.client.error = None
+            clock[0] += 30
+
+            report = scan()
+
+            self.assertEqual((report["captured"], report["pending"], report["failed"]), (1, 0, 0))
+            self.assertEqual(
+                self.app.catalog.get_provider_state(source_id, version)["submission_state"], "submitted"
+            )
+            projection, entry = self._entry(source_id, version)
+            self.assertEqual(projection["state"], "projected")
+            self.assertNotIn("indexing:", entry)
+            self.assertTrue(entry.endswith(text))
+        self.assertEqual(self.client.retain_calls[-1][1], text)
 
     def test_different_payload_under_failed_key_is_still_a_conflict(self) -> None:
         source_id = "src_retry_conflict"
