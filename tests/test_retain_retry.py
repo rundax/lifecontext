@@ -167,6 +167,88 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "source_conflict")
         self.assertEqual(len(self.client.retain_calls), calls)
 
+    def _correct(self, source_id: str, content: str, key: str, expected_version: int = 1):
+        return asyncio.run(self.app.curate({
+            "action": "correct", "source_id": source_id,
+            "expected_version": expected_version, "content": content,
+        }, idempotency_key=key))
+
+    def _fail_correction(self, source_id: str, content: str, key: str) -> None:
+        held = dict(self.client.document_metadata)
+        self.client.error = RuntimeError("rate limited")
+        with self.assertRaises(ApplicationError) as caught:
+            self._correct(source_id, content, key)
+        self.assertEqual(caught.exception.code, "retain_failed")
+        # The provider kept what it had: the refused version never reached it.
+        self.client.document_metadata = held
+        self.client.error = None
+
+    def _edited_note(self, source_id: str) -> None:
+        asyncio.run(self.app.retain(
+            source_id, 1, b"first version of the note", provenance={"source": "test"},
+            idempotency_key=source_id + "-v1",
+        ))
+
+    def test_same_key_after_provider_error_indexes_an_edited_note(self) -> None:
+        source_id = "src_retry_correct_same_key"
+        key = "retain-retry-correct-key"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "second version of the note", key)
+
+        result = self._correct(source_id, "second version of the note", key)
+
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["summary"]["sources"][0]["source_version"], 2)
+        self.assertEqual(len(self.client.retain_calls), 3)
+        self.assertEqual(self.client.retain_calls[-1][1], "second version of the note")
+        self.assertEqual(
+            self.app.catalog.get_provider_state(source_id, 2)["submission_state"], "submitted"
+        )
+        projection = self.app.catalog.get_projection_state(source_id, 2)
+        self.assertEqual(projection["state"], "projected")
+        self.assertTrue((self.journal / projection["projection_path"]).is_file())
+
+        replay = self._correct(source_id, "second version of the note", key)
+        self.assertEqual(replay, result)
+        self.assertEqual(len(self.client.retain_calls), 3)
+
+    def test_restart_resubmits_a_failed_correction_from_custody(self) -> None:
+        source_id = "src_retry_correct_restart"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "corrected at startup", "retain-retry-correct-restart")
+        self.app.close()
+        self.app = self._open()
+
+        report = asyncio.run(self.app.recover_startup())
+
+        self.assertEqual((report["resumed"], report["completed"]), (1, 1))
+        self.assertEqual(len(self.client.retain_calls), 3)
+        self.assertEqual(self.client.retain_calls[-1][1], "corrected at startup")
+        self.assertEqual(
+            self.app.catalog.get_provider_state(source_id, 2)["submission_state"], "submitted"
+        )
+        projection = self.app.catalog.get_projection_state(source_id, 2)
+        self.assertEqual(projection["state"], "projected")
+        self.assertTrue((self.journal / projection["projection_path"]).is_file())
+        again = asyncio.run(self.app.recover_startup())
+        self.assertEqual(again["resumed"], 0)
+        self.assertEqual(len(self.client.retain_calls), 3)
+
+    def test_correction_retry_never_indexes_an_older_version_over_a_newer_one(self) -> None:
+        source_id = "src_retry_correct_older"
+        key = "retain-retry-correct-older"
+        self._edited_note(source_id)
+        self._fail_correction(source_id, "second version", key)
+        self._correct(source_id, "third version", "retain-retry-correct-third", expected_version=2)
+        calls = len(self.client.retain_calls)
+
+        with self.assertRaises(ApplicationError) as caught:
+            self._correct(source_id, "second version", key)
+        self.assertEqual(caught.exception.code, "conflict")
+        asyncio.run(self.app.recover_startup())
+        self.assertEqual(len(self.client.retain_calls), calls)
+        self.assertEqual(self.client.retain_calls[-1][1], "third version")
+
     def test_different_payload_under_failed_key_is_still_a_conflict(self) -> None:
         source_id = "src_retry_conflict"
         original = b"original failed note"
