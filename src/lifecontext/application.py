@@ -1281,26 +1281,17 @@ class JournalApplication:
             self._mark_projection_conflict(projection, None)
             return False
         manifest = evidence.manifest
-        pending = self._indexing_pending(source_id, source_version, provider)
         try:
-            content = self._render_projection(manifest, evidence.original_bytes, indexing_pending=pending)
+            content = self._render_projection(manifest, evidence.original_bytes)
             basename = self._journal_basename(manifest, evidence.original_bytes)
         except ApplicationError:
             self._mark_projection_conflict(projection, None)
             return False
-        written_hash = None
         if hashlib.sha256(content.encode("utf-8")).hexdigest() != desired_hash:
-            other = self._render_projection(manifest, evidence.original_bytes, indexing_pending=not pending)
-            if hashlib.sha256(other.encode("utf-8")).hexdigest() != desired_hash:
-                content = self._earlier_projection(manifest, evidence.original_bytes, path, desired_hash)
-                if content is None:
-                    self._mark_projection_conflict(projection, None)
-                    return False
-            elif not restore_missing:
-                content = other
-            else:
-                # Indexing failed or finished since the entry was written: write it again, (un)marked.
-                written_hash, desired_hash = desired_hash, hashlib.sha256(content.encode("utf-8")).hexdigest()
+            content = self._earlier_projection(manifest, evidence.original_bytes, path, desired_hash)
+            if content is None:
+                self._mark_projection_conflict(projection, None)
+                return False
 
         try:
             journal_prefix = self.vault.journal_path.relative_to(
@@ -1321,17 +1312,6 @@ class JournalApplication:
                 return False
             if actual_hash == desired_hash:
                 pass
-            elif actual_hash == written_hash:
-                # The vault never rewrites a file in place: remove the unchanged entry, then write it.
-                try:
-                    self.vault.safe_remove_projection(
-                        path, expected_hash=written_hash, expected_source_hash=manifest.sha256,
-                        expected_source_id=source_id, expected_source_version=source_version,
-                    )
-                    self.vault.safe_write_text(path, content)
-                except VaultError:
-                    self._mark_projection_conflict(projection, actual_hash)
-                    return False
             elif last_hash is not None and actual_hash == last_hash:
                 try:
                     self.vault.safe_write_text(
@@ -1447,16 +1427,6 @@ class JournalApplication:
             )
         except CatalogError:
             raise ApplicationError("internal_error") from None
-
-    def _indexing_pending(
-        self, source_id: str, source_version: int, provider: Mapping[str, Any] | None
-    ) -> bool:
-        """True while the provider has refused this version and no newer version replaced it."""
-        return (
-            provider is not None
-            and provider["submission_state"] == "failed"
-            and not self._newer_version_exists(source_id, source_version)
-        )
 
     def _record_recovery_failure(self, operation: dict[str, Any], code: str) -> None:
         state = operation["state"]
@@ -2164,7 +2134,6 @@ class JournalApplication:
             self.project(source_id, source_version)
         except Exception as exc:
             code = self._retain_error_code(exc)
-            self._project_unindexed(source_id, source_version)  # marks a refused entry "indexing pending"
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
             raise ApplicationError(code) from None
         completed = self._transition_operation(
@@ -2350,11 +2319,7 @@ class JournalApplication:
                 self.catalog.register_manifest(manifest)
                 self._project_unindexed(source_id, target_version)
                 submission_content = content_bytes
-                try:
-                    await self._submit_curation_source(manifest, submission_content)
-                except Exception:
-                    self._project_unindexed(source_id, target_version)  # marks it "indexing pending"
-                    raise
+                await self._submit_curation_source(manifest, submission_content)
                 self.project(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
@@ -3574,10 +3539,9 @@ class JournalApplication:
             return {"projection_path": recovered["projection_path"], "sha256": recovered["last_projected_hash"]}
         projection_path = self._allocate_journal_path(manifest, evidence.original_bytes)
         prior_hash = prior["last_projected_hash"] if prior is not None else None
-        pending = self._indexing_pending(source_id, source_version, provider)
 
         try:
-            content = self._render_projection(manifest, evidence.original_bytes, indexing_pending=pending)
+            content = self._render_projection(manifest, evidence.original_bytes)
             if len(content.encode("utf-8")) > self.limits.max_file_bytes:
                 raise ApplicationError("file_too_large")
         except ApplicationError:
@@ -3767,13 +3731,11 @@ class JournalApplication:
 
     @staticmethod
     def _render_projection(
-        manifest: SourceManifest, original_bytes: bytes, *, legacy: bool = False, first_line_title: bool = False,
-        indexing_pending: bool = False,
+        manifest: SourceManifest, original_bytes: bytes, *, legacy: bool = False, first_line_title: bool = False
     ) -> str:
         """Render the deterministic managed projection for one exact source version.
 
         ``legacy`` and ``first_line_title`` reproduce earlier releases' output, to recognise their files.
-        ``indexing_pending`` marks an entry the provider refused and has not indexed since.
         """
         try:
             source_text = original_bytes.decode("utf-8")
@@ -3790,8 +3752,6 @@ class JournalApplication:
             title = first_line_journal_title if first_line_title else journal_title
             frontmatter["title"] = title(manifest, original_bytes)
             frontmatter["aliases"] = [f"{manifest.source_id}-v{manifest.source_version}"]
-        if indexing_pending:
-            frontmatter["indexing"] = "pending"
         return (
             "---\n"
             + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=True)

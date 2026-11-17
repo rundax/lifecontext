@@ -292,10 +292,10 @@ class RetainRetryTests(unittest.TestCase):
         projection = self.app.catalog.get_projection_state(source_id, version)
         return projection, (self.journal / projection["projection_path"]).read_text(encoding="utf-8")
 
-    def test_a_failed_note_is_in_the_vault_marked_until_it_is_indexed(self) -> None:
-        source_id = "src_retry_marked"
+    def test_a_failed_note_is_in_the_vault_right_after_custody_and_written_once(self) -> None:
+        source_id = "src_retry_early_entry"
         original = b"note written before it was indexed"
-        key = "retain-retry-marked"
+        key = "retain-retry-early-entry"
         # The entry is in the vault right after custody, before the provider sees it.
         seen: list[str] = []
         self.client.on_retain = lambda *_: seen.append(
@@ -307,47 +307,45 @@ class RetainRetryTests(unittest.TestCase):
 
         pending, text = self._entry(source_id, 1)
         self.assertEqual(pending["state"], "projected")
-        self.assertIn("\nindexing: pending\n", text)
         self.assertTrue(text.endswith(original.decode()))
-        # Reconciling while the provider has not indexed it keeps the mark.
         self.assertEqual(self.app.reconcile_projections()["already_projected"], 1)
         self.assertEqual(self._entry(source_id, 1)[1], text)
 
-        asyncio.run(self.app.retain(
-            source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
-        ))
+        # Indexing it later never rewrites or replaces the entry.
+        with patch.object(self.app.vault, "safe_write_text", side_effect=AssertionError), \
+                patch.object(self.app.vault, "safe_remove_projection", side_effect=AssertionError):
+            asyncio.run(self.app.retain(
+                source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+            ))
 
-        indexed, text = self._entry(source_id, 1)
+        indexed, after = self._entry(source_id, 1)
         self.assertEqual(indexed["state"], "projected")
         self.assertEqual(indexed["projection_path"], pending["projection_path"])
-        self.assertNotIn("indexing:", text)
-        self.assertTrue(text.endswith(original.decode()))
+        self.assertEqual(after, text)
         self.assertEqual(len(list((self.journal / "entries").iterdir())), 1)
-        self.assertEqual(self.app.reconcile_projections()["already_projected"], 1)
 
-    def test_a_note_indexed_on_the_first_try_is_written_once_without_a_mark(self) -> None:
+    def test_a_note_indexed_on_the_first_try_is_written_once(self) -> None:
         source_id = "src_retry_written_once"
         with patch.object(self.app.vault, "safe_remove_projection", side_effect=AssertionError):
             self._edited_note(source_id)
         projection, text = self._entry(source_id, 1)
         self.assertEqual(projection["state"], "projected")
-        self.assertNotIn("indexing:", text)
+        self.assertTrue(text.endswith("first version of the note"))
 
-    def test_a_failed_correction_is_in_the_vault_marked_until_it_is_indexed(self) -> None:
-        source_id = "src_retry_correct_marked"
-        key = "retain-retry-correct-marked"
+    def test_a_failed_correction_is_in_the_vault_before_it_is_indexed(self) -> None:
+        source_id = "src_retry_correct_early_entry"
+        key = "retain-retry-correct-early-entry"
         self._edited_note(source_id)
         self._fail_correction(source_id, "second version, not indexed yet", key)
-
-        self.assertNotIn("indexing:", self._entry(source_id, 1)[1])
-        self.assertIn("\nindexing: pending\n", self._entry(source_id, 2)[1])
+        pending, text = self._entry(source_id, 2)
+        self.assertEqual(pending["state"], "projected")
+        self.assertTrue(text.endswith("second version, not indexed yet"))
 
         self._correct(source_id, "second version, not indexed yet", key)
 
-        projection, text = self._entry(source_id, 2)
+        projection, after = self._entry(source_id, 2)
         self.assertEqual(projection["state"], "projected")
-        self.assertNotIn("indexing:", text)
-        self.assertTrue(text.endswith("second version, not indexed yet"))
+        self.assertEqual(after, text)
 
     def test_a_capture_run_after_a_failure_completes_the_note(self) -> None:
         inbox = self.base / "notes" / "Inbox"
@@ -379,7 +377,6 @@ class RetainRetryTests(unittest.TestCase):
             )
             projection, entry = self._entry(source_id, version)
             self.assertEqual(projection["state"], "projected")
-            self.assertNotIn("indexing:", entry)
             self.assertTrue(entry.endswith(text))
         self.assertEqual(self.client.retain_calls[-1][1], text)
 

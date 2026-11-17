@@ -44,7 +44,7 @@ def snapshot(home: Path, root: Path, journal: Path) -> dict:
                 if manifest.to_bytes() != evidence.manifest.to_bytes():
                     raise ValueError("custody_manifest_mismatch")
                 # Earlier releases' renderings stay valid until reconciliation renames the entry.
-                renderings = [{}, {"indexing_pending": True}, {"first_line_title": True}]
+                renderings = [{}, {"first_line_title": True}]
                 if path == f"entries/{source_id}-v{version}.md":
                     renderings.append({"legacy": True})
                 if not any(
