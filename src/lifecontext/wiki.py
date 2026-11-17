@@ -36,6 +36,9 @@ WINDOW_CLAIM_BYTES = 3000
 MAX_WINDOW_CLAIMS = 8
 MAX_SHARED_SOURCE_CLAIMS = 8
 MAX_INDEX_ENTRIES = 128
+# No index entry (a claim with its citation and link) is smaller than this, so a page
+# with less room left than this is full.
+MIN_INDEX_ENTRY_BYTES = 200
 MAX_PAGE_CLAIMS = 128
 INDEX_MORE = "And {count} more: `lifecontext documents list`"
 # After its own page, one routing request places a document's checked claims on
@@ -1011,8 +1014,13 @@ class WikiService:
                  and not self.forgotten(page["page_id"], page["current_revision"], cache=cache)}
         return len(pages - set(listed))
 
-    def show(self, page_id: str, revision: int | None = None, **render: Any) -> dict | None:
+    def show(self, page_id: str, revision: int | None = None, *, history: bool = False, **render: Any) -> dict | None:
         """A page, one revision and its managed text; ``render`` passes the vault's state and link resolvers.
+
+        ``citations`` lists every citation the text shows, so a caller can tell which
+        source and passages a label stands for. ``history`` renders the revision for its
+        history file: the index then omits its count of unlisted documents, which belongs
+        to the current revision only and would rewrite every history file on each import.
 
         Text of forgotten or deleted documents is never shown, in current or earlier
         revisions; a page that cites nothing else shows a fixed line under a neutral
@@ -1037,7 +1045,8 @@ class WikiService:
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
             extra = {}
             if not withdrawn and page_id == INDEX_PAGE:
-                extra["index_more"] = self._index_more(visible.links, cache)
+                if revision == page["current_revision"] and not history:
+                    extra["index_more"] = self._index_more(visible.links, cache)
             elif not withdrawn and page_id.startswith("source_"):
                 extra["coverage"] = self._coverage_line(visible)
             shown = [] if withdrawn else [
@@ -1174,7 +1183,8 @@ class WikiService:
                     add("link_missing", "warning", f"A rebuild drops or restores the link: lifecontext wiki rebuild --json; see lifecontext wiki show {page_id} --json",
                         page_id=page_id, detail=link)
             size = len(_patch_json(patch).encode())
-            if len(patch.claims) > 0.9 * MAX_PAGE_CLAIMS or size > 0.9 * MAX_PATCH_BYTES:
+            # The index fills its page by design; its own bound is the entry count.
+            if page_id != INDEX_PAGE and (len(patch.claims) > 0.9 * MAX_PAGE_CLAIMS or size > 0.9 * MAX_PATCH_BYTES):
                 add("page_near_limit", "warning", f"At the bound a document's newest claims are left out; see lifecontext wiki show {page_id} --json",
                     page_id=page_id, detail=f"{len(patch.claims)}/{MAX_PAGE_CLAIMS} claims, {size}/{MAX_PATCH_BYTES} bytes")
             if page_id.startswith(SHARED_PREFIXES):
@@ -1507,23 +1517,27 @@ class WikiService:
                 continue
         revision = current["current_revision"] if current else 0
         claims, links, summary, dependencies = [], [], [], {}
+        size = len(_patch_json(WikiPatch(INDEX_PAGE, "Index", revision, (), (), ())).encode())
         for page_id, patch in sorted(pages, key=lambda item: (item[1].title.casefold(), item[0])):
-            if len(links) == MAX_INDEX_ENTRIES:
+            if len(links) == MAX_INDEX_ENTRIES or MAX_PATCH_BYTES - size < MIN_INDEX_ENTRY_BYTES:
                 break
             for claim, sentence in self._index_candidates(patch):
+                sentences = [*summary, SummarySentence(sentence, (len(claims) + 1,))] if sentence else summary
+                candidate = WikiPatch(INDEX_PAGE, "Index", revision, (*claims, claim), (), (*links, page_id), tuple(sentences))
+                candidate_size = len(_patch_json(candidate).encode())
+                if candidate_size > MAX_PATCH_BYTES:
+                    # Too big for what is left; a later document's smaller entry may still fit.
+                    break
                 try:
-                    # One entry at a time: a damaged document is skipped, never fatal,
-                    # and only its own evidence is in memory.
+                    # Only an entry that fits is checked against its original: a damaged
+                    # document is skipped, never fatal, and only its own evidence is in memory.
                     entry = self._validate(WikiPatch(INDEX_PAGE, "Index", revision, (claim,), (), ()))
                 except (WikiError, ValueError, TypeError):
                     continue
-                sentences = [*summary, SummarySentence(sentence, (len(claims) + 1,))] if sentence else summary
-                candidate = WikiPatch(INDEX_PAGE, "Index", revision, (*claims, claim), (), (*links, page_id), tuple(sentences))
-                if len(_patch_json(candidate).encode()) <= MAX_PATCH_BYTES:
-                    claims.append(claim)
-                    links.append(page_id)
-                    summary = sentences
-                    dependencies.update({json.dumps(d, sort_keys=True): d for d in entry})
+                claims.append(claim)
+                links.append(page_id)
+                summary, size = sentences, candidate_size
+                dependencies.update({json.dumps(d, sort_keys=True): d for d in entry})
                 break
         if not claims:
             return []

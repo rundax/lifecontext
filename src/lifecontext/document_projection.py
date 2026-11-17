@@ -688,7 +688,7 @@ class DocumentProjectionService:
             expected = _hash(existing)
         results = []
         for row in self.catalog.list_wiki_revisions(page_id):
-            historical = self.wiki_service.show(page_id, row["revision"])
+            historical = self.wiki_service.show(page_id, row["revision"], history=True)
             history_id = page_id + "_history"
             self._recover_publication(history_id, row["revision"], layer="wiki")
             history_path = self._wiki_filename(PurePosixPath(path).stem, directory="wiki/history",
