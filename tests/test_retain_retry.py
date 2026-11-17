@@ -495,6 +495,31 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(self._operation_state(), ("completed", None))
         self._assert_indexed_and_edit_kept(source_id, 1, path)
 
+    def test_a_vault_error_after_a_retry_indexed_the_note_completes_and_reconcile_repairs(self) -> None:
+        source_id = "src_retry_vault_after_indexing"
+        original = b"note indexed while the vault was broken"
+        key = "retain-retry-vault-after-indexing"
+        self._fail_once(source_id, original, key)
+        path = self.journal / self.app.catalog.get_projection_state(source_id, 1)["projection_path"]
+        path.unlink()
+
+        with patch.object(self.app.vault, "safe_write_text", side_effect=VaultError("unsafe_permissions")):
+            result = asyncio.run(self.app.retain(
+                source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+            ))
+
+        # Indexed, so the operation completes; capture's next run replays it instead of polling forever.
+        self.assertEqual(result["submission_state"], "submitted")
+        self.assertEqual(self._operation_state(), ("completed", None))
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "failed")
+        self.assertEqual(self.app.readiness()["indexing_pending"]["count"], 0)
+        self.assertEqual(asyncio.run(self.app.retain(
+            source_id, 1, original, provenance={"source": "test"}, idempotency_key=key
+        )), result)
+        self.app.reconcile_projections()
+        self.assertEqual(self.app.catalog.get_projection_state(source_id, 1)["state"], "projected")
+        self.assertTrue(path.is_file())
+
     def test_a_correction_edited_before_its_retry_completes_and_keeps_the_edit(self) -> None:
         source_id = "src_retry_edited_correction"
         key = "retain-retry-edited-correction"

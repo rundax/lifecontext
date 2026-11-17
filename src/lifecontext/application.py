@@ -808,7 +808,7 @@ class JournalApplication:
                     submitted = await self._submit_retained_manifest(
                         manifest, evidence.original_bytes
                     )
-                    self._project_indexed(source_id, source_version)
+                    self._try_project(source_id, source_version)
                 except Exception as exc:  # noqa: BLE001 -- any failure fails the operation
                     self._startup_resubmits = 0  # the provider still refuses: the rest wait too
                     code = self._retain_error_code(exc)
@@ -1093,7 +1093,7 @@ class JournalApplication:
                     self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                     return False
             try:
-                self._project_indexed(source_id, target_version)
+                self._try_project(source_id, target_version)
                 if history is None:
                     self.catalog.record_curation_history(
                         operation["operation_id"], source_id, target_version, action
@@ -1385,8 +1385,15 @@ class JournalApplication:
                 return False
             try:
                 self.vault.safe_write_text(path, content)
-            except VaultError:
-                self._mark_projection_conflict(projection, None)
+            except VaultError as exc:
+                if exc.code in {"conflict", "file_exists", "unmanaged_file", "sync_conflict"}:
+                    self._mark_projection_conflict(projection, None)
+                else:
+                    # The vault failed, not an edit: reconcile writes the entry once it is fixed.
+                    self.catalog.set_projection_state(
+                        source_id, source_version, state="failed", projection_path=path,
+                        desired_hash=desired_hash, last_projected_hash=last_hash,
+                    )
                 # Raised, so a projection retried after a failed write reports the vault's reason.
                 raise
 
@@ -2203,7 +2210,7 @@ class JournalApplication:
         operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
-            self._project_indexed(source_id, source_version)
+            self._try_project(source_id, source_version)
         except Exception as exc:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
@@ -2394,7 +2401,7 @@ class JournalApplication:
                 self._try_project(source_id, target_version)
                 submission_content = content_bytes
                 await self._submit_curation_source(manifest, submission_content)
-                self._project_indexed(source_id, target_version)
+                self._try_project(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
                 )
@@ -3499,17 +3506,9 @@ class JournalApplication:
         with self.vault.writer_transaction():
             return self._project_journal_locked(source_id, source_version)
 
-    def _project_indexed(self, source_id: str, source_version: int) -> None:
-        """Project a version the provider has indexed; an entry edited meanwhile is a review item, not a failure."""
-        try:
-            self.project(source_id, source_version)
-        except ApplicationError as exc:
-            # The edit stays in the vault, recorded as a projection conflict for status, doctor and reconcile.
-            if exc.code != "conflict":
-                raise
-
     def _try_project(self, source_id: str, source_version: int) -> None:
-        """Project an entry where a vault failure must not stop indexing; the projection state records it."""
+        """Project an entry beside indexing, which a projection failure never fails: an edit stays a
+        conflict, a vault error leaves the entry failed, both recorded for status, doctor and reconcile."""
         try:
             self.project(source_id, source_version)
         except (ApplicationError, VaultError, CatalogError, CustodyError, RelationshipError) as exc:
