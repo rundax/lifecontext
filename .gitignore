@@ -11,12 +11,16 @@
 
 # Source documents imported for ingestion (copyrighted or personal)
 /*.pdf
+/*.jpg
+/*.jpeg
+/*.png
 
 # Planning and local assistant state
 /plan/
 /plans/
 /.planning/
 /.omc/
+.omc/
 /.claude/
 /.gsd/
 

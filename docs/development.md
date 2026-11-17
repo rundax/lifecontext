@@ -244,8 +244,9 @@ GitHub Actions workflows live in `.github/workflows/`:
   restore. The native install must end with the three next steps. A
   `wrong_key` job installs with a key the provider rejects and expects exit 3,
   "the provider rejected the key" followed by its `lifecontext llm set` fix,
-  and no doctor problem. Both checks are recorded as skipped while `install.sh`
-  has no model probe (no `--skip-model-probe` option).
+  and no doctor problem. `install.sh` has the model probe, so both checks run;
+  they are recorded as skipped only for an older script without the
+  `--skip-model-probe` option.
   Every job takes the model from two inputs:
   - `-f provider=openai_compatible` (the default) goes through the CI gateway:
     repository secrets `LIFECONTEXT_CI_LLM_API_KEY` and
@@ -342,11 +343,21 @@ version with letters in it is a pre-release.
     public_tag=vVERSION`. For a pre-release this installs from the release's
     own URL. For a final it installs through `releases/latest` and also pulls
     and verifies the image.
-12. For a final, deploy the site: `gh workflow run pages.yml --ref main`.
-    Then set the repository's website field, About text and topics, and upload
-    `.github/social-preview.png` under Settings, General, Social preview
-    (`scripts/render_social_images.py` renders it with `site/og.png` and
-    `site/og-uk.png`).
+12. For a final, deploy the site.
+    - First undo the pre-release text on `main`: set the eyebrow in
+      `site/index.html` and `site/uk/index.html` to "1.2.0"; on both pages
+      delete the pre-release Docker paragraph and the `docker compose build`
+      line of the Docker commands; in `site/llms.txt` write "Current version:
+      1.2.0" and drop "not published yet"; switch the commands in the README
+      and `docs/install.md` back to `releases/latest`, remove their
+      pre-release notes and their "not published yet" Docker text, and update
+      the README Status section; set the `plugin.json` homepage to
+      `https://rundax.github.io/lifecontext/`.
+    - Then run `gh workflow run pages.yml --ref main`, and set the
+      repository's website field, About text and topics, and upload
+      `.github/social-preview.png` under Settings, General, Social preview
+      (`scripts/render_social_images.py` renders it with `site/og.png` and
+      `site/og-uk.png`).
 13. For a final, merge back into `main`: the `CHANGELOG.md` heading, and the
     versions by the rule below. A pre-release is not merged back. Its branch
     changes only the version; fixes land on `main` and go out in a new branch
@@ -356,7 +367,8 @@ version with letters in it is a pre-release.
 `src/lifecontext/__init__.py` and `plugin.json` carry the next development
 version (`1.2.1.dev0` after `1.2.0`). `install.sh` and `compose.yaml` keep
 naming the latest published release (`1.2.0`): an install from a checkout
-fetches that release, and the README's Docker quick start pulls that image.
+fetches that release, and, once the image is public, `docker compose up` pulls
+that image.
 
 **If a check of the draft fails** (step 8): delete the draft and the tag (a
 draft is not immutable), fix on `main`, cut the branch again and tag the same

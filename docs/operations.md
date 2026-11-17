@@ -34,7 +34,7 @@ type the exact model ID your provider uses; the provider's model list has them.
 The other provider IDs in [Required LLM configuration](#required-llm-configuration)
 are available through `--provider` and `LIFECONTEXT_PROVIDER`.
 
-With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less.
+With Anthropic, `claude-sonnet-5` is expected to work (not yet qualified end to end) and `claude-haiku-5-5` costs less.
 `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` and
 `claude-mythos-5-1` do not work yet: LifeContext's retain step uses strict
 structured output, which on Anthropic is a forced tool call, and these models

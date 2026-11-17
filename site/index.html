@@ -17,7 +17,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="LifeContext">
 <meta property="og:title" content="LifeContext: your documents, compiled. Every claim cited.">
-<meta property="og:description" content="Your AI agents read your leases, letters and scans with receipts: every claim is a literal quote, checked against the source and cited to its page and version. Self-hosted; the files stay on your machine.">
+<meta property="og:description" content="Your leases, letters and scans compiled into a wiki where every claim is a literal quote, checked against the source and cited to its page and version. Your AI agents answer from it. Self-hosted; the files stay on your machine.">
 <meta property="og:url" content="https://rundax.github.io/lifecontext/">
 <meta property="og:image" content="https://rundax.github.io/lifecontext/og.png">
 <meta property="og:image:width" content="1200">
@@ -86,7 +86,7 @@
 <section class="hero" aria-labelledby="hero-h">
   <div class="wrap hero-grid">
     <div class="hero-head">
-      <p class="eyebrow">Self-hosted · source-available · v1.2</p>
+      <p class="eyebrow">Self-hosted · source-available · release candidate 1.2.0rc1</p>
       <h1 id="hero-h">Your documents, compiled. <span class="accent-line">Every claim cited.</span></h1>
     </div>
     <div class="hero-copy">
@@ -108,7 +108,7 @@
 
     <figure class="anatomy" aria-labelledby="anatomy-cap">
       <div class="anatomy-card">
-        <div class="card-bar"><span class="path">wiki/Topics/Apartment lease.md</span><span class="badge badge-example">Example</span></div>
+        <div class="card-bar"><span class="path">Journal/wiki/Apartment lease.md</span><span class="badge badge-example">Example</span></div>
         <div class="anatomy-body">
           <p class="anatomy-title">Apartment lease</p>
           <div class="anatomy-claim">
@@ -143,7 +143,7 @@
 
     <div class="demo">
       <article class="note" aria-labelledby="note-title">
-        <div class="card-bar"><span class="path">vault/wiki/Topics/Apartment lease.md</span><span class="badge badge-example">Example · fictional</span></div>
+        <div class="card-bar"><span class="path">vault/Journal/wiki/Apartment lease.md</span><span class="badge badge-example">Example · fictional</span></div>
         <div class="note-body">
           <h3 id="note-title">Apartment lease</h3>
           <p class="note-meta">Topic page · 3 sources · revision r4 · compiled 2026-10-14</p>
@@ -462,6 +462,7 @@
             <pre class="wrap-lines" tabindex="0"><code id="code-sh">curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh</code></pre>
           </div>
           <p>It asks which model to use (Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server or another OpenAI-compatible endpoint; there is no default), checks that the model answers, starts LifeContext as a user service and gives your agents the skill.</p>
+          <p>A Claude Code or ChatGPT subscription is not an API key: the provider bills API use separately.</p>
           <p class="step-label">2 · Open the vault in Obsidian</p>
           <p>Choose “Open folder as vault” and pick <code>~/LifeContext/vault</code>, or the folder you gave the installer. Any Markdown editor works too.</p>
           <p class="step-label">3 · Import a document and ask your agent</p>
@@ -469,12 +470,13 @@
             <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Copy import command" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
             <pre class="wrap-lines" tabindex="0"><code id="code-sh-2">lifecontext documents import ~/Documents/lease.pdf</code></pre>
           </div>
-          <p>Indexing and compiling call your model and can take a few minutes; the page then appears under <code>Journal/wiki/</code> in the vault. Ask Claude Code, Codex or Gemini CLI: “What does my lease say about the deposit?” The agent answers from LifeContext’s evidence: the quote, the page and the version of the lease it came from.</p>
+          <p>Indexing and compiling call your model and can take a few minutes; the page then appears under <code>Journal/wiki/</code> in the vault. Ask Claude Code, Codex or Gemini CLI: “What does my lease say about the deposit?” The agent answers from LifeContext’s evidence and cites the lease and the version it came from; the lease’s wiki page holds the quote and its page.</p>
         </div>
 
         <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
           <h3 class="panel-title">Docker</h3>
           <p>The image includes Tesseract with English, Ukrainian and Russian and the local models, and runs as an unprivileged user. No port is published: the service listens on loopback inside the container, and you talk to it with <code>docker exec</code>. Your key goes in a Compose secret, never into the image; the other settings apply on the first start. Set the provider and model you chose: there is no default, and without them the container waits and logs which one is missing.</p>
+          <p>While 1.2.0rc1 is a release candidate, the image is not published. Clone the repository, build the image with <code>docker compose build</code> (it takes about 3 GB) and start it with the compose.yaml in the root of the clone.</p>
           <p class="step-label">compose.yaml</p>
           <div class="code">
             <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Copy compose.yaml" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
@@ -502,7 +504,8 @@ volumes:
           <p class="step-label">Add the key, start, check</p>
           <div class="code">
             <div class="code-head"><span>Terminal</span><button class="copy" type="button" data-copy="code-docker" aria-label="Copy Docker commands" data-done="Copied" data-manual="Press Ctrl+C (⌘C on Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Copy</span></button></div>
-            <pre tabindex="0"><code id="code-docker">mkdir -p secrets
+            <pre tabindex="0"><code id="code-docker">docker compose build      <span class="c"># in a clone of the repository, until the image is published</span>
+mkdir -p secrets
 (umask 077 &amp;&amp; cat &gt; secrets/lifecontext_api_key)   <span class="c"># paste the key, Enter, Ctrl-D</span>
 docker compose up -d
 docker compose exec lifecontext lifecontext doctor</code></pre>
@@ -613,6 +616,7 @@ lifecontext doctor</code></pre>
             <tr><th scope="row">Cursor</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP server</span></td><td>Read-only; writes with <code>--allow-writes</code></td></tr>
           </tbody>
         </table>
+        <p>Claude Desktop and Cursor may time out on slow recalls; see <a href="https://github.com/rundax/lifecontext/blob/main/docs/agents.md#slow-calls-and-client-timeouts">slow calls and client timeouts</a>.</p>
       </div>
     </div>
 
@@ -965,7 +969,7 @@ lifecontext doctor</code></pre>
         </details>
         <details>
           <summary>Which languages does it handle?</summary>
-          <div class="answer"><p>OCR covers English, Ukrainian and Russian. LifeContext configures a multilingual reranker for English, Ukrainian and Russian text. Quotes stay in the language of the source, because they are literal.</p></div>
+          <div class="answer"><p>OCR covers English, Ukrainian and Russian. Search uses an English-only embedding model with a multilingual reranker, so search in Ukrainian and Russian is weaker for now; a later release improves it. Quotes stay in the language of the source, because they are literal.</p></div>
         </details>
         <details>
           <summary>Is my data used for training?</summary>

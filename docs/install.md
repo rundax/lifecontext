@@ -16,11 +16,15 @@ leaves your machine is in [privacy.md](privacy.md).
 
 ## install.sh
 
+> 1.2.0rc1 is a pre-release; the final 1.2.0 is pending. The commands on this
+> page install the release candidate.
+
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh | sh
 ```
 
-It installs the latest release. To install a commit from a checkout instead,
+It installs the release the script belongs to, here 1.2.0rc1. If it prints a
+`curl:` error, nothing was installed. To install a commit from a checkout instead,
 build a wheel from the tree and pass it with the lock for your platform
 (`linux-x86_64`, `linux-aarch64` or `macos-arm64`):
 
@@ -156,7 +160,7 @@ guesses a provider or a model: both must be set, or it stops with
 | `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh |
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh |
   LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 \
   LIFECONTEXT_API_KEY_FILE=~/anthropic-key.txt sh -s -- --non-interactive
 ```
@@ -226,8 +230,10 @@ starts with `HF_HUB_OFFLINE=1` and downloads no models. It runs as the unprivile
 is published; you reach it with `docker exec` or the
 [`lifecontext-docker`](#agents-and-the-lifecontext-docker-wrapper) wrapper.
 
-The image is `ghcr.io/rundax/lifecontext:1.2.0`. To build it from a checkout
-instead, run `docker compose build` (or `docker build -t lifecontext .`).
+The image is not published yet: build it from a checkout with `docker compose
+build` (or `docker build -t lifecontext .`). It is about 3 GB, and the build
+takes about 3 minutes on GitHub-hosted runners. Once 1.2.0 is published, the
+image will be `ghcr.io/rundax/lifecontext:1.2.0`.
 
 ### Start with Docker Compose
 
@@ -236,6 +242,7 @@ with named volumes, the key as a secret, a health check on `/healthz`,
 `restart: unless-stopped`, a 4 GB memory limit and no Linux capabilities.
 
 ```bash
+docker compose build                               # until the image is published
 mkdir -p secrets
 (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Enter, Ctrl-D
 sudo chown 1000 secrets/lifecontext_api_key        # Linux, if your uid is not 1000
@@ -377,3 +384,6 @@ cosign verify ghcr.io/rundax/lifecontext:1.2.0 \
   --certificate-identity https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+For 1.2.0rc1, use `refs/tags/v1.2.0rc1`; its image is not public, so skip the
+image check.
