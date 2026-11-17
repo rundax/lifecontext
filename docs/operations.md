@@ -827,9 +827,10 @@ journal entry is already in the vault. Inspect
 replays a completed or permanently failed result without a new submission.
 After a retryable provider failure (`retain_failed` or `provider_unavailable`),
 the same key with the same input runs a journal retain, correction or reindex
-again from custody, but only after a delay that grows with each refusal:
-1 minute, 5 minutes, 30 minutes, 2 hours, then every 6 hours. A retry before
-then gets the same retryable error and the provider is not called;
+again from custody, but only after a delay: as long as the operation had been
+failing at its last refusal, at least 1 minute and at most 6 hours, so it
+roughly doubles each time. A retry before then gets the same retryable error
+and the provider is not called;
 `lifecontext capture` repeats pending notes this way. Each start also
 resubmits up to five refused journal notes from custody and stops at the first
 one the provider refuses again. A deleted or forgotten note is never

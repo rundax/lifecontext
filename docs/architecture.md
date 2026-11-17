@@ -63,8 +63,8 @@ corrections, document imports and retries, and wiki rebuilds are recorded in the
 catalog as operations with an `op_...` ID; repeating the same key with the same
 input replays a completed or permanently failed result instead of submitting
 again. After a retryable provider failure, the same key runs a journal retain,
-correction or reindex again from custody, no sooner than a delay that grows
-with each refusal (1 minute up to 6 hours). A failed step leaves a failed
+correction or reindex again from custody, no sooner than a delay that roughly
+doubles with each refusal (1 minute up to 6 hours). A failed step leaves a failed
 operation that `operations get` shows and that can be retried explicitly. On
 start, the service resumes unfinished imports, indexing and vision reads, and
 resubmits up to five refused journal notes from custody, before it answers

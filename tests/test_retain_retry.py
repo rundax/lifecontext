@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -89,7 +90,6 @@ class RetainRetryTests(unittest.TestCase):
 
         self.client = ControlledClient()
         self.adapter = LifeContextHindsightAdapter(self.client, bank_id="lifeweave")
-        self.clock = [1_000_000.0]
         self.app = self._open()
 
     def tearDown(self) -> None:
@@ -98,13 +98,20 @@ class RetainRetryTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _open(self) -> JournalApplication:
-        application = JournalApplication(
+        return JournalApplication(
             paths=self.paths,
             hindsight=self.adapter,
             vault=ManagedVault(self.vault_root, self.journal),
         )
-        application._clock = lambda: self.clock[0]
-        return application
+
+    def _age(self, seconds: int) -> None:
+        """Move every operation's catalog timestamps back, as if that much time had passed."""
+        shift = f"{-seconds:+d} seconds"
+        with sqlite3.connect(self.paths.catalog_path) as connection:
+            connection.execute(
+                "UPDATE operations SET created_at = datetime(created_at, ?), updated_at = datetime(updated_at, ?)",
+                (shift, shift),
+            )
 
     def _operation_state(self) -> tuple[str, str | None]:
         with sqlite3.connect(self.paths.catalog_path) as connection:
@@ -121,7 +128,7 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "retain_failed")
         self.assertEqual(self._operation_state(), ("retryable_failed", "retain_failed"))
         self.client.error = None
-        self.clock[0] += 61  # past the first retry delay
+        self._age(61)  # past the first retry delay
 
     def test_same_key_after_provider_error_indexes_and_projects_the_note(self) -> None:
         source_id = "src_retry_same_key"
@@ -206,7 +213,6 @@ class RetainRetryTests(unittest.TestCase):
         source_id = "src_retry_backoff"
         original = b"note refused while the provider is down"
         key = "retain-retry-backoff"
-        start = self.clock[0]
         self.client.error = RuntimeError("provider down")
 
         def retry() -> str | None:
@@ -221,7 +227,6 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(retry(), "retain_failed")
         self.client.document_metadata.clear()  # the provider never held the refused note
         for _ in range(10):
-            self.clock[0] += 5
             self.assertEqual(retry(), "retain_failed")
         self.assertEqual(len(self.client.retain_calls), 1)
         # A restart within the delay does not ask the provider either.
@@ -230,18 +235,55 @@ class RetainRetryTests(unittest.TestCase):
         asyncio.run(self.app.recover_startup())
         self.assertEqual(len(self.client.retain_calls), 1)
 
-        # Past the delay the next retry asks again; refused again, the next delay is 5 minutes.
-        self.clock[0] = start + 60
+        # Past the first minute the next retry asks again. Refused again after failing for about a
+        # minute, it waits about a minute; refused a third time after about two, about two minutes.
+        self._age(61)
         self.assertEqual(retry(), "retain_failed")
         self.assertEqual(len(self.client.retain_calls), 2)
-        self.clock[0] += 299
+        self._age(30)
         self.assertEqual(retry(), "retain_failed")
         self.assertEqual(len(self.client.retain_calls), 2)
-        self.client.error = None
-        self.clock[0] += 1
-        self.assertIsNone(retry())
+        self._age(40)
+        self.assertEqual(retry(), "retain_failed")
         self.assertEqual(len(self.client.retain_calls), 3)
+        self._age(90)
+        self.assertEqual(retry(), "retain_failed")
+        self.assertEqual(len(self.client.retain_calls), 3)
+        self.client.error = None
+        self._age(45)
+        self.assertIsNone(retry())
+        self.assertEqual(len(self.client.retain_calls), 4)
         self.assertEqual(self._operation_state(), ("completed", None))
+
+    def test_a_refused_operation_stays_readable_by_the_previous_release(self) -> None:
+        # The result keys and retain intent keys 7d2bbbf's catalog accepts; anything else makes it
+        # reject the stored operation, and its startup recovery then fails.
+        result_keys = {"sources", "item_count", "size_bytes", "error_code", "recovery_intent"}
+        intent_keys = {
+            "retain": {"kind", "source_id", "source_version", "sha256", "size_bytes"},
+            "curation": {"kind", "action", "source_id", "source_version", "sha256", "size_bytes",
+                         "prepared_operation_id", "target_sha256", "target_size_bytes"},
+        }
+        self.client.error = RuntimeError("provider down")
+        for _ in range(2):
+            with self.assertRaises(ApplicationError):
+                asyncio.run(self.app.retain(
+                    "src_retry_readable", 1, b"refused twice", provenance={"source": "test"},
+                    idempotency_key="retain-retry-readable",
+                ))
+            self._age(61)
+        self.client.error = None
+        self._edited_note("src_retry_readable_correction")
+        self.client.error = RuntimeError("provider down")
+        with self.assertRaises(ApplicationError):
+            self._correct("src_retry_readable_correction", "refused correction", "retain-retry-readable-c")
+        with sqlite3.connect(self.paths.catalog_path) as connection:
+            rows = connection.execute("SELECT operation_kind, state, result_json FROM operations").fetchall()
+        self.assertEqual(sorted(state for _, state, _ in rows), ["completed", "retryable_failed", "retryable_failed"])
+        for kind, _, raw in rows:
+            result = json.loads(raw)
+            self.assertLessEqual(set(result), result_keys)
+            self.assertLessEqual(set(result.get("recovery_intent", {})), intent_keys[kind])
 
     def test_retry_never_indexes_an_older_version_over_a_newer_one(self) -> None:
         source_id = "src_retry_older_version"
@@ -276,7 +318,7 @@ class RetainRetryTests(unittest.TestCase):
         # The provider kept what it had: the refused version never reached it.
         self.client.document_metadata = held
         self.client.error = None
-        self.clock[0] += 61  # past the first retry delay
+        self._age(61)  # past the first retry delay
 
     def _edited_note(self, source_id: str) -> None:
         asyncio.run(self.app.retain(
@@ -324,7 +366,7 @@ class RetainRetryTests(unittest.TestCase):
             asyncio.run(self.app.curate(request, idempotency_key=key))
         self.assertEqual(caught.exception.code, "retain_failed")
         self.assertEqual(len(self.client.retain_calls), calls)
-        self.clock[0] += 61
+        self._age(61)
         result = asyncio.run(self.app.curate(request, idempotency_key=key))
 
         self.assertEqual(result["state"], "completed")
@@ -593,7 +635,7 @@ class RetainRetryTests(unittest.TestCase):
                     provenance={"source": "test"}, idempotency_key=f"{prefix}-{number}",
                 ))
         self.client.document_metadata.clear()  # the provider never stored them
-        self.clock[0] += 61
+        self._age(61)
 
     def test_a_start_resubmits_at_most_five_notes_and_the_next_start_the_rest(self) -> None:
         self._refuse_notes(7, "retry_cap")
@@ -762,7 +804,7 @@ class RetainRetryTests(unittest.TestCase):
         inbox.mkdir(parents=True)
         note = inbox / "Lake.md"
         source_id = "obsidian_" + digest(b"Lake.md")
-        clock = self.clock
+        clock = [1_000_000.0]
 
         def scan() -> dict:
             return run_once(inbox, self.paths, InProcessCaptureApi(self.app), now=lambda: clock[0])
@@ -783,6 +825,7 @@ class RetainRetryTests(unittest.TestCase):
             self.assertEqual(scan()["pending"], 1)
             self.assertEqual(len(self.client.retain_calls), calls)
             clock[0] += 31
+            self._age(61)
 
             report = scan()
 

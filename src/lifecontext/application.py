@@ -72,9 +72,10 @@ _READINESS_CAPABILITIES = (
     "attributed_reflect",
 )
 _RETRYABLE_OPERATION_ERRORS = {"provider_unavailable", "retain_failed"}
-# How long a refused journal retain or curation waits before the provider is asked again: 1 min, 5 min,
-# 30 min, 2 h, then every 6 h. Capture repeats a pending note every 30 s.
-_RETRY_DELAYS_SECONDS = (60, 300, 1800, 7200, 21600)
+# A refused journal retain or curation waits as long as it has already been failing, from 1 minute
+# to 6 hours, before the provider is asked again; capture repeats a pending note every 30 s.
+_MIN_RETRY_DELAY_SECONDS = 60
+_MAX_RETRY_DELAY_SECONDS = 21600
 _MAX_STARTUP_RESUBMITS = 5
 _CURATION_CONFIRMATION_TTL_SECONDS = 600
 _MAX_LISTED_REVIEWS = 50
@@ -105,8 +106,6 @@ class DurableResult(dict[str, Any]):
 class JournalApplication:
     """Coordinate the V1-owned stores without merging their authority."""
 
-    # Seconds since the epoch; tests replace it to move past a retry delay.
-    _clock = staticmethod(lambda: datetime.now(UTC).timestamp())
     _startup_resubmits = 0
 
     def __init__(
@@ -1501,7 +1500,7 @@ class JournalApplication:
             return
         result = {
             key: operation["result"][key]
-            for key in ("sources", "size_bytes", "recovery_intent", "attempts", "next_try_at")
+            for key in ("sources", "size_bytes", "recovery_intent")
             if key in operation["result"]
         }
         result["error_code"] = code
@@ -3221,16 +3220,6 @@ class JournalApplication:
         if "size_bytes" not in stored_result and "size_bytes" in current["result"]:
             stored_result["size_bytes"] = current["result"]["size_bytes"]
         stored_result["error_code"] = code
-        if (
-            state == "retryable_failed"
-            and code in _RETRYABLE_OPERATION_ERRORS
-            and current["operation_kind"] in {"retain", "curation"}
-        ):
-            # The provider refused: same-key retries and recovery wait until next_try_at.
-            attempts = current["result"].get("attempts", 0) + 1
-            delay = _RETRY_DELAYS_SECONDS[min(attempts, len(_RETRY_DELAYS_SECONDS)) - 1]
-            stored_result["attempts"] = attempts
-            stored_result["next_try_at"] = int(self._clock()) + delay
         self._transition_operation(
             operation_id,
             expected_state,
@@ -3239,9 +3228,20 @@ class JournalApplication:
             error_code=code,
         )
 
-    def _retry_waiting(self, operation: Mapping[str, Any]) -> bool:
-        """True while a refused operation's backoff has not passed; the provider is not asked yet."""
-        return self._clock() < operation["result"].get("next_try_at", 0)
+    @staticmethod
+    def _retry_waiting(operation: Mapping[str, Any]) -> bool:
+        """True while a provider refusal's delay has not passed, from the catalog's own timestamps:
+        the next try waits as long as the operation had been failing at its last refusal (created_at
+        to updated_at), at least 1 minute and at most 6 hours, so the delay roughly doubles."""
+        if operation["error_code"] not in _RETRYABLE_OPERATION_ERRORS:
+            return False
+        try:
+            created = datetime.fromisoformat(operation["created_at"]).replace(tzinfo=UTC).timestamp()
+            updated = datetime.fromisoformat(operation["updated_at"]).replace(tzinfo=UTC).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return False
+        delay = min(max(updated - created, _MIN_RETRY_DELAY_SECONDS), _MAX_RETRY_DELAY_SECONDS)
+        return updated + delay > datetime.now(UTC).timestamp()
 
     @staticmethod
     def _retain_error_code(error: Exception) -> str:
