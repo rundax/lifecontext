@@ -13,7 +13,9 @@ import math
 import os
 import re
 import secrets
+import threading
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, tzinfo
@@ -311,6 +313,9 @@ def _citation_label(citation: Citation) -> str:
 _PLACE_UNITS = {"page": ("p.", "pp."), "slide": ("slide", "slides"), "lines": ("line", "lines"),
                 "image": ("image", "images")}
 MAX_LABEL_TITLE_CHARACTERS = 60
+# Extraction locators kept for labels: one small list per extraction, enough for every
+# index entry and a few more, so an index with many revisions reads each artifact once.
+LOCATOR_CACHE_ENTRIES = MAX_INDEX_ENTRIES + 32
 
 
 def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | None:
@@ -737,7 +742,8 @@ class WikiService:
         # host's local time, as for briefs.
         self.timezone = timezone
         self.store = WikiRevisionStore(paths)
-        self._locator_cache: dict = {}
+        self._locator_cache: OrderedDict = OrderedDict()
+        self._locator_lock = threading.Lock()
 
     def source_withdrawn(self, source_id: str, version: int | None = None) -> bool:
         """The document version (by default the current one) was forgotten or deleted:
@@ -914,25 +920,34 @@ class WikiService:
 
     def _extraction_view(self, source_id: str, version: int, extraction_revision: int) -> dict | None:
         """The locator of each passage of one stored extraction and its coverage, or None
-        when it cannot be read. Extraction artifacts are immutable, so a few are kept per
-        checksum across renders."""
+        when it cannot be read. Extraction artifacts are immutable, so the most recently
+        used ones are kept per checksum across renders (a failed read too, so a damaged
+        artifact is opened once). The cache is shared by threads."""
         rows = [row for row in self.catalog.list_extractions(source_id, version)
                 if row["extraction_revision"] == extraction_revision and row["artifact_sha256"]]
         if not rows:
             return None
         key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
         cache = self._locator_cache
-        if key not in cache:
-            from lifecontext.extraction import coverage_summary
-            try:
-                payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
-                cache[key] = {"locators": [segment.get("locator") or {} for segment in payload.get("segments", [])],
-                              "coverage": coverage_summary(payload)}
-            except (ValueError, OSError, KeyError, TypeError, AttributeError):
-                return None
-            if len(cache) > 8:
-                cache.pop(next(iter(cache)))
-        return cache[key]
+        with self._locator_lock:
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+        from lifecontext.extraction import coverage_summary
+        try:
+            payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
+            view = {"locators": [segment.get("locator") or {} for segment in payload.get("segments", [])],
+                    "coverage": coverage_summary(payload)}
+        except OSError:
+            return None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            view = None
+        with self._locator_lock:
+            cache[key] = view
+            cache.move_to_end(key)
+            while len(cache) > LOCATOR_CACHE_ENTRIES:
+                cache.popitem(last=False)
+        return view
 
     def _citation_labels(self, citations: Iterable[Citation] = ()):
         """People's label for each citation: the document's page title (else its
