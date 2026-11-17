@@ -74,6 +74,7 @@ _READINESS_CAPABILITIES = (
 _RETRYABLE_OPERATION_ERRORS = {"provider_unavailable", "retain_failed"}
 _CURATION_CONFIRMATION_TTL_SECONDS = 600
 _MAX_LISTED_REVIEWS = 50
+_MAX_LISTED_UNINDEXED = 20
 _MAX_REPORT_DOCUMENTS = 4096
 
 
@@ -2979,12 +2980,15 @@ class JournalApplication:
 
         try:
             facts = self.catalog.list_reconciliation_facts()
+            unindexed = self.catalog.list_unindexed_journal_paths()
         except CatalogError:
             catalog_ready = False
             fact_counts: dict[str, int] = {}
+            unindexed = []
         except Exception:
             catalog_ready = False
             fact_counts = {}
+            unindexed = []
         else:
             catalog_ready = True
             fact_counts = {
@@ -2993,6 +2997,7 @@ class JournalApplication:
             }
 
         dependencies_ready = hindsight_ready and vault_ready and catalog_ready
+        journal_prefix = self.vault.journal_path.relative_to(self.vault.vault_root).as_posix()
         return {
             "ready": dependencies_ready,
             "max_file_bytes": self.limits.max_file_bytes,
@@ -3011,6 +3016,13 @@ class JournalApplication:
             "reconciliation": {
                 "fact_count": sum(fact_counts.values()),
                 "facts": fact_counts,
+            },
+            # Journal entries already in the vault whose indexing is pending or failed.
+            "indexing_pending": {
+                "count": len(unindexed),
+                "entries": [
+                    f"{journal_prefix}/{path}" for path in unindexed if path is not None
+                ][:_MAX_LISTED_UNINDEXED],
             },
         }
 

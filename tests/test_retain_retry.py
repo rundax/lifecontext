@@ -288,6 +288,9 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(len(self.client.retain_calls), calls)
         self.assertEqual(self.client.retain_calls[-1][1], "third version")
 
+    def _unindexed(self) -> dict:
+        return self.app.readiness()["indexing_pending"]
+
     def _entry(self, source_id: str, version: int) -> tuple[dict, str]:
         projection = self.app.catalog.get_projection_state(source_id, version)
         return projection, (self.journal / projection["projection_path"]).read_text(encoding="utf-8")
@@ -308,6 +311,8 @@ class RetainRetryTests(unittest.TestCase):
         pending, text = self._entry(source_id, 1)
         self.assertEqual(pending["state"], "projected")
         self.assertTrue(text.endswith(original.decode()))
+        # Status, not the file, says the entry is waiting for indexing.
+        self.assertEqual(self._unindexed(), {"count": 1, "entries": ["Journal/" + pending["projection_path"]]})
         self.assertEqual(self.app.reconcile_projections()["already_projected"], 1)
         self.assertEqual(self._entry(source_id, 1)[1], text)
 
@@ -323,6 +328,20 @@ class RetainRetryTests(unittest.TestCase):
         self.assertEqual(indexed["projection_path"], pending["projection_path"])
         self.assertEqual(after, text)
         self.assertEqual(len(list((self.journal / "entries").iterdir())), 1)
+        self.assertEqual(self._unindexed(), {"count": 0, "entries": []})
+
+    def test_status_counts_every_unindexed_entry_and_lists_twenty(self) -> None:
+        self.client.error = RuntimeError("provider down")
+        for number in range(22):
+            with self.assertRaises(ApplicationError):
+                asyncio.run(self.app.retain(
+                    f"src_retry_many_{number}", 1, f"# Note {number}\n\nbody".encode(),
+                    provenance={"source": "test"}, idempotency_key=f"retain-retry-many-{number}",
+                ))
+        pending = self._unindexed()
+        self.assertEqual(pending["count"], 22)
+        self.assertEqual(len(pending["entries"]), 20)
+        self.assertTrue(all(entry.startswith("Journal/entries/") for entry in pending["entries"]))
 
     def test_a_note_indexed_on_the_first_try_is_written_once(self) -> None:
         source_id = "src_retry_written_once"
@@ -340,12 +359,14 @@ class RetainRetryTests(unittest.TestCase):
         pending, text = self._entry(source_id, 2)
         self.assertEqual(pending["state"], "projected")
         self.assertTrue(text.endswith("second version, not indexed yet"))
+        self.assertEqual(self._unindexed(), {"count": 1, "entries": ["Journal/" + pending["projection_path"]]})
 
         self._correct(source_id, "second version, not indexed yet", key)
 
         projection, after = self._entry(source_id, 2)
         self.assertEqual(projection["state"], "projected")
         self.assertEqual(after, text)
+        self.assertEqual(self._unindexed(), {"count": 0, "entries": []})
 
     def test_a_capture_run_after_a_failure_completes_the_note(self) -> None:
         inbox = self.base / "notes" / "Inbox"

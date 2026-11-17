@@ -3675,6 +3675,24 @@ class LifeContextCatalog:
             "UNION ALL SELECT 'journal',source_id,source_version,state FROM projection_states WHERE state IN ('conflict','failed') "
             "ORDER BY 1,2,3 LIMIT ?", (limit,))]
 
+    def list_unindexed_journal_paths(self) -> list[str | None]:
+        """Entry paths of current journal versions the provider has not indexed yet, oldest first."""
+        self._ensure_open()
+        try:
+            return [row[0] for row in self._connection.execute(
+                "SELECT pr.projection_path FROM provider_states AS ps "
+                "JOIN sources AS s ON s.source_id=ps.source_id AND s.layer='journal' "
+                "LEFT JOIN projection_states AS pr "
+                "ON pr.source_id=ps.source_id AND pr.source_version=ps.source_version "
+                "WHERE ps.submission_state IN ('pending','failed') AND ps.recall_visibility!='not_visible' "
+                "AND ps.source_version=(SELECT max(v.source_version) FROM source_versions AS v "
+                "WHERE v.source_id=ps.source_id) "
+                "AND NOT EXISTS(SELECT 1 FROM tombstones AS t WHERE t.source_id=ps.source_id) "
+                "AND NOT EXISTS(SELECT 1 FROM transfer_tombstones AS t WHERE t.source_id=ps.source_id) "
+                "ORDER BY ps.updated_at, ps.source_id")]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def get_source(self, source_id: str) -> dict[str, Any] | None:
         if not isinstance(source_id, str) or not _SOURCE_ID.fullmatch(source_id):
             raise CatalogError("invalid catalog identity")

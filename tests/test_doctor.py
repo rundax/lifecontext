@@ -51,7 +51,8 @@ def _service_up(target: str) -> dict:
         "/v1/status": {"ready": True, "max_file_bytes": 1,
                        "dependencies": {"hindsight": {"ready": True}, "vault": {"ready": True},
                                         "catalog": {"ready": True}},
-                       "reconciliation": {"fact_count": 0, "facts": {}}},
+                       "reconciliation": {"fact_count": 0, "facts": {}},
+                       "indexing_pending": {"count": 1, "entries": ["Journal/entries/2026-10-17 - Private.md"]}},
         "/v1/wiki/lint": {"findings": [{"page_id": "source_secret", "hint": "private"}],
                           "counts": {"error": 1, "warning": 2, "info": 3}, "omitted": 0},
     }[target]
@@ -101,6 +102,9 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(report["service"]["state"], "running")
             self.assertTrue(report["service"]["ready"])
             self.assertEqual(report["service"]["lint"], {"error": 1, "warning": 2, "info": 3, "omitted": 0})
+            # A count of entries waiting for indexing, never their names.
+            self.assertEqual(report["service"]["indexing_pending"], 1)
+            self.assertIn("Journal entries waiting for indexing: 1", render(report))
             self.assertEqual(report["command"]["lifecontext"], "/home/u/.local/bin/lifecontext")
             self.assertEqual(report["tesseract"]["missing_languages"], ["ukr"])
             self.assertIn("tesseract_languages_missing", report["warnings"])
