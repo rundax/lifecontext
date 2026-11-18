@@ -194,6 +194,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="apply these flags to an existing config.yaml, keeping every other setting")
     init.add_argument("--replace-key", action="store_true",
                       help="replace the stored provider key with the one given; changes only .env")
+    init.add_argument("--allow-insecure-http", action="store_true",
+                      help="accept an http base URL on any host (without it: https, or http on this machine, a "
+                           "private network address or host.docker.internal); saved in config.yaml")
 
     doctor = commands.add_parser(
         "doctor", help="report safe diagnostics; exit 1 only for broken prerequisites"
@@ -230,6 +233,8 @@ def _build_parser() -> argparse.ArgumentParser:
     llm_set.add_argument("--provider", help="model provider ID")
     llm_set.add_argument("--model", help="exact model ID")
     llm_set.add_argument("--base-url", help="provider API root, required for openai_compatible")
+    llm_set.add_argument("--allow-insecure-http", action="store_true",
+                         help="accept an http base URL on any host (see init --allow-insecure-http); saved in config.yaml")
     llm_set.add_argument("--api-key-stdin", action="store_true",
                          help="replace the stored key with one line from stdin (else from $LIFECONTEXT_API_KEY_FILE)")
 
@@ -1379,19 +1384,41 @@ def _ask_secret(question: str) -> str:
     return getpass.getpass(question + ": ", stream=sys.stderr)
 
 
+def _hidden_key_stream(args: argparse.Namespace, not_asked: str, empty: str):
+    """The key typed at the hidden prompt, as the stream ``--api-key-stdin`` would give.
+
+    Never read from an echoed terminal: with ``--json`` or no terminal nothing is asked
+    (``not_asked`` is the error), and an empty answer, Ctrl-D or Ctrl-C is ``empty``.
+    """
+    import io
+
+    if args.as_json or not sys.stdin.isatty():
+        raise CLIError(not_asked)
+    try:
+        entered = _ask_secret("API key for this provider (input hidden)").strip()
+    except (EOFError, KeyboardInterrupt):
+        entered = ""
+    if not entered:
+        raise CLIError(empty)
+    return io.StringIO(entered + "\n")
+
+
 def _init(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     from lifecontext import initialize
 
     options = initialize.InitOptions(
         provider=args.provider, model=args.model, base_url=args.base_url, vault=args.vault,
         timezone=args.timezone, api_key_stdin=args.api_key_stdin, force=args.force, replace_key=args.replace_key,
+        allow_insecure_http=args.allow_insecure_http,
         interactive=not (args.non_interactive or args.api_key_stdin) and sys.stdin.isatty(),
     )
     try:
-        report = initialize.run_init(
-            options, ask=_ask, ask_secret=_ask_secret,
-            key_stream=sys.stdin.buffer if args.api_key_stdin else None,
-        )
+        key_stream = None
+        if args.api_key_stdin:
+            # At a terminal the key is asked for hidden, never read as echoed input.
+            key_stream = (_hidden_key_stream(args, "api_key_required", "invalid_api_key")
+                          if sys.stdin.isatty() else sys.stdin.buffer)
+        report = initialize.run_init(options, ask=_ask, ask_secret=_ask_secret, key_stream=key_stream)
     except initialize.InitError as exc:
         raise CLIError(exc.code, message=exc.message) from None
     except OSError:
@@ -1541,18 +1568,35 @@ def _llm(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     import platform
 
     from lifecontext import initialize, service
+    from urllib.parse import urlsplit
+
+    from lifecontext.hindsight import is_loopback_host
 
     try:
         if args.llm_command == "show":
             report = initialize.show_llm()
             return report, initialize.render_llm(report), 0
-        if (args.provider is None and args.model is None and args.base_url is None and not args.api_key_stdin
-                and not os.environ.get(initialize.KEY_FILE_VARIABLE)):
-            raise CLIError("nothing_to_change")
+        key_stream = None
+        bare = (args.provider is None and args.model is None and args.base_url is None
+                and not args.allow_insecure_http and not os.environ.get(initialize.KEY_FILE_VARIABLE))
+        if bare and not args.api_key_stdin:
+            # Look at the setup before asking for anything. Only a server on this machine is known
+            # to need no key; any other endpoint may want one, so it is asked.
+            shown = initialize.show_llm()
+            if shown["api_key"] == "not_required" and is_loopback_host(urlsplit(shown["base_url"] or "").hostname or ""):
+                raise CLIError("nothing_to_change", message=(
+                    "This endpoint needs no key; name what to change: --provider, --model or --base-url."))
+        if args.api_key_stdin and not sys.stdin.isatty():
+            key_stream = sys.stdin.buffer
+        elif args.api_key_stdin or bare:
+            # At a terminal the key is asked for hidden, never read as echoed stdin; --json never asks.
+            key_stream = _hidden_key_stream(args, "api_key_required" if args.api_key_stdin else "nothing_to_change",
+                                            "nothing_to_change")
         report = initialize.set_llm(
             initialize.InitOptions(provider=args.provider, model=args.model, base_url=args.base_url,
-                                   api_key_stdin=args.api_key_stdin),
-            key_stream=sys.stdin.buffer if args.api_key_stdin else None)
+                                   api_key_stdin=key_stream is not None,
+                                   allow_insecure_http=args.allow_insecure_http),
+            key_stream=key_stream)
     except initialize.InitError as exc:
         raise CLIError(exc.code, message=exc.message) from None
     except OSError:

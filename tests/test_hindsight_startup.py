@@ -1059,7 +1059,7 @@ class StartupLifecycleTests(unittest.TestCase):
                 record = paths.hindsight_start_record_path.read_text()
                 self.assertNotIn("test-secret", record)
 
-    def test_loopback_openai_compatible_endpoint_needs_no_key(self) -> None:
+    def test_openai_compatible_endpoint_needs_no_key(self) -> None:
         loopback = {"provider": "openai_compatible", "model": "local-model",
                     "base_url": "http://127.0.0.1:11434/v1"}
         config = _validated_profile_config({"llm": loopback}, {})
@@ -1067,14 +1067,19 @@ class StartupLifecycleTests(unittest.TestCase):
         self.assertEqual(config["HINDSIGHT_API_LLM_PROVIDER"], "openai")
         keyed = _validated_profile_config({"llm": loopback}, {"LIFEWEAVE_LLM_API_KEY": "own-key"})
         self.assertEqual(keyed["HINDSIGHT_API_LLM_API_KEY"], "own-key")
+        # Any openai_compatible endpoint may be keyless: a server on the network, or a hosted one.
+        for base_url in ("https://api.example.test/v1", "http://192.168.1.20:8000/v1"):
+            self.assertEqual(
+                _validated_profile_config({"llm": {**loopback, "base_url": base_url}}, {})["HINDSIGHT_API_LLM_API_KEY"],
+                "local")
         for llm in (
-            {**loopback, "base_url": "https://api.example.test/v1"},
             {"provider": "openai", "model": "m", "base_url": "http://127.0.0.1:11434/v1"},
             {"provider": "anthropic", "model": "m"},
         ):
             with self.subTest(llm=llm), self.assertRaises(HindsightStartupError) as caught:
                 _validated_profile_config({"llm": llm}, {})
             self.assertEqual(caught.exception.code, "missing_credentials")
+            self.assertIn("lifecontext llm set", caught.exception.message)
 
         with _temporary_home():
             calls = []

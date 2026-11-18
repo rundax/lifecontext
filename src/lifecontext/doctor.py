@@ -360,7 +360,7 @@ def run_doctor(
         read_daemon_start_record,
     )
     from lifecontext.hindsight import model_probe as run_model_probe
-    from lifecontext.initialize import rejects_forced_tool
+    from lifecontext.initialize import rejects_forced_tool, uses_plain_http
     from lifecontext.vault import default_journal_paths
 
     fetch = fetch or http_fetcher(port)
@@ -394,6 +394,8 @@ def run_doctor(
         problems.append("credentials_missing")
     if rejects_forced_tool(config.get("llm") or {}):
         warnings.append("model_rejects_forced_tool_use")
+    if uses_plain_http(config.get("llm") or {}):
+        warnings.append("model_uses_plain_http")
     probe = None
     if model_probe:
         probe = probe_failure("invalid_config") if settings is None else run_model_probe(settings)

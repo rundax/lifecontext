@@ -67,7 +67,7 @@ _API_KEY_PROVIDERS = {
 }
 _PROVIDERS = _API_KEY_PROVIDERS | {"openai_compatible"}
 _PROVIDERS_REQUIRING_BASE_URL = {"openai_compatible", "volcano"}
-_PROFILE_SETTINGS = {"provider", "model", "base_url", "reasoning_effort"}
+_PROFILE_SETTINGS = {"provider", "model", "base_url", "reasoning_effort", "allow_insecure_http"}
 _REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _RETAIN_MAX_COMPLETION_TOKENS = 8_192
 # Local CPU cross-encoder reranking dominates recall latency (0.2-0.4s per candidate on
@@ -122,8 +122,10 @@ def _has_unsafe_line_character(value: str) -> bool:
 class HindsightStartupError(RuntimeError):
     """A stable failure code that never includes provider messages."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, message: str | None = None):
         self.code = code
+        # A fixed sentence for people; never provider text or the refused value itself.
+        self.message = message
         super().__init__(code)
 
 
@@ -246,13 +248,16 @@ def _load_runtime() -> _Runtime:
 
 
 def validate_model_endpoint(
-    provider: str, model: Any, base_url: Any, *, requires_base_url: bool
+    provider: str, model: Any, base_url: Any, *, requires_base_url: bool, allow_insecure_http: bool = False,
+    private_http: bool = False,
 ) -> None:
     """Exact model ID plus endpoint rules shared by the ``llm`` and ``vision`` blocks.
 
-    The URL must be https unless it is loopback, carry no credentials, query or
-    fragment, and, for OpenAI-compatible servers, name the API root rather than
-    one endpoint.
+    The URL must be https unless its host passes ``plain_http_allowed``: loopback; with
+    ``private_http`` (the ``llm`` block only, never ``vision``) also a private network address
+    and, inside the image, ``host.docker.internal``; or ``allow_insecure_http``. It carries no
+    credentials, query or fragment and, for OpenAI-compatible servers, names the API root rather
+    than one endpoint.
     """
     if (
         not isinstance(model, str)
@@ -296,16 +301,25 @@ def validate_model_endpoint(
     hostname = parsed.hostname
     if "%" in hostname:
         raise HindsightStartupError("invalid_config")
-    if (
-        (port is not None and not 1 <= port <= 65535)
-        or (parsed.scheme != "https" and not is_loopback_host(hostname))
-        or not _valid_hostname(hostname)
-    ):
+    if (port is not None and not 1 <= port <= 65535) or not _valid_hostname(hostname):
         raise HindsightStartupError("invalid_config")
+    if parsed.scheme != "https" and not plain_http_allowed(hostname, allow_insecure_http, private_http=private_http):
+        raise HindsightStartupError("invalid_config", _HTTP_REFUSED)
     if provider == "openai_compatible" and parsed.path.casefold().rstrip("/").endswith(
         ("/chat/completions", "/responses")
     ):
-        raise HindsightStartupError("invalid_config")
+        raise HindsightStartupError("invalid_config", _ENDPOINT_REFUSED)
+
+
+# Why a base URL was refused, one sentence each.
+_HTTP_REFUSED = ("the base URL uses http on a host that is not on this machine or a private network; use "
+                 "https, or an address in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 or "
+                 "fc00::/7, or host.docker.internal inside the Docker image, or add --allow-insecure-http to "
+                 "accept an unencrypted connection to this URL (a saved one covers only the URL it was given for)")
+_KEY_REFUSED = ("no model key is stored, and this provider needs one; add it with lifecontext llm set "
+                "(it asks for the key)")
+_ENDPOINT_REFUSED = ("the base URL names one endpoint (/chat/completions or /responses); give the API root "
+                     "instead, for example https://api.example.com/v1")
 
 
 def _valid_hostname(hostname: str) -> bool:
@@ -326,7 +340,8 @@ def _valid_hostname(hostname: str) -> bool:
 
 def is_loopback_host(hostname: str) -> bool:
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        address = ipaddress.ip_address(hostname)
+        return (getattr(address, "ipv4_mapped", None) or address).is_loopback
     except ValueError:
         try:
             return hostname.encode("idna").decode("ascii").rstrip(".").casefold() == "localhost"
@@ -334,7 +349,41 @@ def is_loopback_host(hostname: str) -> bool:
             return False
 
 
-def _validated_profile_settings(settings: Mapping[str, Any]) -> dict[str, str]:
+_PRIVATE_HTTP = tuple(map(ipaddress.ip_network, (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7")))
+
+
+def plain_http_allowed(hostname: str, allow_insecure: bool = False, *, private_http: bool = False) -> bool:
+    """Whether a model server at ``hostname`` may be reached over plain http.
+
+    Loopback always. With ``private_http`` also an IP literal on a private or shared-address
+    network (RFC 1918, 100.64.0.0/10, fc00::/7) and, only inside the Docker image
+    (``LIFECONTEXT_IN_CONTAINER=1``, where Docker defines the name), ``host.docker.internal``.
+    Any other host needs ``allow_insecure``. Names are never resolved: other names are refused,
+    so is an address that only looks private (``10.0.0.1.evil.com``) or is link-local
+    (169.254.0.0/16, fe80::/10).
+    """
+    if allow_insecure or is_loopback_host(hostname):
+        return True
+    if not private_http:
+        return False
+    if hostname.rstrip(".").casefold() == "host.docker.internal":
+        return os.environ.get("LIFECONTEXT_IN_CONTAINER") == "1"
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    address = getattr(address, "ipv4_mapped", None) or address
+    return any(address in network for network in _PRIVATE_HTTP)
+
+
+def needs_plain_http_grant(base_url: str | None) -> bool:
+    """A plain-http URL on a host that only an ``--allow-insecure-http`` grant lets through."""
+    parts = urlsplit(base_url or "")
+    return parts.scheme == "http" and not plain_http_allowed(parts.hostname or "", private_http=True)
+
+
+def _validated_profile_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
     if (
         not isinstance(settings, Mapping)
         or "llm" not in settings
@@ -351,10 +400,16 @@ def _validated_profile_settings(settings: Mapping[str, Any]) -> dict[str, str]:
     model = llm.get("model")
     base_url = llm.get("base_url")
     reasoning_effort = llm.get("reasoning_effort")
-    if not isinstance(provider, str) or provider not in _PROVIDERS:
+    # The URL a plain-http grant was given for. It counts only while base_url is still exactly that
+    # URL, so editing base_url by hand revokes it; an old boolean true names no URL and grants nothing.
+    grant = llm.get("allow_insecure_http")
+    if (not isinstance(provider, str) or provider not in _PROVIDERS
+            or not (grant is None or isinstance(grant, (str, bool)))):
         raise HindsightStartupError("invalid_config")
+    granted = isinstance(grant, str) and grant == base_url
     validate_model_endpoint(
-        provider, model, base_url, requires_base_url=provider in _PROVIDERS_REQUIRING_BASE_URL
+        provider, model, base_url, requires_base_url=provider in _PROVIDERS_REQUIRING_BASE_URL,
+        allow_insecure_http=granted, private_http=True,
     )
 
     # Hindsight 0.9.2's native Gemini adapter ignores custom base URLs. Fail
@@ -362,9 +417,11 @@ def _validated_profile_settings(settings: Mapping[str, Any]) -> dict[str, str]:
     if provider == "gemini" and base_url is not None:
         raise HindsightStartupError("invalid_config")
 
-    result = {"provider": provider, "model": model}
+    result: dict[str, Any] = {"provider": provider, "model": model}
     if base_url:
         result["base_url"] = base_url
+    if granted and needs_plain_http_grant(base_url):
+        result["allow_insecure_http"] = grant
     if "reasoning_effort" in llm:
         if (
             not isinstance(reasoning_effort, str)
@@ -376,12 +433,9 @@ def _validated_profile_settings(settings: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
-def llm_key_required(validated: Mapping[str, str]) -> bool:
-    """Every provider needs ``LIFEWEAVE_LLM_API_KEY`` except a loopback OpenAI-compatible server."""
-    return not (
-        validated.get("provider") == "openai_compatible"
-        and is_loopback_host(urlsplit(validated.get("base_url") or "").hostname or "")
-    )
+def llm_key_required(validated: Mapping[str, Any]) -> bool:
+    """Every provider needs ``LIFEWEAVE_LLM_API_KEY`` except an OpenAI-compatible server, wherever it runs."""
+    return validated.get("provider") != "openai_compatible"
 
 
 def _validated_profile_config(
@@ -391,9 +445,8 @@ def _validated_profile_config(
     api_key = credentials.get("LIFEWEAVE_LLM_API_KEY")
     if not api_key:
         if llm_key_required(validated):
-            raise HindsightStartupError("missing_credentials")
-        # Ollama, llama.cpp or vLLM on loopback ignore the key, but Hindsight's
-        # OpenAI adapter refuses an empty one.
+            raise HindsightStartupError("missing_credentials", _KEY_REFUSED)
+        # Ollama, llama.cpp or vLLM ignore the key, but Hindsight's OpenAI adapter refuses an empty one.
         api_key = _KEYLESS_PLACEHOLDER
 
     provider = validated["provider"]
@@ -466,7 +519,8 @@ def document_compiler(settings: Mapping[str, Any]):
 
 # Why the model check failed, as a sentence and the command that fixes it. The
 # sentences are matched by CI (.github/workflows/qualify.yml); keep them stable.
-_KEY_FIX = "lifecontext llm set --api-key-stdin < FILE  (FILE holds the key on one line)"
+_KEY_FIX = ("lifecontext llm set  (asks for the key; in scripts: lifecontext llm set --api-key-stdin < FILE, "
+            "FILE holds the key on one line)")
 _MODEL_FIX = "lifecontext llm set --model MODEL_ID"
 PROBE_CAUSES = {
     "key_rejected": ("the provider rejected the key", _KEY_FIX),

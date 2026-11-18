@@ -221,6 +221,49 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "data", path)
 
 
+class FetchReleaseTests(unittest.TestCase):
+    """fetch_release with curl stubbed: a release that does not exist is named, with where to look."""
+
+    def run_fetch(self, head_status: str, failing: str = "SHA256SUMS") -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-fetch-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        stubs = root / "stubs"
+        stubs.mkdir()
+        # The download of `failing` fails as curl -f does on an HTTP error; a HEAD request reports the status of
+        # SHA256SUMS as `head_status` and 404 for anything else.
+        _stub(stubs / "curl", 'case "$*" in *" -I "*) case "$*" in *SHA256SUMS) printf %s '
+              f'"{head_status}" ;; *) printf 404 ;; esac; exit 0 ;; esac\n'
+              f'case "$*" in *"{failing}"*) echo "curl: (22) The requested URL returned error" >&2; exit 22 ;; esac\n'
+              'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n: > "$out"\n')
+        harness = root / "harness.sh"
+        harness.write_text(f'set -eu\nREPOSITORY="rundax/lifecontext"\nversion=9.9.9\nplatform=linux-x86_64\n'
+                           f'tmp="{root}"\n' + _functions("say", "warn", "die", "download", "download_failed",
+                                                           "fetch_release") + "\nfetch_release\n")
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": f"{stubs}:{os.defpath}"}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_a_missing_release_says_where_the_releases_are(self) -> None:
+        result = self.run_fetch("404")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error: release v9.9.9 not found; see https://github.com/rundax/lifecontext/releases "
+                      "or pass --version\n", result.stderr)
+
+    def test_another_download_failure_names_the_file(self) -> None:
+        result = self.run_fetch("503")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not download SHA256SUMS from github.com/rundax/lifecontext", result.stderr)
+        self.assertNotIn("not found", result.stderr)
+
+    def test_a_release_whose_checksums_exist_but_whose_other_file_is_missing_names_that_file(self) -> None:
+        result = self.run_fetch("200", failing="requirements-linux-x86_64.txt")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("release v9.9.9 exists but requirements-linux-x86_64.txt could not be downloaded",
+                      result.stderr)
+        self.assertNotIn("not found", result.stderr)
+
+
 class InstallOcrTests(unittest.TestCase):
     """install_ocr on a system whose only package manager is pacman, with every command stubbed."""
 
@@ -244,14 +287,60 @@ class InstallOcrTests(unittest.TestCase):
         _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n'
               + ('if [ "$2" = true ]; then exit 0; fi\nshift\nexec "$@"\n' if works else "exit 1\n"))
 
-    def run_install_ocr(self):
+    def harness(self, interactive: str) -> Path:
         harness = Path(self.temp.name) / "harness.sh"
-        harness.write_text("set -eu\nos=Linux\n" + _functions(
-            "say", "warn", "as_root", "can_run_as_root", "ocr_ready", "install_ocr")
-            + '\ninstall_ocr\necho "ocr_state=$ocr_state"\n')
+        harness.write_text(f"set -eu\nos=Linux\ninteractive={interactive}\n" + _functions(
+            "say", "warn", "tty_available", "ask_yes", "as_root", "can_run_as_root", "may_install_as_root",
+            "ocr_ready", "install_ocr") + '\ninstall_ocr\necho "ocr_state=$ocr_state"\n')
+        return harness
+
+    def run_install_ocr(self):
         env = {"PATH": str(self.stubs), "HOME": self.temp.name}
-        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True, env=env,
+        return subprocess.run(["/bin/sh", str(self.harness("no"))], text=True, capture_output=True, env=env,
                               stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+    @unittest.skipIf(pty is None, "needs pseudo-terminals")
+    def test_an_interactive_run_asks_before_using_sudo_with_a_password(self) -> None:
+        # sudo -n fails (a password is needed); plain sudo "asks" and runs the command.
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n[ "$1" = -n ] && exit 1\n'
+              '[ "$1" = -k ] && exit 0\nexec "$@"\n')
+        for answer, expected in (("", "ocr_state=ready"), ("n", "ocr_state=missing: sudo pacman")):
+            with self.subTest(answer=answer):
+                self.calls.unlink(missing_ok=True)
+                self.installed.unlink(missing_ok=True)
+                pid, descriptor = pty.fork()
+                if pid == 0:
+                    os.execve("/bin/sh", ["sh", str(self.harness("auto"))],
+                              {"PATH": str(self.stubs), "HOME": self.temp.name})
+                transcript = b""
+                deadline = time.monotonic() + 60
+                answered = False
+                try:
+                    while time.monotonic() < deadline:
+                        if not answered and b"Install Tesseract with sudo now?" in transcript \
+                                and transcript.endswith(b"[Y/n]: "):
+                            os.write(descriptor, (answer + "\n").encode())
+                            answered = True
+                        if not select.select([descriptor], [], [], 1)[0]:
+                            continue
+                        try:
+                            data = os.read(descriptor, 4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        transcript += data
+                finally:
+                    os.close(descriptor)
+                    os.waitpid(pid, 0)
+                text = transcript.decode(errors="replace")
+                self.assertTrue(answered, text)
+                self.assertIn(expected, text)
+                packages = "tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
+                self.assertEqual(self.logged(), ["sudo -n true"] + (
+                    # The ticket the password opened is dropped right after the install.
+                    [f"sudo pacman -S --needed --noconfirm {packages}", f"pacman -S --needed --noconfirm {packages}",
+                     "sudo -k"] if answer == "" else []))
 
     def logged(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
@@ -282,6 +371,33 @@ class InstallOcrTests(unittest.TestCase):
         self.assertIn("sudo pacman -S --needed tesseract", result.stdout)
         self.assertEqual(self.logged(), [])
 
+    def test_the_exit_trap_drops_the_sudo_ticket_when_it_was_asked_for(self) -> None:
+        # An install that is interrupted after the password was typed must not leave sudo open.
+        trap = re.search(r"^\ttrap '(rm -rf \"\$tmp\"[^']*)' EXIT$", INSTALLER.read_text(), re.MULTILINE).group(1)
+        self.assertIn("sudo -k", trap)
+        _stub(self.stubs / "sudo", f'echo "sudo $*" >> "{self.calls}"\n')
+        for asked, expected in (("1", ["sudo -k"]), ("0", []), ("", [])):
+            with self.subTest(sudo_asked=asked):
+                self.calls.unlink(missing_ok=True)
+                harness = Path(self.temp.name) / "trap.sh"
+                harness.write_text(f"tmp=$(mktemp -d)\nsudo_asked={asked or 'unset_placeholder'}\n"
+                                   + ("" if asked else "unset sudo_asked\n")
+                                   + _functions("restore_tty") + f"\ntrap '{trap}' EXIT\nexit 1\n")
+                result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                        env={"PATH": f"{self.stubs}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
+                                        timeout=60, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(self.logged(), expected)
+        # Under the installer's `set -eu`, a failing `sudo -k` must not change the exit code.
+        _stub(self.stubs / "sudo", "exit 1\n")
+        harness = Path(self.temp.name) / "trap-errexit.sh"
+        harness.write_text("set -eu\ntmp=$(mktemp -d)\nsudo_asked=1\n" + _functions("restore_tty")
+                           + f"\ntrap '{trap}' EXIT\nexit 0\n")
+        result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                env={"PATH": f"{self.stubs}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
+                                timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_an_existing_installation_is_left_alone(self) -> None:
         self.sudo(works=True)
         self.installed.touch()
@@ -305,7 +421,8 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.calls = root / "calls.log"
         venv_bin = root / "venv" / "bin"
         venv_bin.mkdir(parents=True)
-        os.symlink(sys.executable, venv_bin / "python")
+        # The venv's python with this checkout's package; -I would ignore the PYTHONPATH that finds it.
+        _stub(venv_bin / "python", f'[ "$1" != -I ] || shift\nPYTHONPATH="{ROOT / "src"}" exec "{sys.executable}" "$@"\n')
         report = json.dumps({"home": "/h/.lifeweave", "config_state": "written", "provider": "p", "model": "m",
                              "credentials_state": "stored", "vault_root": "/v", "timezone": "UTC", "warnings": []})
         _stub(venv_bin / "lifecontext",
@@ -318,8 +435,9 @@ class InstallEndpointPromptTests(unittest.TestCase):
         self.harness = root / "harness.sh"
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
-            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_yes",
-                         "choose_provider", "ask_anthropic_model", "print_init_report", "configure_interactive")
+            + _functions("say", "warn", "die", "restore_tty", "ask", "ask_required", "ask_secret", "ask_no",
+                         "choose_provider", "ask_anthropic_model", "check_base_url", "ask_base_url",
+                         "print_init_report", "configure_interactive")
             + '\nconfigure_interactive\necho "capture=$capture"\n')
 
     def converse(self, answers: list[tuple[str, str]], **environ: str) -> tuple[int, str]:
@@ -379,13 +497,50 @@ class InstallEndpointPromptTests(unittest.TestCase):
              f"--vault {self.home}/LifeContext/vault --base-url http://127.0.0.1:11434/v1")])
         self.assertIn("capture=0", transcript)
 
+    def test_a_url_lifecontext_refuses_is_asked_again_before_init_runs(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"),
+            ("API base URL", "https://api.example.com/v1/chat/completions"),
+            # The check is LifeContext's own, so the refusal says why in its words.
+            ("API base URL", "http://models.example.com:8000/v1"),
+            ("anyway? [y/N]", "n"),
+            ("API base URL", "http://192.168.1.20:8000/v1"),
+            ("Model ID (exactly as your endpoint names it)", "m"), ("API key", ""), ("Vault folder", "/v"),
+            ("Turn notes", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertIn("names one endpoint", transcript)
+        self.assertIn("http on a host that is not on this machine or a private network", transcript)
+        # init ran once, with the accepted URL and without the flag.
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json --provider openai_compatible --model m --vault /v "
+            "--base-url http://192.168.1.20:8000/v1"])
+
+    def test_plain_http_on_another_host_is_accepted_only_when_the_person_confirms_and_passes_the_flag(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"), ("API base URL", "http://models.example.com:8000/v1"),
+            ("anyway? [y/N]", "y"),
+            ("Model ID (exactly as your endpoint names it)", "m"), ("API key", ""), ("Vault folder", "/v"),
+            ("Turn notes", "")])
+        self.assertEqual(code, 0, transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json --provider openai_compatible --model m --vault /v "
+            "--base-url http://models.example.com:8000/v1 --allow-insecure-http"])
+
+    def test_three_refused_urls_end_the_installer_before_init(self) -> None:
+        code, transcript = self.converse([
+            ("Choose 1-6: ", "6"), ("API base URL", "ftp://a.example/v1"), ("API base URL", "ftp://b.example/v1"),
+            ("API base URL", "ftp://c.example/v1")])
+        self.assertNotEqual(code, 0, transcript)
+        self.assertIn("no usable base URL was given", transcript)
+        self.assertFalse(self.calls.exists())
+
     def test_the_key_is_hidden_reaches_init_only_through_a_private_file_and_is_removed(self) -> None:
         key = "sk-typed-secret-0123456789"
         code, transcript = self.converse([
             ("Choose 1-6: ", "6"), ("API base URL", "http://127.0.0.1:9999/v1"),
             ("Model ID (exactly as your endpoint names it)", "other-model"), ("API key", key),
             ("Vault folder", str(self.home / "Notes")),
-            ("Turn notes you put in Journal/Inbox into journal entries automatically? [Y/n]", "")])
+            ("Turn notes you put in Journal/Inbox into journal entries automatically? [y/N]", "")])
         self.assertEqual(code, 0, transcript)
         self.assertNotIn(key, transcript)
         recorded = self.calls.read_text().splitlines()
@@ -394,7 +549,39 @@ class InstallEndpointPromptTests(unittest.TestCase):
                                       f"--base-url http://127.0.0.1:9999/v1")
         self.assertEqual(recorded[1], f"key={key} -rw------- {self.tmp}")
         self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
-        self.assertIn("capture=1", transcript)
+        # Inbox capture is off unless asked for.
+        self.assertIn("capture=0", transcript)
+
+    def test_a_rerun_that_finds_no_key_asks_for_it_hidden_at_a_terminal(self) -> None:
+        key = "sk-typed-again-0123456789"
+        (self.home / ".lifeweave").mkdir()
+        (self.home / ".lifeweave" / "config.yaml").write_text("llm: {}\n")
+        common = {"home": "/h/.lifeweave", "config_state": "kept", "provider": "p", "model": "m", "vault_root": "/v",
+                  "timezone": "UTC", "warnings": []}
+        missing = json.dumps({**common, "credentials_state": "missing"})
+        replaced = json.dumps({**common, "credentials_state": "replaced"})
+        venv = Path(self.temp.name) / "venv"
+        _stub(venv / "bin" / "lifecontext",
+              f'echo "$*" >> "{self.calls}"\n'
+              'if [ -n "${LIFECONTEXT_API_KEY_FILE:-}" ]; then\n'
+              f'  echo "key=$(cat "$LIFECONTEXT_API_KEY_FILE") $(ls -l "$LIFECONTEXT_API_KEY_FILE" | cut -c1-10) '
+              f'$(dirname "$LIFECONTEXT_API_KEY_FILE")" >> "{self.calls}"\n'
+              f"  printf '%s' '{replaced}'\nelse\n  printf '%s' '{missing}'\nfi\n")
+        self.harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{venv}"\nlc="$venv/bin/lifecontext"\n'
+            'interactive=auto\nkey_changed=0\n'
+            + _functions("say", "warn", "die", "sha256_of", "tty_available", "restore_tty", "ask_secret",
+                         "print_init_report", "key_missing", "ask_key_again", "configure")
+            + '\nconfigure\necho "key_changed=$key_changed"\n')
+        code, transcript = self.converse([("API key for this provider (none is stored yet", key)])
+        self.assertEqual(code, 0, transcript)
+        self.assertNotIn(key, transcript)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "init --non-interactive --json", "init --non-interactive --replace-key --json",
+            f"key={key} -rw------- {self.tmp}"])
+        self.assertEqual([path.name for path in self.tmp.iterdir()], ["next-steps"])
+        self.assertIn("API key: replaced in .env", transcript)
+        self.assertIn("key_changed=1", transcript)
 
     def test_anthropic_suggests_a_model_and_refuses_the_ones_that_cannot_work(self) -> None:
         from lifecontext.initialize import model_question
@@ -403,13 +590,14 @@ class InstallEndpointPromptTests(unittest.TestCase):
         code, transcript = self.converse([
             ("Choose 1-6: ", "1"), (f"{model_question('anthropic')} [claude-sonnet-5]", "claude-opus-5-5"),
             # Enter at the model prompt asked again takes the suggestion.
-            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "")],
+            ("does not work with LifeContext yet", ""), ("API key", ""), ("Vault folder", ""), ("Turn notes", "y")],
             LIFECONTEXT_BASE_URL="http://127.0.0.1:8000/v1")
         self.assertEqual(code, 0, transcript)
         self.assertNotIn("URL", transcript)
         self.assertEqual(self.calls.read_text().splitlines(), [
             (f"init --non-interactive --json --provider anthropic --model claude-sonnet-5 "
              f"--vault {self.home}/LifeContext/vault")])
+        self.assertIn("capture=1", transcript)
 
     def test_the_refused_models_and_the_model_lists_match_lifecontext_init(self) -> None:
         from lifecontext.initialize import (
@@ -454,6 +642,7 @@ class InstallEndingTests(unittest.TestCase):
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{self.root / "venv"}"\n'
             'lc="$venv/bin/lifecontext"\nlink="$HOME/.local/bin/lifecontext"\nos=Linux\n'
             'interactive=no\ncapture=${CAPTURE:-0}\nkey_changed=0\nservice_state="running"\nocr_state="ready"\n'
+            'skills_state="linked for Claude Code"\n'
             'backup_archive=""\nmodel_state=${MODEL:-passed}\ndoctor_status=${DOCTOR:-0}\n'
             + _functions("say", "warn", "die", "sha256_of", *names) + "\n" + body)
         return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
@@ -468,6 +657,18 @@ class InstallEndingTests(unittest.TestCase):
         self.assertIn("Existing settings in ~/.lifeweave kept", result.stdout)
         self.assertEqual((self.tmp / "next-steps").read_text().splitlines()[1],
                          "  2. Import a document: lifecontext documents import ~/path/to/lease.pdf")
+
+    def test_unattended_setup_passes_the_insecure_http_flag_only_when_asked(self) -> None:
+        for environ, expected in (({}, "init --non-interactive --json\n"),
+                                  ({"LIFECONTEXT_ALLOW_INSECURE_HTTP": "1"},
+                                   "init --non-interactive --json --allow-insecure-http\n"),
+                                  ({"LIFECONTEXT_ALLOW_INSECURE_HTTP": "yes"}, "init --non-interactive --json\n")):
+            with self.subTest(environ=environ):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_functions("configure\n", "print_init_report", "configure",
+                                            LIFECONTEXT_PROVIDER="openai_compatible", **environ)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.calls.read_text(), expected)
 
     def test_capture_is_added_when_chosen_or_already_installed(self) -> None:
         body = "service_command\n"
@@ -491,6 +692,7 @@ class InstallEndingTests(unittest.TestCase):
         result = self.finish()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Model check: passed\n", result.stdout)
+        self.assertIn("Agent skill: linked for Claude Code\n", result.stdout)
         self.assertTrue(result.stdout.endswith('Next steps:\n  1. Open /v in Obsidian as a vault '
                                                '("Open folder as vault").\n'))
         self.assertEqual(result.stderr, "")
@@ -508,6 +710,107 @@ class InstallEndingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("Next steps:", result.stdout)
         self.assertIn("lifecontext doctor reported a problem", result.stderr)
+
+
+class InstallWaitTests(unittest.TestCase):
+    """wait_for_api with the health check, sleep and journalctl stubbed."""
+
+    def run_wait(self, answers_after: int, wait: int, seconds_per_check: int = 5) -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-wait-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        stubs = root / "stubs"
+        stubs.mkdir()
+        _stub(stubs / "sleep", "exit 0\n")
+        # The clock: every `date +%s` is `seconds_per_check` later than the one before.
+        _stub(stubs / "date", f'now=$(cat "{root}/clock" 2>/dev/null || echo 0)\necho "$now"\n'
+              f'echo $((now + {seconds_per_check})) > "{root}/clock"\n')
+        _stub(stubs / "journalctl", 'echo "journalctl $*"\necho "a log line"\n')
+        harness = root / "harness.sh"
+        harness.write_text(
+            f"set -eu\nos=Linux\nHEALTH_WAIT_SECONDS={wait}\ncount=0\n"
+            f'api_answers() {{ count=$((count + 1)); [ "$count" -gt {answers_after} ]; }}\n'
+            + _functions("say", "warn", "log_command", "show_log_tail", "wait_for_api")
+            + '\nif wait_for_api; then echo answered; else show_log_tail; fi\n')
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": f"{stubs}:{os.defpath}"}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_a_long_wait_says_how_long_and_where_the_log_is_every_20_seconds(self) -> None:
+        result = self.run_wait(answers_after=9, wait=900)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            ("Still waiting for the API (20 s of up to 900 s); follow the log with: "
+             "journalctl --user -u lifecontext.service"),
+            ("Still waiting for the API (40 s of up to 900 s); follow the log with: "
+             "journalctl --user -u lifecontext.service"),
+            "answered"])
+
+    def test_the_progress_lines_and_the_limit_count_real_seconds_not_sleeps(self) -> None:
+        # Each round takes 30 s (a slow health check), so "20 s" progress lines come every round and the
+        # 100 s limit ends the wait after four rounds, not twenty.
+        result = self.run_wait(answers_after=99, wait=100, seconds_per_check=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        waited = re.findall(r"Still waiting for the API \((\d+) s of up to 100 s\)", result.stdout)
+        self.assertEqual(waited, ["30", "60", "90"])
+        self.assertIn("The last 20 lines of the service log:", result.stdout)
+
+    def test_a_timeout_shows_the_last_20_log_lines(self) -> None:
+        result = self.run_wait(answers_after=99, wait=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Still waiting", result.stdout)
+        self.assertIn("The last 20 lines of the service log:\n"
+                      "journalctl --user -u lifecontext.service -n 20 --no-pager\na log line\n", result.stdout)
+
+
+class InstallSkillsAndPathTests(unittest.TestCase):
+    """link_skills and link_command with `lifecontext` stubbed: what the summary and the PATH hint say."""
+
+    def run_function(self, name: str, check_output: str = "", shell: str = "/bin/bash",
+                     os_name: str = "Linux") -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="lifecontext-skills-test.")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        venv_bin = root / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        os.symlink(sys.executable, venv_bin / "python")
+        _stub(venv_bin / "lifecontext", f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;; esac\n""")
+        harness = root / "harness.sh"
+        harness.write_text(
+            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\n'
+            f'os={os_name}\nbin_dir="$HOME/.local/bin"\nlink="$bin_dir/lifecontext"\n'
+            + _functions("say", "warn", name) + f'\n{name}\necho "skills_state=${{skills_state:-}}"\n')
+        return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                              env={"PATH": os.defpath, "SHELL": shell}, stdin=subprocess.DEVNULL, timeout=60,
+                              check=False)
+
+    def test_the_summary_names_the_agents_that_got_the_skill_or_says_none_was_found(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}, {"agent": "codex", "state": "linked"},
+                                        {"agent": "gemini", "state": "missing"}]})
+        self.assertIn("skills_state=linked for Claude Code, Codex\n", self.run_function("link_skills", report).stdout)
+        result = self.run_function("link_skills", json.dumps({"agents": []}))
+        self.assertIn("skills_state=no agent found", result.stdout)
+        # Agents found, none linked: not the same as no agent.
+        result = self.run_function("link_skills", json.dumps({"agents": [{"agent": "claude", "state": "stale_link"}]}))
+        self.assertIn("skills_state=agents found, but the skill was not linked; see lifecontext skills check",
+                      result.stdout)
+        self.assertNotIn("no agent found", result.stdout)
+        result = self.run_function("link_skills", json.dumps({"error": "link_failed"}))
+        self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
+
+    def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
+        for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/zsh", "Linux", "~/.zshrc"),
+                                         ("/bin/bash", "Linux", "~/.bashrc"),
+                                         ("/bin/bash", "Darwin", "~/.bash_profile"),
+                                         ("/bin/sh", "Linux", "~/.profile"),
+                                         ("/usr/bin/fish", "Linux", "fish_add_path ~/.local/bin")):
+            with self.subTest(shell=shell, os=os_name):
+                result = self.run_function("link_command", shell=shell, os_name=os_name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+                if expected.startswith("~"):
+                    # A new terminal does not pick the line up by itself: say how to use it now.
+                    self.assertIn("open a new terminal (or run the line now", result.stdout)
 
 
 class InstallModelCheckTests(unittest.TestCase):
@@ -530,7 +833,7 @@ class InstallModelCheckTests(unittest.TestCase):
         self.harness = root / "harness.sh"
         self.harness.write_text(
             f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
-            'skip_model_probe=${SKIP:-0}\n' + _functions("say", "check_model")
+            'skip_model_probe=${SKIP:-0}\ninteractive=no\n' + _functions("say", "check_model")
             + '\ncheck_model\necho "model_state=$model_state"\n')
 
     def check(self, output: str, status: int = 0, **environ: str) -> str:
@@ -557,6 +860,55 @@ class InstallModelCheckTests(unittest.TestCase):
                       "Fix it with: lifecontext llm set --api-key-stdin < FILE\n", out)
         self.assertTrue(out.endswith("model_state=failed\n"))
         self.assertIn("the provider rejected the key", (self.tmp / "model-check").read_text())
+
+    def test_a_rejected_key_is_offered_a_new_one_once_at_a_terminal_and_the_check_runs_again(self) -> None:
+        # A keyless OpenAI-compatible endpoint that turns out to want a key: the installer never asked, the
+        # probe says "key rejected", and at a terminal the person can enter one now.
+        root = Path(self.temp.name)
+        report = json.dumps({"home": "/h/.lifeweave", "config_state": "kept", "provider": "p", "model": "m",
+                             "credentials_state": "replaced", "vault_root": "/v", "timezone": "UTC",
+                             "warnings": []})
+        rejected = json.dumps({"model_probe": {"status": "fail", "cause": "key_rejected",
+                                               "message": "the provider rejected the key",
+                                               "fix": "lifecontext llm set", "reflect": {"status": "skipped"}}})
+        passed = json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {"status": "pass"}}})
+        stored = root / "stored"
+        _stub(self.lc, f'echo "$*" >> "{self.calls}"\n'
+              'case "$1" in\n'
+              f'  init) cat "$LIFECONTEXT_API_KEY_FILE" > "{stored}"; printf \'%s\' \'{report}\' ;;\n'
+              f'  preflight) if [ -e "{stored}" ]; then printf \'%s\' \'{passed}\'; '
+              f'else printf \'%s\' \'{rejected}\'; exit 3; fi ;;\nesac\n')
+        harness = root / "harness2.sh"
+        harness.write_text(
+            f'set -eu\nHOME="{self.home}"\ntmp="{self.tmp}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\n'
+            'skip_model_probe=0\ninteractive=${INTERACTIVE:-auto}\nkey_changed=0\n'
+            + _functions("say", "warn", "check_model", "ask_key_again", "print_init_report")
+            + '\ntty_available() { return 0; }\nask_secret() { reply=${TYPED:-}; }\n'
+              'check_model\necho "model_state=$model_state key_changed=$key_changed"\n')
+
+        def run(**environ: str) -> str:
+            stored.unlink(missing_ok=True)
+            self.calls.unlink(missing_ok=True)
+            result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                    env={"PATH": os.defpath, **environ}, stdin=subprocess.DEVNULL, timeout=60,
+                                    check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        out = run(TYPED="sk-typed-key-1234567890")
+        self.assertIn("The model check failed: the provider rejected the key.", out)
+        self.assertIn("The model answered", out)
+        self.assertTrue(out.endswith("model_state=passed key_changed=1\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "preflight --model-probe", "init --non-interactive --replace-key --json", "preflight --model-probe"])
+        self.assertEqual(stored.read_text().strip(), "sk-typed-key-1234567890")
+        # An empty answer leaves the failure as it is; --non-interactive and unattended runs never ask.
+        out = run(TYPED="")
+        self.assertTrue(out.endswith("model_state=failed key_changed=0\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), ["preflight --model-probe"])
+        out = run(TYPED="sk-typed-key-1234567890", INTERACTIVE="no")
+        self.assertTrue(out.endswith("model_state=failed key_changed=0\n"), out)
+        self.assertEqual(self.calls.read_text().splitlines(), ["preflight --model-probe"])
 
     def test_a_reflect_warning_and_a_check_that_did_not_run(self) -> None:
         out = self.check(json.dumps({"model_probe": {"status": "pass", "cause": None, "reflect": {

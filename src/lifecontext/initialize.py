@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from lifecontext.config import ConfigError, load_settings, valid_timezone
 from lifecontext.credentials import (
@@ -22,7 +23,9 @@ from lifecontext.hindsight import (
     _PROVIDERS_REQUIRING_BASE_URL,
     HindsightStartupError,
     _validated_profile_settings,
+    is_loopback_host,
     llm_key_required,
+    needs_plain_http_grant,
 )
 from lifecontext.paths import LifeContextPaths, atomic_write
 
@@ -61,6 +64,9 @@ MESSAGES = {
         f"{', '.join(sorted(FORCED_TOOL_REJECTING_MODELS))} do not work with LifeContext yet: its retain step "
         "uses strict structured output, which on Anthropic is a forced tool call, and these models refuse a "
         f"forced tool choice. Use {SUGGESTED_ANTHROPIC_MODEL} or {LOWER_COST_ANTHROPIC_MODEL} (it costs less)."),
+    "invalid_llm_settings": (
+        "The model settings were refused: check the provider name, the exact model ID and the base URL "
+        "(https, or http on this machine or a private network; the API root, not one endpoint)."),
 }
 # llm set changes one setting at a time and reads no LIFECONTEXT_* variables.
 _LLM_SET_MESSAGES = {
@@ -76,7 +82,11 @@ ENVIRONMENT = {"provider": "LIFECONTEXT_PROVIDER", "model": "LIFECONTEXT_MODEL",
                "base_url": "LIFECONTEXT_BASE_URL", "vault": "LIFECONTEXT_VAULT"}
 # The key never comes from the environment itself, only from the file this names.
 KEY_FILE_VARIABLE = "LIFECONTEXT_API_KEY_FILE"
-_LLM_ORDER = ("provider", "model", "base_url", "reasoning_effort")
+_LLM_ORDER = ("provider", "model", "base_url", "reasoning_effort", "allow_insecure_http")
+_PLAIN_HTTP_WARNING = ("Warning: your text, and the key if one is stored, travel unencrypted over http to this "
+                       "address on the network; use https if you can.")
+_FLAG_NOT_NEEDED = ("Warning: --allow-insecure-http was not saved: this URL does not need it (https, this machine "
+                    "or a private network address).")
 
 
 class InitError(RuntimeError):
@@ -86,6 +96,11 @@ class InitError(RuntimeError):
         super().__init__(code)
         self.code = code
         self.message = message or MESSAGES.get(code)
+
+
+def _refused(error: HindsightStartupError) -> str | None:
+    """The sentence for refused model settings when the check said why; else the generic one."""
+    return f"The model settings were refused: {error.message}." if error.message else None
 
 
 def rejects_forced_tool(llm: Mapping[str, Any]) -> bool:
@@ -105,6 +120,7 @@ class InitOptions:
     interactive: bool = False
     force: bool = False
     replace_key: bool = False
+    allow_insecure_http: bool = False
 
 
 def detect_timezone(environ: Mapping[str, str] | None = None, etc: Path = Path("/etc")) -> str:
@@ -251,7 +267,8 @@ def _choose_endpoint(given: Mapping[str, str | None], configured: Mapping[str, A
     if not provider:
         raise InitError("provider_required")
     if provider not in _PROVIDERS:
-        raise InitError("invalid_llm_settings")
+        raise InitError("invalid_llm_settings", "The model provider is not one LifeContext knows; use one of: "
+                        + ", ".join(sorted(_PROVIDERS)) + ".")
     same = configured if provider == configured.get("provider") else {}
     base_url = given["base_url"]
     if choice in (1, 2, 3, 4):
@@ -386,8 +403,8 @@ def run_init(
     if config_exists and not options.force:
         try:
             llm = _validated_profile_settings({"llm": existing["llm"]})
-        except HindsightStartupError:
-            raise InitError("invalid_llm_settings") from None
+        except HindsightStartupError as exc:
+            raise InitError("invalid_llm_settings", _refused(exc)) from None
         root = Path(existing_vault["root"]) if existing_vault else default_root
         journal = Path(existing_vault["journal_path"]) if existing_vault else root / "Journal"
         timezone = existing.get("timezone")
@@ -395,6 +412,9 @@ def run_init(
                    "vault": str(root), "timezone": timezone}
         ignored = sorted(name for name, wanted in given.items() if wanted is not None and wanted != current[name]
                          and not (name == "vault" and os.path.realpath(os.path.expanduser(wanted)) == str(root)))
+        # Kept settings that need a grant carry it (or they would not have validated above).
+        if options.allow_insecure_http and not needs_plain_http_grant(llm.get("base_url")):
+            report["warnings"].append("insecure_http_flag_not_needed")
         if ignored:
             report["warnings"].append("flags_ignored")
             report["ignored"] = ignored
@@ -411,10 +431,18 @@ def run_init(
         llm_input.pop("base_url", None)
         if base_url:
             llm_input["base_url"] = base_url
+        # The grant is the URL it was given for: kept while the URL stays exactly that, else it has to be
+        # given again. A URL that needs none (https, a private address) saves none.
+        llm_input.pop("allow_insecure_http", None)
+        if base_url and needs_plain_http_grant(base_url):
+            if options.allow_insecure_http or base.get("allow_insecure_http") == base_url:
+                llm_input["allow_insecure_http"] = base_url
+        elif options.allow_insecure_http:
+            report["warnings"].append("insecure_http_flag_not_needed")
         try:
             llm = _validated_profile_settings({"llm": llm_input})
-        except HindsightStartupError:
-            raise InitError("invalid_llm_settings") from None
+        except HindsightStartupError as exc:
+            raise InitError("invalid_llm_settings", _refused(exc)) from None
         # A config that already names one of these models is kept as it is (doctor warns).
         if (provider == "anthropic" and model in FORCED_TOOL_REJECTING_MODELS
                 and (configured.get("provider"), configured.get("model")) != (provider, model)):
@@ -486,9 +514,17 @@ def run_init(
             report["warnings"].append("existing_key_kept")
     else:
         report["credentials_state"] = "missing" if required else "not_required"
+    if uses_plain_http(llm):
+        report["warnings"].append("model_uses_plain_http")
     report["setup_steps"] = _setup_steps(report)
     report["next_steps"] = next_steps(report["vault_root"])
     return report
+
+
+def uses_plain_http(llm: Mapping[str, Any]) -> bool:
+    """The text, and a stored key, go over plain http to somewhere other than this machine."""
+    parts = urlsplit(llm.get("base_url") or "")
+    return parts.scheme == "http" and not is_loopback_host(parts.hostname or "")
 
 
 def _put_back(path: Path, previous: bytes | None) -> None:
@@ -507,7 +543,8 @@ def next_steps(vault_root: str) -> list[str]:
     return [
         f'Open {vault_root} in Obsidian as a vault ("Open folder as vault").',
         "Import a document: lifecontext documents import ~/path/to/lease.pdf",
-        'Ask your agent: "What does my lease say about the deposit?"',
+        ('Start a new agent session (it loads the skill at start), then ask: '
+         '"What does my lease say about the deposit?"'),
     ]
 
 
@@ -515,7 +552,7 @@ def _setup_steps(report: Mapping[str, Any]) -> list[str]:
     """What a source install still has to run; install.sh has done all of it."""
     steps = []
     if report["credentials_state"] == "missing":
-        steps.append("lifecontext init --api-key-stdin < FILE  (or run lifecontext init in a terminal to type the key)")
+        steps.append("lifecontext llm set  (asks for the key; in scripts: lifecontext llm set --api-key-stdin < FILE)")
     steps += [
         ("lifecontext preflight  (checks the model key and starts the local memory engine; "
          "the first start downloads several hundred MB of models)"),
@@ -529,7 +566,7 @@ def _setup_steps(report: Mapping[str, Any]) -> list[str]:
 def render(report: Mapping[str, Any]) -> str:
     credentials = {
         "stored": "stored in .env", "replaced": "replaced in .env", "kept": "already in .env",
-        "missing": "missing", "not_required": "not needed for this loopback endpoint",
+        "missing": "missing", "not_required": "not set (optional for this endpoint)",
     }[report["credentials_state"]]
     lines = [
         "LifeContext is set up." if report["credentials_state"] != "missing" else
@@ -548,6 +585,10 @@ def render(report: Mapping[str, Any]) -> str:
     if "api_key_file_readable_by_others" in report["warnings"]:
         lines.append("Warning: other users can read the file in LIFECONTEXT_API_KEY_FILE; chmod 600 it "
                      "unless it is a container secret only this service sees.")
+    if "model_uses_plain_http" in report["warnings"]:
+        lines.append(_PLAIN_HTTP_WARNING)
+    if "insecure_http_flag_not_needed" in report["warnings"]:
+        lines.append(_FLAG_NOT_NEEDED)
     if "flags_ignored" in report["warnings"]:
         names = ", ".join("--" + name.replace("_", "-") for name in report["ignored"])
         lines.append(f"Warning: config.yaml already exists, so {names} did not change it; add --force to apply "
@@ -585,14 +626,16 @@ def show_llm() -> dict[str, Any]:
         raise InitError("config_missing")
     try:
         llm = _validated_profile_settings({"llm": settings["llm"]})
-    except HindsightStartupError:
-        raise InitError("invalid_llm_settings") from None
+    except HindsightStartupError as exc:
+        raise InitError("invalid_llm_settings", _refused(exc)) from None
     credentials = _existing_credentials(paths)
     if credentials and credentials.get("LIFEWEAVE_LLM_API_KEY"):
         key = "set"
     else:
         key = "missing" if llm_key_required(llm) else "not_required"
-    return {"provider": llm["provider"], "model": llm["model"], "base_url": llm.get("base_url"), "api_key": key}
+    shown = {"provider": llm["provider"], "model": llm["model"], "base_url": llm.get("base_url"), "api_key": key}
+    # Only when granted for this URL, so the usual output keeps its shape.
+    return {**shown, "allow_insecure_http": True} if llm.get("allow_insecure_http") else shown
 
 
 def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -622,23 +665,34 @@ def set_llm(options: InitOptions, *, key_stream=None, environ: Mapping[str, str]
         report["warnings"].append("provider_changed_key_kept")
     if rejects_forced_tool(report):
         report["warnings"].append("model_rejects_forced_tool_use")
+    if uses_plain_http(report):
+        report["warnings"].append("model_uses_plain_http")
+    if options.allow_insecure_http and not needs_plain_http_grant(report["base_url"]):
+        report["warnings"].append("insecure_http_flag_not_needed")
     return report
 
 
 def render_llm(report: Mapping[str, Any]) -> str:
     key = {"set": "set", "missing": "MISSING (this provider needs one)",
-           "not_required": "not set (not needed for this loopback endpoint)"}[report["api_key"]]
+           "not_required": "not set (optional for this endpoint)"}[report["api_key"]]
     lines = ["Model settings updated." if "api_key_updated" in report else "Model settings:",
              f"- Provider: {report['provider']}",
              f"- Model: {report['model']}",
              f"- Base URL: {report['base_url'] or 'the provider default'}",
              f"- API key: {key}"]
+    if report.get("allow_insecure_http"):
+        lines.append("- Plain http: accepted for this URL (--allow-insecure-http)")
     if report["api_key"] == "missing":
-        lines.append("Add it with: lifecontext llm set --api-key-stdin < FILE  "
-                     "(or run lifecontext llm set with LIFECONTEXT_API_KEY_FILE=FILE)")
+        lines.append("Add it with: lifecontext llm set  (asks for the key; in scripts: "
+                     "lifecontext llm set --api-key-stdin < FILE)")
     if "provider_changed_key_kept" in report.get("warnings", ()):
         lines.append("Warning: the provider changed but the stored key was kept; if it belongs to the old "
-                     "provider, replace it with: lifecontext llm set --api-key-stdin < FILE")
+                     "provider, replace it with: lifecontext llm set  (asks for the key; in scripts: "
+                     "lifecontext llm set --api-key-stdin < FILE)")
     if "model_rejects_forced_tool_use" in report.get("warnings", ()):
         lines.append(_FORCED_TOOL_WARNING.format(model=report["model"]))
+    if uses_plain_http(report):
+        lines.append(_PLAIN_HTTP_WARNING)
+    if "insecure_http_flag_not_needed" in report.get("warnings", ()):
+        lines.append(_FLAG_NOT_NEEDED)
     return "\n".join(lines)

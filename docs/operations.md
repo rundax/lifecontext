@@ -115,7 +115,7 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
   `{"error": CODE, "message": ..., "next_step": ..., "retryable": ...,
   "request_id": null}` under `--json` (see [Failure codes](#failure-codes)),
   2 for a usage error.
-- A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
+- An `openai_compatible` endpoint needs no key (see [API key](#api-key)).
 - `--non-interactive` without a provider or a model stops with
   `provider_required` or `model_required`; four Claude models are refused for
   the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
@@ -181,8 +181,9 @@ why). `warnings` do not change the exit code: `service_not_running`,
 `models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
 `model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
 that do not work yet), `vault_files_refused` (`vault_refusals` lists paths a
-write would refuse; other files in the vault are never reported) and, with
-`--model-probe`, `model_reflect_check_failed`.
+write would refuse; other files in the vault are never reported),
+`model_uses_plain_http` (the model server is reached over plain HTTP on a host
+other than this machine) and, with `--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 
@@ -196,6 +197,7 @@ llm:
   model: <exact model ID>
   base_url: <provider API base URL>
   reasoning_effort: high  # optional: low, medium, high, or xhigh
+  allow_insecure_http: <the same URL as base_url>  # optional: see the URL rules below
 ```
 
 `provider` and `model` are required. `base_url` is required for
@@ -236,9 +238,26 @@ provider-specific key lookup. It rejects unknown provider IDs, unknown fields in
 `hindsight.llm_provider`/`llm_model`/`llm_base_url` fields, invalid URLs, and
 credentials in YAML.
 
-Remote URLs must use HTTPS. HTTP is allowed only for loopback (`localhost`,
-`127.0.0.0/8`, or `::1`). URLs cannot contain credentials, query strings, or
-fragments. Never put a key in `base_url`.
+Remote URLs must use HTTPS. Plain HTTP is accepted without a flag only for
+loopback (`localhost`, `127.0.0.0/8`, `::1`), for IP addresses written out in
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale and
+carrier-grade NAT) or `fc00::/7`, and, inside the Docker image only (it sets
+`LIFECONTEXT_IN_CONTAINER=1`), for the name `host.docker.internal`. A name is
+never looked up, so any other name (`models.lan`), and `host.docker.internal`
+outside the image, is refused over HTTP, and so are `169.254.0.0/16`,
+`fe80::/10`, `0.0.0.0` and `::`. This applies to the `llm` block only: `vision`
+accepts plain HTTP for loopback only. Any other HTTP host needs a grant:
+`allow_insecure_http` holds the exact URL it was given for, which `lifecontext
+init --allow-insecure-http` and `lifecontext llm set --allow-insecure-http`
+write, and it counts only while `base_url` is still exactly that string. Edit
+`base_url` by hand and the grant stops applying, so the service refuses to start
+until you grant the new URL; a `true` from an earlier draft names no URL and
+grants nothing. The flag saves nothing for a URL that needs none (HTTPS, loopback,
+a private address). Over HTTP the text of your documents and notes, and the key
+if one is stored, travel unencrypted on the network: init and `llm set` print that,
+`llm show` lists the grant, and `doctor` reports the warning
+`model_uses_plain_http` for any non-loopback HTTP endpoint. URLs cannot contain
+credentials, query strings, or fragments. Never put a key in `base_url`.
 
 ## API key
 
@@ -252,9 +271,8 @@ LIFEWEAVE_LLM_API_KEY=<your provider API key>
 `.env` holds at most two keys: `LIFEWEAVE_LLM_API_KEY` for the `llm` provider
 and, optionally, `LIFEWEAVE_VISION_API_KEY` for the vision model (see below).
 LifeContext requires a non-empty LLM key for every provider except
-`openai_compatible` with a loopback `base_url` (`localhost`, `127.0.0.0/8` or
-`::1`): a local Ollama, llama.cpp or vLLM server needs none, `.env` may then be
-absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
+`openai_compatible`: an Ollama, llama.cpp or vLLM server usually needs none,
+`.env` may then be absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
 used when present. It does not read provider-specific variables
 (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HINDSIGHT_LLM_API_KEY`), Hermes
 credentials, or ambient shell variables. The key file must be owned by the
@@ -334,7 +352,9 @@ No block means vision is off; it never inherits from `llm`, because sending page
 images is a separate decision. When it is on, a local router sends only the
 items that need it (pages without a usable text layer, figures on text pages,
 embedded pictures) as JPEGs of at most 2000 px to that endpoint. Everything else
-stays on the machine. `base_url` follows the same rules as for `llm`; `gemini`
+stays on the machine. `base_url` follows the same rules as for `llm`, except that plain HTTP is
+accepted for loopback only (no private-network addresses, no
+`host.docker.internal`, no `--allow-insecure-http`); `gemini`
 and `anthropic` may also set one for a compatible gateway.
 
 The key is `LIFEWEAVE_VISION_API_KEY` in `~/.lifeweave/.env`. Without it, the LLM

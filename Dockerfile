@@ -25,6 +25,7 @@ LABEL org.opencontainers.image.title="LifeContext" \
       org.opencontainers.image.licenses="BUSL-1.1"
 
 ENV PYTHONUNBUFFERED=1 \
+    LIFECONTEXT_IN_CONTAINER=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     HOME=/data/home \

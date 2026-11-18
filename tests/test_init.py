@@ -250,7 +250,7 @@ class InitTests(unittest.TestCase):
             stored = run_init(_options(api_key_stdin=True), key_stream=io.BytesIO(KEY.encode()))
             self.assertEqual((stored["config_state"], stored["credentials_state"]), ("kept", "stored"))
 
-    def test_loopback_openai_compatible_endpoint_needs_no_key(self) -> None:
+    def test_openai_compatible_endpoint_needs_no_key(self) -> None:
         with _temporary_home():
             report = run_init(_options(provider="openai_compatible", model="llama3.3",
                                        base_url="http://127.0.0.1:11434/v1"))
@@ -258,7 +258,86 @@ class InitTests(unittest.TestCase):
             self.assertEqual(load_settings()["llm"]["base_url"], "http://127.0.0.1:11434/v1")
             remote = run_init(_options(provider="openai_compatible", model="m",
                                        base_url="https://api.example.test/v1", force=True))
-            self.assertEqual(remote["credentials_state"], "missing")
+            self.assertEqual(remote["credentials_state"], "not_required")
+
+    def test_plain_http_on_another_host_needs_the_flag_which_is_saved_and_warns_about_a_stored_key(self) -> None:
+        url = "http://models.lan:8000/v1"
+        with _temporary_home():
+            with self.assertRaises(InitError) as caught:
+                run_init(_options(provider="openai_compatible", model="m", base_url=url))
+            self.assertEqual(caught.exception.code, "invalid_llm_settings")
+            self.assertIn("--allow-insecure-http", caught.exception.message)
+            self.assertFalse(LifeContextPaths.current().config_path.exists())
+            report = run_init(_options(provider="openai_compatible", model="m", base_url=url,
+                                       allow_insecure_http=True))
+            # The grant is the URL it was given for.
+            self.assertEqual(load_settings()["llm"], {"provider": "openai_compatible", "model": "m",
+                                                      "base_url": url, "allow_insecure_http": url})
+            # Even without a key the text travels unencrypted: the warning does not wait for a key.
+            self.assertEqual(report["credentials_state"], "not_required")
+            self.assertEqual(report["warnings"], ["model_uses_plain_http"])
+            self.assertIn("your text, and the key if one is stored, travel unencrypted over http", render(report))
+            self.assertIn("optional for this endpoint", render(report))
+            # The saved grant is honoured on a later run without the flag.
+            report = run_init(_options(api_key_stdin=True, replace_key=True), key_stream=io.BytesIO(KEY.encode()))
+            self.assertEqual(report["credentials_state"], "stored")
+            self.assertIn("model_uses_plain_http", report["warnings"])
+            self.assertNotIn(KEY, json.dumps(report))
+            # A private address needs no flag and still warns; loopback does not.
+            report = run_init(_options(provider="openai_compatible", model="m", base_url="http://10.0.0.5/v1",
+                                       force=True))
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+            self.assertIn("model_uses_plain_http", report["warnings"])
+            report = run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1",
+                                       force=True))
+            self.assertNotIn("model_uses_plain_http", report["warnings"])
+
+    def test_the_flag_on_a_url_that_needs_none_saves_nothing(self) -> None:
+        with _temporary_home():
+            for url in ("https://api.example.com/v1", "http://10.0.0.5/v1", "http://127.0.0.1:1/v1"):
+                with self.subTest(url=url):
+                    report = run_init(_options(provider="openai_compatible", model="m", base_url=url,
+                                               allow_insecure_http=True, force=True))
+                    self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+                    self.assertIn("insecure_http_flag_not_needed", report["warnings"])
+                    self.assertIn("does not need it", render(report))
+
+    def test_a_hand_edited_base_url_with_a_stale_grant_is_refused(self) -> None:
+        from lifecontext.hindsight import HindsightStartupError, _validated_profile_settings
+
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://models.lan/v1",
+                              allow_insecure_http=True))
+            paths = LifeContextPaths.current()
+            text = paths.config_path.read_text()
+            self.assertIn('base_url: "http://models.lan/v1"', text)
+            paths.config_path.write_text(text.replace('base_url: "http://models.lan/v1"',
+                                                      'base_url: "http://elsewhere.lan/v1"'))
+            with self.assertRaises(HindsightStartupError):
+                _validated_profile_settings({"llm": load_settings()["llm"]})
+            # init without --force reports the stored settings as invalid rather than starting on them.
+            with self.assertRaises(InitError) as caught:
+                run_init(_options())
+            self.assertEqual(caught.exception.code, "invalid_llm_settings")
+
+    def test_the_flag_stays_only_with_the_url_it_was_given_for(self) -> None:
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://models.lan/v1",
+                              allow_insecure_http=True))
+            run_init(_options(model="other", force=True))
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], "http://models.lan/v1")
+            with self.assertRaises(InitError):
+                run_init(_options(base_url="http://other.lan/v1", force=True))
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], "http://models.lan/v1")
+            run_init(_options(base_url="https://api.example.com/v1", force=True))
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+
+    def test_the_flag_on_a_kept_config_that_needs_none_is_said_not_to_matter(self) -> None:
+        with _temporary_home():
+            run_init(_options(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1"))
+            report = run_init(_options(allow_insecure_http=True))
+            self.assertEqual(report["warnings"], ["insecure_http_flag_not_needed"])
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
 
     def test_invalid_input_fails_before_writing(self) -> None:
         cases = (
@@ -443,13 +522,14 @@ Choose 1-6""")
             self.assertEqual(report["next_steps"], [
                 f'Open {vault} in Obsidian as a vault ("Open folder as vault").',
                 "Import a document: lifecontext documents import ~/path/to/lease.pdf",
-                'Ask your agent: "What does my lease say about the deposit?"'])
+                ('Start a new agent session (it loads the skill at start), then ask: '
+                 '"What does my lease say about the deposit?"')])
             self.assertEqual([step.split("  ")[0] for step in report["setup_steps"]], [
                 "lifecontext preflight", "lifecontext service install --maintenance",
                 "lifecontext skills install", "lifecontext doctor"])
             text = render(report)
             self.assertLess(text.index("To finish the setup:"), text.index("Then:"))
-            self.assertIn("  3. Ask your agent:", text)
+            self.assertIn("  3. Start a new agent session", text)
 
     def test_timezone_detection(self) -> None:
         with tempfile.TemporaryDirectory(dir=scratch_root()) as temporary:
@@ -514,7 +594,7 @@ class FirstRetainTests(unittest.TestCase):
             self.assertEqual([path.name for path in entries.iterdir()], ["2026-10-17 - Note.md"])
 
     def test_missing_entries_folder_is_created_and_reconcile_recovers_a_failed_projection(self) -> None:
-        from lifecontext.application import ApplicationError, JournalApplication
+        from lifecontext.application import JournalApplication
         from lifecontext.vault import VaultError
 
         with _temporary_home():
@@ -523,8 +603,9 @@ class FirstRetainTests(unittest.TestCase):
             entries.rmdir()
             app = self._application(report)
             try:
+                # The note is indexed, so the retain completes; the failed projection waits for reconcile.
                 with patch.object(JournalApplication, "_allocate_journal_path",
-                                  side_effect=VaultError("not_found")), self.assertRaises(ApplicationError):
+                                  side_effect=VaultError("not_found")):
                     self._retain(app, "src_lost", "lost-projection")
                 self.assertFalse(entries.exists())
                 self.assertEqual(app.reconcile_projections()["projected"], 1)

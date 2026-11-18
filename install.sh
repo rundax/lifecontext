@@ -73,6 +73,8 @@ API_KEY_FILE is set (without a terminal and without them, init is skipped):
   LIFECONTEXT_VAULT         vault folder (default: ~/LifeContext/vault)
   LIFECONTEXT_TIMEZONE      IANA time zone (default: the system's)
   LIFECONTEXT_API_KEY_FILE  file whose single line is the provider key
+  LIFECONTEXT_ALLOW_INSECURE_HTTP=1  accept an http base URL on any host (the
+                            key and your text then travel unencrypted)
   LIFECONTEXT_CAPTURE=1     also turn notes in Journal/Inbox into entries
   LIFECONTEXT_SKIP_MODEL_PROBE=1  same as --skip-model-probe
 On a re-run, existing settings and the services installed are kept; a key
@@ -169,6 +171,9 @@ detect_platform() {
 as_root() {
 	if [ "$(id -u)" -eq 0 ]; then
 		"$@"
+	elif [ "${sudo_asked:-0}" -eq 1 ]; then
+		# The person said yes at the terminal: sudo asks for the password there.
+		sudo "$@"
 	else
 		sudo -n "$@"
 	fi
@@ -176,6 +181,16 @@ as_root() {
 
 can_run_as_root() {
 	[ "$(id -u)" -eq 0 ] || { command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; }
+}
+
+# may_install_as_root: root or password-less sudo; in an interactive run at a terminal,
+# also sudo with a password once the person agrees. --non-interactive never asks.
+may_install_as_root() {
+	can_run_as_root && return 0
+	[ "$interactive" != no ] && command -v sudo >/dev/null 2>&1 && tty_available || return 1
+	ask_yes "Install Tesseract with sudo now?"
+	[ "$reply" -eq 1 ] || return 1
+	sudo_asked=1
 }
 
 ocr_ready() {
@@ -255,9 +270,23 @@ fetch_release() {
 	say "Downloading LifeContext $version from github.com/$REPOSITORY"
 	mkdir -p "$tmp/release"
 	for name in SHA256SUMS SHA256SUMS.sigstore.json "lifecontext-$version-py3-none-any.whl" "requirements-$platform.txt"; do
-		download "$base/$name" "$tmp/release/$name"
+		download "$base/$name" "$tmp/release/$name" || download_failed "$name"
 	done
 	verify_assets "$tmp/release"
+}
+
+# download_failed NAME: the release does not exist when its SHA256SUMS (every release has one) is
+# a 404; for any other failure the file that failed is named.
+download_failed() {
+	status=$(curl -sSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o /dev/null -w '%{http_code}' -I \
+		"$base/SHA256SUMS" 2>/dev/null) || status=""
+	if [ "$status" = 404 ]; then
+		die "release v$version not found; see https://github.com/$REPOSITORY/releases or pass --version"
+	fi
+	if [ "$status" = 200 ]; then
+		die "release v$version exists but $1 could not be downloaded from github.com/$REPOSITORY (curl's error is above); it may not be built for this system"
+	fi
+	die "could not download $1 from github.com/$REPOSITORY (curl's error is above)"
 }
 
 # Stop a running service before its files change; start_service starts it again.
@@ -382,7 +411,21 @@ link_command() {
 	fi
 	case ":$PATH:" in
 	*":$bin_dir:"*) ;;
-	*) say "Add $bin_dir to PATH to run lifecontext by name, for example in ~/.profile:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+	*)
+		# The file a terminal reads: on Linux a new terminal reads ~/.bashrc or ~/.zshrc (not ~/.profile, which
+		# only a login shell reads); on macOS the terminal is a login shell: ~/.zprofile, ~/.bash_profile.
+		case "${SHELL:-}" in
+		*/zsh) if [ "$os" = Darwin ]; then profile="~/.zprofile"; else profile="~/.zshrc"; fi ;;
+		*/bash) if [ "$os" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.bashrc"; fi ;;
+		*/fish) profile="" ;;
+		*) profile="~/.profile" ;;
+		esac
+		if [ -n "$profile" ]; then
+			say "Add $bin_dir to PATH to run lifecontext by name: add this line to $profile, then open a new terminal (or run the line now to use it in this one):  export PATH=\"\$HOME/.local/bin:\$PATH\""
+		else
+			say "Add $bin_dir to PATH to run lifecontext by name:  fish_add_path ~/.local/bin"
+		fi
+		;;
 	esac
 }
 
@@ -401,7 +444,7 @@ install_ocr() {
 		fi
 	elif command -v apt-get >/dev/null 2>&1; then
 		ocr_command="sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with apt-get"
 			{ as_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
 				as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
@@ -410,20 +453,22 @@ install_ocr() {
 		fi
 	elif command -v dnf >/dev/null 2>&1; then
 		ocr_command="sudo dnf install tesseract tesseract-langpack-eng tesseract-langpack-rus tesseract-langpack-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with dnf"
 			as_root dnf install -y -q tesseract tesseract-langpack-eng tesseract-langpack-rus \
 				tesseract-langpack-ukr </dev/null || warn "dnf could not install Tesseract"
 		fi
 	elif command -v pacman >/dev/null 2>&1; then
 		ocr_command="sudo pacman -S --needed tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr"
-		if can_run_as_root; then
+		if may_install_as_root; then
 			say "Installing Tesseract with pacman"
 			# --noconfirm: pacman reads its confirmation from the terminal, and there is none here.
 			as_root pacman -S --needed --noconfirm tesseract tesseract-data-eng tesseract-data-rus \
 				tesseract-data-ukr </dev/null || warn "pacman could not install Tesseract"
 		fi
 	fi
+	# Nothing later needs root: do not leave the password's sudo ticket open in this terminal.
+	[ "${sudo_asked:-0}" -ne 1 ] || sudo -k 2>/dev/null || true
 	if ocr_ready; then
 		say "Tesseract with eng, rus and ukr is installed"
 		ocr_state="ready"
@@ -470,6 +515,16 @@ ask_secret() {
 	IFS= read -r reply </dev/tty || reply=""
 	restore_tty
 	printf '\n' >/dev/tty
+}
+
+# ask_no QUESTION: $reply is 1 only when the answer starts with y.
+ask_no() {
+	printf '%s [y/N]: ' "$1" >/dev/tty
+	IFS= read -r reply </dev/tty || reply=""
+	case "$reply" in
+	[Yy]*) reply=1 ;;
+	*) reply=0 ;;
+	esac
 }
 
 # ask_yes QUESTION: $reply is 1 unless the answer starts with n.
@@ -524,41 +579,85 @@ ask_anthropic_model() {
 	die "no usable model was chosen; run the installer again"
 }
 
+# check_base_url URL: LifeContext's own check of a model server URL (no network). Prints why a URL
+# was refused. Exit 1: refused; exit 2: refused only because it is plain http on a host that is not
+# on this machine or a private network, so --allow-insecure-http would accept it.
+check_base_url() {
+	"$venv/bin/python" -I -c '
+import sys
+from lifecontext.hindsight import HindsightStartupError, validate_model_endpoint
+def check(allow):
+    validate_model_endpoint("openai_compatible", "model", sys.argv[1], requires_base_url=True,
+                            allow_insecure_http=allow, private_http=True)
+try:
+    check(False)
+except HindsightStartupError as error:
+    print(error.message or "the base URL is not valid")
+    try:
+        check(True)
+    except HindsightStartupError:
+        sys.exit(1)
+    sys.exit(2)
+' "$1" </dev/null
+}
+
+# ask_base_url QUESTION DEFAULT: ask for the URL until LifeContext accepts it. A plain-http URL on
+# another host is accepted only when the person confirms; then $allow_insecure_http is 1.
+ask_base_url() {
+	for attempt in 1 2 3; do
+		ask_required "$1" "$2"
+		base_url=$reply
+		if reason=$(check_base_url "$base_url"); then
+			return 0
+		elif [ "$?" -eq 2 ]; then
+			warn "$reason"
+			ask_no "Send your key and the text of your documents unencrypted over http to that host anyway?"
+			if [ "$reply" -eq 1 ]; then
+				allow_insecure_http=1
+				return 0
+			fi
+		else
+			warn "$reason"
+		fi
+	done
+	die "no usable base URL was given; run the installer again"
+}
+
 # Ask for the model endpoint, then run init with the answers. The key is read hidden and
 # reaches init through a private file, never through an argument.
 configure_interactive() {
 	choose_provider
 	base_url=""
+	allow_insecure_http=0
 	case "$choice" in
 	1) ask_anthropic_model ;;
 	2) ask_required "Model ID (see https://platform.openai.com/docs/models)" "" ;;
 	3) ask_required "Model ID (see https://ai.google.dev/gemini-api/docs/models)" "" ;;
 	4) ask_required "Model ID (see https://openrouter.ai/models)" "" ;;
 	5)
-		ask_required "Base URL of the server" "${LIFECONTEXT_BASE_URL:-http://127.0.0.1:11434/v1}"
-		base_url=$reply
+		ask_base_url "Base URL of the server" "${LIFECONTEXT_BASE_URL:-http://127.0.0.1:11434/v1}"
 		ask_required "Model ID (as your server lists it, for example in ollama list)" ""
 		;;
 	6)
-		ask_required "API base URL (the API root, for example https://api.example.com/v1)" "${LIFECONTEXT_BASE_URL:-}"
-		base_url=$reply
+		ask_base_url "API base URL (the API root, for example https://api.example.com/v1)" "${LIFECONTEXT_BASE_URL:-}"
 		ask_required "Model ID (exactly as your endpoint names it)" ""
 		;;
 	esac
 	model=$reply
 	case "$choice" in
 	5 | 6) ask_secret "API key (hidden; leave empty if the server needs none)" ;;
-	*) ask_secret "API key (hidden; empty to add it later with lifecontext llm set)" ;;
+	*) ask_secret "API key (hidden; empty to add it later with lifecontext llm set, which asks for it)" ;;
 	esac
 	api_key=$reply
 	ask "Vault folder (the folder you open in Obsidian)" "${LIFECONTEXT_VAULT:-$HOME/LifeContext/vault}"
 	vault=$reply
-	ask_yes "Turn notes you put in Journal/Inbox into journal entries automatically?"
+	ask_no "Turn notes you put in Journal/Inbox into journal entries automatically?"
 	capture=$reply
 	say "You can change the model later with: lifecontext llm set"
 
 	set -- init --non-interactive --json --provider "$provider" --model "$model" --vault "$vault"
 	[ -z "$base_url" ] || set -- "$@" --base-url "$base_url"
+	[ "$allow_insecure_http" -eq 0 ] || set -- "$@" --allow-insecure-http
 	[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
 	# Every answer is a flag: a LIFECONTEXT_BASE_URL left in the environment must not
 	# attach a URL to a provider chosen without one.
@@ -584,7 +683,7 @@ if "error" in report:
     print("lifecontext init failed: " + report.get("message", report["error"].replace("_", " ")))
     sys.exit(1)
 key = {"stored": "stored in .env", "replaced": "replaced in .env", "kept": "already in .env",
-       "missing": "MISSING", "not_required": "not needed for this loopback endpoint"}
+       "missing": "MISSING", "not_required": "not set (optional for this endpoint)"}
 print("Settings: %s (config %s)" % (report["home"], report["config_state"]))
 print("Model: %s %s" % (report["provider"], report["model"]))
 print("API key: " + key.get(report["credentials_state"], report["credentials_state"]))
@@ -596,12 +695,48 @@ notes = {
     "existing_key_kept": "kept the stored key; replace it with lifecontext init --replace-key",
     "model_rejects_forced_tool_use": "this model refuses the forced tool choice that retain and reflect use, "
                                      "so they will fail",
+    "model_uses_plain_http": "your text, and the key if one is stored, travel unencrypted over http to the "
+                             "model server; use https if you can",
+    "insecure_http_flag_not_needed": "--allow-insecure-http was not saved: this URL does not need it",
 }
 for warning in report.get("warnings") or []:
     print("Note: " + notes.get(warning, warning.replace("_", " ")))
 with open(sys.argv[1], "w") as steps:
     steps.writelines("  %d. %s\n" % item for item in enumerate(report.get("next_steps") or [], 1))
 ' "$tmp/next-steps"
+}
+
+# key_missing: the init report on stdin says the provider needs a key and none is stored.
+key_missing() {
+	"$venv/bin/python" -I -c '
+import json, sys
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if report.get("credentials_state") == "missing" else 1)
+'
+}
+
+# A re-run that finds settings without a key asks for it, hidden; the key reaches init
+# only through a private file, as in configure_interactive.
+# ask_key_again [PROMPT]: $key_entered is 1 when a key was stored.
+ask_key_again() {
+	key_entered=0
+	ask_secret "${1:-API key for this provider (none is stored yet; hidden; empty to add it later with lifecontext llm set)}"
+	api_key=$reply
+	[ -n "$api_key" ] || return 0
+	key_file="$tmp/api-key"
+	(umask 077 && printf '%s\n' "$api_key" >"$key_file")
+	api_key=""
+	report=$(LIFECONTEXT_API_KEY_FILE="$key_file" "$lc" init --non-interactive --replace-key --json </dev/null) || true
+	rm -f "$key_file"
+	if printf '%s' "$report" | print_init_report; then
+		key_changed=1
+		key_entered=1
+	else
+		warn "the key was not stored; add it later with lifecontext llm set"
+	fi
 }
 
 configure() {
@@ -625,12 +760,16 @@ configure() {
 			report=$("$lc" init --non-interactive --json </dev/null) || true
 			printf '%s' "$report" | print_init_report ||
 				warn "lifecontext init reported a problem with the existing settings (above); see lifecontext doctor"
+			if [ "$interactive" != no ] && tty_available && printf '%s' "$report" | key_missing; then
+				ask_key_again
+			fi
 		fi
 		return
 	fi
 	if [ -n "${LIFECONTEXT_PROVIDER:-}${LIFECONTEXT_MODEL:-}${LIFECONTEXT_API_KEY_FILE:-}" ]; then
 		set -- init --non-interactive --json
 		[ -z "${LIFECONTEXT_TIMEZONE:-}" ] || set -- "$@" --timezone "$LIFECONTEXT_TIMEZONE"
+		[ "${LIFECONTEXT_ALLOW_INSECURE_HTTP:-}" != 1 ] || set -- "$@" --allow-insecure-http
 		report=$("$lc" "$@" </dev/null) || true
 		printf '%s' "$report" | print_init_report || die "setup did not finish; fix the settings and run the installer again"
 	elif [ "$interactive" != no ] && tty_available; then
@@ -653,16 +792,19 @@ check_model() {
 		say "Skipped until the setup is complete"
 		return
 	fi
-	say "Sending one small request to the model (up to a minute)"
-	# stderr stays hidden: only the stable cause in the JSON is shown, never provider text.
-	report=$("$lc" preflight --model-probe </dev/null 2>/dev/null) || true
-	if printf '%s' "$report" | "$venv/bin/python" -I -c '
+	for round in 1 2; do
+		say "Sending one small request to the model (up to a minute)"
+		# stderr stays hidden: only the stable cause in the JSON is shown, never provider text.
+		report=$("$lc" preflight --model-probe </dev/null 2>/dev/null) || true
+		if printf '%s' "$report" | "$venv/bin/python" -I -c '
 import json, sys
 try:
     probe = json.loads(sys.stdin.read())["model_probe"]
 except (ValueError, KeyError, TypeError):
     probe = {"status": "fail", "message": "the model check did not run",
              "fix": "lifecontext preflight --model-probe  (to see whether it runs)"}
+with open(sys.argv[1], "w") as cause:
+    cause.write(probe.get("cause") or "")
 if probe["status"] == "pass":
     print("The model answered with the structured output LifeContext needs.")
     reflect = probe.get("reflect") or {}
@@ -673,12 +815,19 @@ print("The model check failed: %s." % probe["message"])
 print("Fix it with: %s" % probe["fix"])
 print("Then check it again with: lifecontext preflight --model-probe")
 sys.exit(3)
-' >"$tmp/model-check"; then
-		model_state="passed"
-	else
-		model_state="failed"
-	fi
-	cat "$tmp/model-check"
+' "$tmp/model-cause" >"$tmp/model-check"; then
+			model_state="passed"
+		else
+			model_state="failed"
+		fi
+		cat "$tmp/model-check"
+		# A server that wanted a key the setup did not have (the key is optional for an
+		# OpenAI-compatible endpoint, so none was asked for): offer to enter one, once.
+		[ "$model_state" = failed ] && [ "$round" -eq 1 ] && [ "$(cat "$tmp/model-cause")" = key_rejected ] &&
+			[ "$interactive" != no ] && tty_available || break
+		ask_key_again "The model server rejected the key (or wants one). API key (hidden; empty to leave it)"
+		[ "$key_entered" -eq 1 ] || break
+	done
 }
 
 # Whether an earlier run installed note capture, so that a re-run keeps it.
@@ -730,16 +879,42 @@ except Exception:
 ' "http://127.0.0.1:$API_PORT/healthz" </dev/null
 }
 
+# The command that shows the service's log.
+log_command() {
+	if [ "$os" = Linux ]; then
+		printf '%s\n' "journalctl --user -u lifecontext.service"
+	else
+		printf '%s\n' "tail -f ~/Library/Logs/lifecontext/serve.log"
+	fi
+}
+
+# The last 20 lines of the service's log.
+show_log_tail() {
+	say "The last 20 lines of the service log:"
+	if [ "$os" = Linux ]; then
+		journalctl --user -u lifecontext.service -n 20 --no-pager </dev/null 2>&1 || true
+	else
+		tail -n 20 "$HOME/Library/Logs/lifecontext/serve.log" </dev/null 2>&1 || true
+	fi
+}
+
 wait_for_api() {
-	waited=0
-	while [ "$waited" -lt "$HEALTH_WAIT_SECONDS" ]; do
+	# Real seconds: each check and sleep takes time of its own, so counting sleeps would undercount.
+	started=$(date +%s)
+	last_said=0
+	while :; do
 		if api_answers; then
 			return 0
 		fi
+		waited=$(($(date +%s) - started))
+		[ "$waited" -lt "$HEALTH_WAIT_SECONDS" ] || return 1
+		# The first start can take minutes (models, the memory engine); say it is still going.
+		if [ $((waited - last_said)) -ge 20 ]; then
+			last_said=$waited
+			say "Still waiting for the API ($waited s of up to $HEALTH_WAIT_SECONDS s); follow the log with: $(log_command)"
+		fi
 		sleep 5
-		waited=$((waited + 5))
 	done
-	return 1
 }
 
 start_service() {
@@ -789,15 +964,39 @@ start_service() {
 	else
 		service_state="installed, still starting"
 		warn "the API did not answer within $HEALTH_WAIT_SECONDS s; check lifecontext service status and lifecontext doctor"
+		show_log_tail
+		say "The full log: $(log_command)"
 	fi
 }
 
 link_skills() {
 	if [ "$no_skills" -eq 1 ]; then
+		skills_state="skipped (--no-skills)"
 		say "Skipped (--no-skills). Link it later with: lifecontext skills install"
 		return
 	fi
 	"$lc" skills install </dev/null || warn "lifecontext skills install failed; see lifecontext skills check"
+	# For the summary: the agents whose skill link is in place now.
+	linked=$("$lc" skills check --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
+import json, sys
+names = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "hermes": "Hermes"}
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+if "error" in report:
+    sys.exit(1)
+agents = report.get("agents") or []
+linked = [names.get(item["agent"], item["agent"]) for item in agents if item.get("state") == "linked"]
+# "!": agents were found, none has the skill.
+print(", ".join(linked) if linked else ("!" if agents else ""))
+') || linked="?"
+	case "$linked" in
+	"?") skills_state="unknown; see lifecontext skills check" ;;
+	"!") skills_state="agents found, but the skill was not linked; see lifecontext skills check" ;;
+	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
+	*) skills_state="linked for $linked" ;;
+	esac
 }
 
 remove_units_directly() {
@@ -957,7 +1156,7 @@ main() {
 	detect_platform
 	command -v curl >/dev/null 2>&1 || die "curl is needed to download uv and the release"
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/lifecontext-install.XXXXXX")
-	trap 'rm -rf "$tmp"; restore_tty' EXIT
+	trap 'rm -rf "$tmp"; restore_tty; [ "${sudo_asked:-0}" -ne 1 ] || sudo -k 2>/dev/null || true' EXIT
 	trap 'exit 1' HUP INT TERM
 	package_changed=0
 	key_changed=0
@@ -966,6 +1165,7 @@ main() {
 	ocr_state="unknown"
 	service_state="not installed"
 	model_state="not checked"
+	skills_state="not linked"
 	capture=0
 	[ "${LIFECONTEXT_CAPTURE:-}" != 1 ] || capture=1
 
@@ -1022,6 +1222,7 @@ finish() {
 	say "Model check: $model_state"
 	say "Service: $service_state"
 	say "OCR: $ocr_state"
+	say "Agent skill: $skills_state"
 	[ -z "$backup_archive" ] || say "Backup made before the upgrade: $backup_archive"
 	if [ "$model_state" != failed ] && [ -s "$tmp/next-steps" ]; then
 		say ""

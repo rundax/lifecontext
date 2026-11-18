@@ -145,6 +145,20 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("model_rejects_forced_tool_use", report["warnings"])
             self.assertNotIn("model_rejects_forced_tool_use", report["problems"])
 
+    def test_plain_http_to_a_model_server_off_this_machine_is_a_warning(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            for url, warned in (("http://192.168.1.20:8000/v1", True), ("http://127.0.0.1:11434/v1", False),
+                                ("https://api.example.test/v1", False)):
+                with self.subTest(url=url):
+                    paths.config_path.write_text(
+                        f'llm:\n  provider: "openai_compatible"\n  model: "m"\n  base_url: "{url}"\n'
+                        f'vault:\n  root: "{home / "LifeContext" / "vault"}"\n'
+                        f'  journal_path: "{home / "LifeContext" / "vault" / "Journal"}"\n')
+                    report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+                    self.assertEqual("model_uses_plain_http" in report["warnings"], warned)
+                    self.assertNotIn("model_uses_plain_http", report["problems"])
+
     def test_unsafe_modes_and_missing_key_are_problems(self) -> None:
         with _temporary_home() as home:
             paths = _set_up(home)

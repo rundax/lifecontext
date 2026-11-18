@@ -129,6 +129,18 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(self.logged(), ["init --non-interactive --json --vault /data/vault",
                                          "serve --port 8765", "hindsight stop --json"])
 
+    def test_plain_http_to_the_model_server_is_warned_about_in_the_log(self) -> None:
+        self.secret.write_text("sk-secret\n")
+        self.key_state.write_text('{"api_key": "set"}')
+        self.init_report.write_text(json.dumps({**REPORT, "credentials_state": "stored",
+                                                "warnings": ["model_uses_plain_http"]}))
+        process = self.start(LIFECONTEXT_PROVIDER="openai_compatible", LIFECONTEXT_MODEL="m",
+                             LIFECONTEXT_API_KEY_FILE=str(self.secret))
+        self.assertEqual(process.wait(timeout=30), 0)
+        log = process.stderr.read().decode()
+        self.assertIn("Warning: your text, and the key if one is stored, travel unencrypted over http", log)
+        self.assertNotIn("sk-secret", log)
+
     def test_without_a_key_it_waits_instead_of_serving_also_after_a_restart(self) -> None:
         self.key_state.write_text('{"api_key": "missing"}')
         native = {"LIFECONTEXT_PROVIDER": "anthropic", "LIFECONTEXT_MODEL": "claude-sonnet-5"}
