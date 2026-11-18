@@ -1947,6 +1947,7 @@ class JournalApplication:
                     )
                     if outcome["state"] != "completed":
                         raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
+                    self._restored_page_done(source_id, record.source_version)
                 else:
                     provider = self.catalog.get_provider_state(source_id, record.source_version)
                     if not (provider is not None and provider["submission_state"] == "submitted"
@@ -1969,6 +1970,22 @@ class JournalApplication:
             raise ApplicationError("invalid_request") from None
         except (CatalogError, CustodyError, VaultError, ValueError, TypeError):
             raise ApplicationError("transfer_unavailable") from None
+
+    def _restored_page_done(self, source_id: str, version: int) -> None:
+        """A bundle carries no stage rows: a restored page that cites this version completes
+        its wiki stage (lint lists the page as stale until a rebuild). Without one the stage
+        stays pending and a retry compiles the page."""
+        page = self.catalog.get_wiki_page(source_page_id(source_id))
+        if not page or not page["current_revision"]:
+            return
+        revision = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"])
+        stage = self.catalog.get_document_stage(source_id, version, "wiki")
+        if stage["state"] != "pending" or not any(
+                (item["source_id"], item["source_version"]) == (source_id, version) for item in revision["dependencies"]):
+            return
+        for state in ("running", "completed"):
+            stage = self.catalog.transition_document_stage(source_id, version, "wiki", expected_state=stage["state"],
+                                                           expected_revision=stage["revision"], state=state)
 
     def _preflight_bundle_import(self, records: tuple[BundleRecord, ...], *, document_sources: set[str] | None = None) -> None:
         for record in records:
