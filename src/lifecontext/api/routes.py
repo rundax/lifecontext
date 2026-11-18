@@ -55,6 +55,7 @@ from lifecontext.api.models import (
     CategoryRedirectRequest, CategoryRenameRequest, CategoryAliasRequest,
     CategoryMergeRequest, CategoryReassignRequest, WikiPageRecord, WikiListResponse,
     WikiCitationRecord, WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
+    WikiRebuildResponse,
     WikiLintResponse, WikiReviewListResponse, WikiReviewMutationResponse, WikiReviewRecord,
     WikiReviewResolveRequest, BriefResponse, OperationListResponse, OperationStatusResponse,
 )
@@ -659,13 +660,14 @@ async def wiki_history(page_id: SourceId, request: Request):
     return WikiHistoryResponse(revisions=[_public_record(WikiRevisionRecord, row) for row in _application(request).wiki_history(page_id)])
 
 
-@router.post("/v1/wiki/rebuild", response_model=OperationResponse)
+@router.post("/v1/wiki/rebuild", response_model=WikiRebuildResponse)
 async def rebuild_wiki(payload: WikiRebuildRequest, request: Request, response: Response,
                        idempotency_key_header: Annotated[str, Header(alias="Idempotency-Key")]):
     app = _application(request)
     result = await app.rebuild_wiki(**payload.model_dump(), idempotency_key=_required_idempotency_key(request, idempotency_key_header))
     response.headers["X-Lifeweave-Operation-ID"] = result.operation_id
-    return OperationResponse.model_validate(app.operation_status(result.operation_id))
+    return WikiRebuildResponse.model_validate({**app.operation_status(result.operation_id),
+                                               "skipped": result.get("skipped", [])})
 
 
 def _brief(value: dict[str, Any]) -> BriefResponse:

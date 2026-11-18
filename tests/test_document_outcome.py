@@ -604,25 +604,57 @@ class ApplicationRunGuardTests(unittest.TestCase):
         from lifecontext.application import ApplicationError
 
         page = self.app.catalog.get_wiki_page(source_page_id(self.sid))
+        before = self.app.catalog.list_operations()
         self.running()
         request = {"action": "reindex", "source_id": self.sid}
         with self.assertRaises(ApplicationError) as caught:
             asyncio.run(self.app.curate(request, idempotency_key="reindex"))
         self.assertEqual(caught.exception.code, "conflict")
-        kinds = {row["operation_kind"]: row for row in self.app.catalog.list_operations()}
-        self.assertEqual((kinds["curation"]["state"], kinds["curation"]["error_code"]), ("retryable_failed", "conflict"))
-        # No reindex operation was left pending and the page was not marked stale.
-        self.assertNotIn("document_retry", kinds)
+        # Nothing is stored under the key, so startup recovery has nothing to run, and the
+        # page was not marked stale.
+        self.assertEqual(self.app.catalog.list_operations(), before)
         self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(self.sid))["state"], page["state"])
         self.app.documents._inflight.pop(self.sid)
         self.assertEqual(asyncio.run(self.app.curate(request, idempotency_key="reindex"))["state"], "completed")
-
-    def test_a_rebuild_of_a_document_that_runs_is_refused_as_a_conflict(self):
-        windows = len(self.compiler.queries["window"])
+        # Once done, the same key replays the reindex even while the document runs again.
         self.running()
-        result = asyncio.run(self.app.rebuild_wiki(source_id=self.sid, idempotency_key="rebuild"))
-        self.assertEqual((result["state"], result["summary"]["error_code"]), ("permanent_failed", "conflict"))
+        self.assertEqual(asyncio.run(self.app.curate(request, idempotency_key="reindex"))["state"], "completed")
+
+    def test_a_rebuild_of_a_document_that_runs_is_refused_as_a_conflict_and_nothing_is_stored(self):
+        from lifecontext.application import ApplicationError
+
+        windows, before = len(self.compiler.queries["window"]), self.app.catalog.list_operations()
+        self.running()
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.rebuild_wiki(source_id=self.sid, idempotency_key="rebuild"))
+        self.assertEqual(caught.exception.code, "conflict")
         self.assertEqual(len(self.compiler.queries["window"]), windows)
+        self.assertEqual(self.app.catalog.list_operations(), before)
+        # The same request and key run once the document is free.
+        self.app.documents._inflight.pop(self.sid)
+        result = asyncio.run(self.app.rebuild_wiki(source_id=self.sid, idempotency_key="rebuild"))
+        self.assertEqual((result["state"], result["skipped"]), ("completed", []))
+        self.assertGreater(len(self.compiler.queries["window"]), windows)
+
+    def test_a_rebuild_of_every_document_skips_and_names_one_that_runs(self):
+        second = asyncio.run(self.app.import_document(b"Tea is a drink.", "Tea.txt", "text/plain",
+                                                      {"source": "fixture"}, "import-two"))["document"]["source_id"]
+        held = []
+        update = self.app.wiki.update_for_document
+
+        async def watch(source_id, version):
+            # The rebuild holds the document it works on, as an import or retry does.
+            held.append(self.app.documents.in_flight(source_id))
+            return await update(source_id, version)
+
+        self.running()
+        with patch.object(self.app.wiki, "update_for_document", side_effect=watch):
+            result = asyncio.run(self.app.rebuild_wiki(idempotency_key="rebuild-all"))
+        self.assertEqual((result["state"], result["skipped"]), ("completed", [self.sid]))
+        # Only the document rebuilt is in the operation's sources, which doctor reads.
+        self.assertEqual([source["source_id"] for source in result["summary"]["sources"]], [second])
+        self.assertEqual(held, [True])
+        self.assertFalse(self.app.documents.in_flight(second))
 
     def test_a_retry_that_finds_the_document_running_does_not_classify_it(self):
         from unittest.mock import AsyncMock

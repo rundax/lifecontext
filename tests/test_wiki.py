@@ -1,4 +1,5 @@
 """Fake reflection provenance tests; semantic entailment is deliberately not claimed."""
+import contextlib
 import asyncio
 import hashlib
 import json
@@ -108,6 +109,7 @@ class WikiTests(unittest.TestCase):
             return {"source_id": sid, "source_version": version or manifest.source_version}
         app.documents.show.side_effect = show
         app.documents.in_flight.return_value = False
+        app.documents.hold.side_effect = lambda *keys: contextlib.nullcontext()
         app.document_projections = Mock()
         app.document_projections.project_wiki.return_value = {"state": "completed"}
         app.document_projections.project_wiki_pages.side_effect = lambda pages: [

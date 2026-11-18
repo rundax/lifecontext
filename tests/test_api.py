@@ -269,6 +269,7 @@ class APIHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["summary"]["item_count"], 0)
+        self.assertEqual(result["skipped"], [])
         _, _, replay = self._request("/v1/wiki/rebuild", method="POST", data=b"{}", headers=headers)
         self.assertEqual(replay, result)
         status, _, _ = self._request("/v1/wiki/rebuild", method="POST", data=b'{"version":1}',

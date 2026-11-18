@@ -354,6 +354,13 @@ class OperationResponse(APIModel):
     summary: OperationSummary = Field(default_factory=OperationSummary)
 
 
+class WikiRebuildResponse(OperationResponse):
+    """A rebuild's operation; ``skipped`` names the documents a rebuild of every document
+    left out because an import, retry or reindex of them was running (first answer only)."""
+
+    skipped: list[SourceId] = Field(default_factory=list, max_length=4096)
+
+
 class OperationStatusResponse(OperationResponse):
     """An operation as ``operations get`` and the list show it; ``outcome`` appears for document imports and retries."""
 

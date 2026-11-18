@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import json
@@ -183,8 +184,21 @@ class DocumentService:
         self._inflight: dict[str, int] = {}
 
     def in_flight(self, source_id):
-        """This process is running an import or retry of the source right now."""
+        """This process is running an import, retry, reindex or rebuild of the source right now."""
         return source_id in self._inflight
+
+    @contextlib.contextmanager
+    def hold(self, *keys):
+        """Mark operation or source IDs as running in this process until the block ends."""
+        for key in keys:
+            self._inflight[key] = self._inflight.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            for key in keys:
+                self._inflight[key] -= 1
+                if not self._inflight[key]:
+                    del self._inflight[key]
 
     async def import_document(
         self,
@@ -502,16 +516,8 @@ class DocumentService:
         intent = operation["result"].get("recovery_intent")
         if not intent:
             raise CatalogError("document intent unavailable")
-        keys = (operation["operation_id"], intent["source_id"])
-        for key in keys:
-            self._inflight[key] = self._inflight.get(key, 0) + 1
-        try:
+        with self.hold(operation["operation_id"], intent["source_id"]):
             operation = await self._run_stages(operation, intent, original_bytes)
-        finally:
-            for key in keys:
-                self._inflight[key] -= 1
-                if not self._inflight[key]:
-                    del self._inflight[key]
         # Shown once this run has left the map, so its outcome is not ``running`` for it.
         return self._response(operation)
 

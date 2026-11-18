@@ -564,13 +564,24 @@ class JournalApplication:
         if source_id is None and version is not None:
             raise ApplicationError("invalid_request")
         request = {"source_id": source_id, "version": version}
-        operation = self._begin_operation(
-            idempotency_key, self._request_digest("POST /v1/wiki/rebuild", request),
-            "wiki_rebuild",
-        )
+        digest = self._request_digest("POST /v1/wiki/rebuild", request)
+        if source_id is not None and self.documents.in_flight(source_id):
+            try:
+                prior = self.catalog.lookup_operation(idempotency_key, digest, "wiki_rebuild")
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("internal_error") from None
+            if prior is None:
+                # An import, retry, reindex or rebuild of it runs and writes the page. Nothing
+                # is stored, so the same request with the same key works once that is done.
+                raise ApplicationError("conflict")
+        operation = self._begin_operation(idempotency_key, digest, "wiki_rebuild")
         # Do not repeat an uncertain publication after a timeout or process crash.
         if operation["state"] != "pending":
-            return DurableResult(self.operation_status(operation["operation_id"]), operation["operation_id"])
+            return DurableResult({**self.operation_status(operation["operation_id"]), "skipped": []},
+                                 operation["operation_id"])
+        skipped: list[str] = []
         try:
             if source_id is not None:
                 document = self.show_document(source_id, version)
@@ -602,17 +613,24 @@ class JournalApplication:
                                           "source_version": targets[0]["source_version"] if source_id else None}}
             operation = self.catalog.set_operation_intent(operation["operation_id"], result)
             operation = self._start_admitted_operation(operation)
-            for target in targets:
+            for target in list(targets):
                 if self.documents.in_flight(target["source_id"]):
-                    # An import or retry of it is running and writes the page itself; a
-                    # rebuild with a new key once it is done does the rest.
-                    raise ApplicationError("conflict")
-                revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
-                result["item_count"] += len(revisions)
-                self.catalog.save_operation_result(operation["operation_id"], result)
-                for projection in self.document_projections.project_wiki_pages(sorted({row["page_id"] for row in revisions})):
-                    if projection["state"] != "completed":
+                    if source_id is not None:
                         raise ApplicationError("conflict")
+                    # An import, retry or reindex of it runs and writes the page itself. It
+                    # leaves the operation's sources, so doctor does not count it as rebuilt.
+                    skipped.append(target["source_id"])
+                    result["sources"].remove(target)
+                    self.catalog.save_operation_result(operation["operation_id"], result)
+                    continue
+                # Held while it runs: an import or retry of the source started meanwhile waits.
+                with self.documents.hold(target["source_id"]):
+                    revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
+                    result["item_count"] += len(revisions)
+                    self.catalog.save_operation_result(operation["operation_id"], result)
+                    for projection in self.document_projections.project_wiki_pages(sorted({row["page_id"] for row in revisions})):
+                        if projection["state"] != "completed":
+                            raise ApplicationError("conflict")
             self._transition_operation(operation["operation_id"], "running", "completed", result=result)
         except Exception as exc:  # noqa: BLE001 -- durable boundary redacts dependency failures
             code = exc.code if isinstance(exc, ApplicationError) else (
@@ -622,7 +640,9 @@ class JournalApplication:
             self._fail_operation(operation["operation_id"], code, result=current["result"])
             if operation["state"] != "running":
                 raise ApplicationError(code) from None
-        return DurableResult(self.operation_status(operation["operation_id"]), operation["operation_id"])
+        # Only the first answer names the skipped documents; the operation does not keep them.
+        return DurableResult({**self.operation_status(operation["operation_id"]), "skipped": skipped},
+                             operation["operation_id"])
 
     async def recover_startup(self, *, limit: int = 100) -> dict[str, int]:
         """Resume bounded local work and reconcile interrupted external effects."""
@@ -2342,6 +2362,17 @@ class JournalApplication:
                 digest_request["prepared_operation_id"] = request["prepared_operation_id"]
 
         request_digest = self._request_digest(f"POST /v1/curation/{action}", digest_request)
+        if action == "reindex" and self.documents.in_flight(source_id):
+            try:
+                prior = self.catalog.lookup_operation(idempotency_key, request_digest, "curation")
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("internal_error") from None
+            if prior is None or prior["state"] != "completed":
+                # An import, retry or rebuild of the document runs. Refused before anything is
+                # stored, so startup recovery never runs it and the same request and key work later.
+                raise ApplicationError("conflict")
         operation = self._begin_operation(idempotency_key, request_digest, "curation")
         if operation["state"] == "completed":
             return self._curation_response(operation)
@@ -2479,10 +2510,6 @@ class JournalApplication:
             self._fail_operation(operation["operation_id"], code, retryable=(
                 action == "delete" and source is not None and source["layer"] == "document"
                 and code in {"conflict", "vault_unavailable", "unsafe_path", "unsafe_permissions"}
-            ) or (
-                # A document reindex refused while an import or retry of it runs (nothing
-                # awaited since the refusal, so the map still holds the source).
-                action == "reindex" and code == "conflict" and self.documents.in_flight(source_id)
             ))
             raise ApplicationError(code) from None
 
@@ -2533,7 +2560,8 @@ class JournalApplication:
             outcome = await self.documents.recover(existing)
             if outcome["state"] != "completed":
                 raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
-            await self._retire_document_chunks(sid, version, before_revision=existing["result"]["recovery_intent"]["extraction_revision"])
+            with self.documents.hold(sid):
+                await self._retire_document_chunks(sid, version, before_revision=existing["result"]["recovery_intent"]["extraction_revision"])
             return outcome
         extractions = self.catalog.list_extractions(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
@@ -2547,8 +2575,10 @@ class JournalApplication:
         outcome = await self.documents.recover(operation)
         if outcome["state"] != "completed":
             raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
-        # Old retrieval mappings must not remain authoritative after a new extraction.
-        await self._retire_document_chunks(sid, version, before_revision=revision)
+        # Old retrieval mappings must not remain authoritative after a new extraction. The run
+        # held the source in the in-flight map; the retirement holds it too.
+        with self.documents.hold(sid):
+            await self._retire_document_chunks(sid, version, before_revision=revision)
         return outcome
 
     async def _retire_document_chunks(self, source_id: str, version: int, *, before_revision: int | None = None) -> None:
