@@ -526,10 +526,12 @@ class ErrorTableTests(unittest.TestCase):
     def test_every_code_the_cli_can_print_has_a_message_and_a_next_step(self) -> None:
         import typing
 
-        from lifecontext import cli_output
+        from lifecontext import catalog, cli_output
         from lifecontext.api import models
 
         codes = set(typing.get_args(models._ERROR_CODES)) | set(cli._API_ERROR_CODES) | set(cli._TRANSIENT_API_ERRORS)
+        # A stage's error code, which `documents show` prints and a problem carries.
+        codes |= set(catalog._OPERATION_ERROR_CODES)
         codes |= literal_codes()
         # Built from the command or the program name: {command}_failed in cli and service.
         codes |= {f"{command}_failed" for command in ("backup", "restore", "hindsight", "systemctl", "launchctl")}

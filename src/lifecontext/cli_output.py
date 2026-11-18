@@ -451,6 +451,20 @@ _API: dict[str, ErrorText] = {
                                 "report it with the request ID; the owner runs `lifecontext doctor` and looks "
                                 "for the ID in the service log"),
 }
+# Why a document's wiki stage failed (catalog._OPERATION_ERROR_CODES): the stage's error_code and a problem's code.
+_RETRY_DOCUMENT = "run `lifecontext documents retry SOURCE_ID`"
+_STAGE: dict[str, ErrorText] = {
+    "wiki_provider_failed": ErrorText("The model did not answer while the document's wiki page was compiled.",
+                                      "check the model with `lifecontext doctor --model-probe`, then "
+                                      + _RETRY_DOCUMENT, True),
+    "wiki_update_rejected": ErrorText("The compiled wiki page failed its checks and was not saved.",
+                                      _RETRY_DOCUMENT, True),
+    "wiki_interrupted": ErrorText("An earlier wiki run for the document stopped part-way.", _RETRY_DOCUMENT, True),
+    "wiki_evidence_limit": ErrorText("One passage of the document is too large for a single model request, so a "
+                                     "retry fails the same way.", "import a version with shorter passages"),
+    "wiki_no_evidence": ErrorText("The document has no readable text to compile a wiki page from, so a retry fails "
+                                  "the same way.", "check what was read with `lifecontext documents show SOURCE_ID`"),
+}
 # The CLI's own codes. api_timeout and api_timeout_read only explain an api_unavailable that timed out.
 _CLI: dict[str, ErrorText] = {
     "api_unavailable": ErrorText("The LifeContext service is not reachable at 127.0.0.1:{port}.", "{start}", True),
@@ -663,6 +677,7 @@ _ENGINE: dict[str, ErrorText] = {
 }
 GROUPS: tuple[tuple[str, dict[str, ErrorText]], ...] = (
     ("The API's codes", _API),
+    ("A document's wiki stage (its `error_code` and the `code` of a `problems` entry)", _STAGE),
     ("The CLI's own codes", _CLI),
     ("The MCP server's own codes", _MCP),
     ("Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)", _LOCAL),

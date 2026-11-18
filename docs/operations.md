@@ -646,6 +646,14 @@ test fails when the two differ).
 - `catalog_busy`: The catalog is busy with another change. Next: wait a few seconds and re-run.
 - `internal_error`: The service failed unexpectedly. Next: re-run once; if it fails again, run `lifecontext doctor` and look for the request ID in the service log.
 
+### A document's wiki stage (its `error_code` and the `code` of a `problems` entry)
+
+- `wiki_provider_failed`: The model did not answer while the document's wiki page was compiled. Next: check the model with `lifecontext doctor --model-probe`, then run `lifecontext documents retry SOURCE_ID`.
+- `wiki_update_rejected`: The compiled wiki page failed its checks and was not saved. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_interrupted`: An earlier wiki run for the document stopped part-way. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_evidence_limit`: One passage of the document is too large for a single model request, so a retry fails the same way. Next: import a version with shorter passages.
+- `wiki_no_evidence`: The document has no readable text to compile a wiki page from, so a retry fails the same way. Next: check what was read with `lifecontext documents show SOURCE_ID`.
+
 ### The CLI's own codes
 
 - `api_unavailable`: The LifeContext service is not reachable at 127.0.0.1:PORT. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
