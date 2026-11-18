@@ -13,8 +13,12 @@
   rebuild of the same document completed. The API's upload cap follows
   `limits.max_file_bytes` (never above 32 MiB) and `/v1/status` reports it.
   Recall citations carry the document's title and file name. While a document is
-  being imported or retried, a reindex or `wiki rebuild` of it is refused with
-  `conflict` instead of running beside it.
+  being imported, retried, reindexed or rebuilt, a reindex or `wiki rebuild
+  --source-id` of it is refused with `conflict` before anything is stored (the
+  same request and key work once it is done), a rebuild of every document
+  skips it and names it in the new `skipped` field, and a retry returns the
+  running state. After a bundle restore, a document whose wiki page came in
+  the bundle is `completed` rather than waiting for a retry.
 - **The terminal shows what happened to an import.** `documents import` and
   `documents retry` exit with status 4 when the outcome is not `completed`
   (the `--json` output is unchanged), list each failed stage and end with a
@@ -26,7 +30,8 @@
   (`unsupported_format`, with the list of formats) or above the service's file
   limit (`body_too_large`, naming the limit). `recall` prints each hit with its
   document's title. A page whose model summary failed is listed in `problems`
-  as `wiki_summary_missing`, and a retry writes the summary. Plain `status`
+  as `wiki_summary_missing`, and a retry asks for the summary alone, on the
+  same claims; a document's page now keeps room for the largest summary. Plain `status`
   shows a refused vault path and how many journal entries wait for indexing,
   and a refused write names the path.
 - **A wiki page worth opening.** A long document now gets several claims
@@ -58,7 +63,8 @@
   provider has indexed a note it counts as done even if the vault write then
   fails (`reconcile` repairs the file). `status` reports how many journal
   entries are waiting for indexing (`indexing_pending`); `doctor` and the MCP
-  `status` tool give the count only.
+  `status` tool give the count only, and MCP `status` says that a vault path was
+  refused without naming it.
 - **Errors say what to do.** One table gives every error code a plain sentence
   and a next command, used in the terminal, in `--json` errors (`error`,
   `message`, `next_step`, `retryable`, `request_id`; success output is

@@ -164,7 +164,9 @@ that group or others can write). Those paths are often document titles. The
 scan is read-only, does not enter a folder on another device than `Journal`
 (it lists those under `skipped`), and stops after 200,000 entries (`truncated`). `status` names the last refused path as
 `dependencies.vault.refused_path` until it is acceptable again, and its plain
-output prints it on a `Refused vault path:` line. A command that fails with
+output prints it on a `Refused vault path:` line. The MCP `status` tool never
+passes the path (it can name a journal note): it says only that a path was
+refused (`path_refused`) and that `lifecontext status` in a terminal names it. A command that fails with
 `unsafe_path` or `unsafe_permissions` names that path in its plain message too
 (read from `status`; never in the API error body or under `--json`).
 
@@ -450,11 +452,14 @@ vault. A completed stage is not repeated, and no retry, by source ID or by any o
 its operation IDs, rebuilds the page or vault note of a version a newer one
 replaced. If the last extraction could not read the file, the retry reads it
 again; `--rerun-extraction` (with `--vision` or `--no-vision`) does it on demand.
-A retry of a document that is still being processed by the running service does
-not start a second run: it returns the operation's current state. A reindex of
-such a document is refused with `conflict`; send the same request with the same
-key once it finishes. `wiki rebuild` refuses it with `conflict`; rebuild again
-with a new key. A deleted document is not found, and a forgotten one is not
+A retry of a document that is still being processed by the running service (an
+import, retry, reindex or `wiki rebuild` of it) does not start a second run: it
+returns the operation's current state. A reindex or `wiki rebuild --source-id`
+of such a document is refused with `conflict` before anything is stored under
+its key; send the same request with the same key once it finishes. A `wiki
+rebuild` of every document leaves such documents out, lists their source IDs
+in `skipped` (in its first answer only) and keeps them out of the operation's
+`summary.sources`. A deleted document is not found, and a forgotten one is not
 retried.
 
 Idempotency: without `--idempotency-key`, each retry is a new attempt, so a
@@ -473,7 +478,13 @@ failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
 the same way on every retry, so their `next_step` suggests none. Any other failure
 inside LifeContext reports `internal_error`. A wiki stage that completed but whose
 page has no model summary is listed in `problems` as `wiki_summary_missing`;
-`documents retry SOURCE_ID` asks for the summary again.
+`documents retry SOURCE_ID` asks the model for the summary alone and publishes
+the same claims with it, without reading the evidence again. A page keeps room
+for the largest summary; one written by an earlier release that is too full for
+one is not listed (`wiki lint` names it, and `wiki rebuild` compiles it again
+with room). After a bundle restore, a document whose page came in the bundle has
+a completed wiki stage, and the page is stale until `lifecontext maintain
+--rebuild-stale N` or `wiki rebuild`; a document without one waits for a retry.
 
 ## Startup checks
 
