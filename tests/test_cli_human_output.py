@@ -1,6 +1,7 @@
 """Plain output, error messages and the unchanged ``--json`` success output of the CLI."""
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -103,6 +104,9 @@ BRIEF = {
                           "codes": {"page_stale": 1}}},
     "projection": None,
 }
+PROBLEM = {"stage": "wiki", "code": "wiki_provider_failed", "reason": "wiki_provider_failed",
+           "next_step": ("The model did not answer; check it with: lifecontext doctor, then run: "
+                         f"lifecontext documents retry {DOC_ID}")}
 IMPORT_RESULT = {"state": "completed", "summary": {"sources": [{"source_id": DOC_ID, "source_version": 1,
                                                                  "sha256": SHA}], "item_count": None,
                                                     "error_code": None},
@@ -310,7 +314,7 @@ class PlainRendererSnapshotTests(unittest.TestCase):
             "Coverage: 11 of 12 pages resolved (10 text layer, 1 OCR); unresolved: 7",
             "Extraction warnings: 1 (listed with --json)",
             ("Next: check the model with `lifecontext doctor --model-probe`, then run "
-             "`lifecontext documents retry OPERATION_ID` with the operation ID the import printed."),
+             f"`lifecontext documents retry {DOC_ID}`."),
         ]) + "\n")
         out = self.plain(["documents", "show", COMPLETE_DOCUMENT["source_id"]], COMPLETE_DOCUMENT)
         self.assertIn("Coverage: 2 of 2 pages resolved (2 text layer)\n", out)
@@ -318,23 +322,84 @@ class PlainRendererSnapshotTests(unittest.TestCase):
         self.assertNotIn("download", out.lower())
 
     def test_documents_show_uses_newer_optional_fields_when_present(self) -> None:
-        newer = {**DOCUMENT, "outcome": "failed", "last_operation_id": OP_ID, "wiki_page_id": "source_" + DOC_ID,
-                 "vault_path": "Journal/wiki/sources/Apartment lease.md",
-                 "problems": ["The model did not answer while compiling the wiki page.",
-                              {"code": "page_partial", "message": "1 page was only partly read"}]}
+        newer = {**DOCUMENT, "outcome": "completed_with_errors", "last_operation_id": OP_ID,
+                 "wiki_page_id": "source_" + DOC_ID, "vault_path": "Journal/wiki/Apartment lease.md",
+                 "stages": {**DOCUMENT["stages"], "wiki": stage("failed", "wiki_provider_failed", 2)},
+                 "problems": [PROBLEM]}
         out = self.plain(["documents", "show", DOC_ID], newer)
-        self.assertIn("Outcome: failed\n", out)
-        self.assertIn(f"Wiki page: source_{DOC_ID} (Journal/wiki/sources/Apartment lease.md)\n", out)
-        self.assertIn("Problems:\n- The model did not answer while compiling the wiki page.\n"
-                      "- page_partial: 1 page was only partly read\n", out)
-        self.assertTrue(out.endswith(f"then run `lifecontext documents retry {OP_ID}`.\n"))
+        self.assertEqual(out, "\n".join([
+            f"Apartment lease ({DOC_ID} v1)",
+            "File: lease.pdf (application/pdf)",
+            "Category: inbox",
+            "Outcome: completed_with_errors",
+            "Stages:",
+            "  [x] custody     completed",
+            "  [x] extraction  completed",
+            "  [x] indexing    completed",
+            "  [!] wiki        failed (wiki_provider_failed), attempt 2",
+            "  [ ] projection  pending",
+            "Coverage: 11 of 12 pages resolved (10 text layer, 1 OCR); unresolved: 7",
+            "Extraction warnings: 1 (listed with --json)",
+            f"Wiki page: source_{DOC_ID} (Journal/wiki/Apartment lease.md)",
+            "Problems:",
+            "- wiki: wiki_provider_failed",
+            ("Next: The model did not answer; check it with: lifecontext doctor, then run: "
+             f"lifecontext documents retry {DOC_ID}."),
+        ]) + "\n")
+        # Each problem shows its reason when it differs from the code; the same step is given once.
+        blocked = {**newer, "problems": [
+            {"stage": "extraction", "code": "failed", "reason": "unsupported_format",
+             "next_step": "This file type is not supported; save it as PDF and import it again."},
+            {"stage": "indexing", "code": "blocked", "reason": "blocked", "next_step": f"Run: lifecontext documents "
+                                                                                     f"retry {DOC_ID}"},
+            {"stage": "wiki", "code": "blocked", "reason": "blocked", "next_step": f"Run: lifecontext documents "
+                                                                                 f"retry {DOC_ID}"}]}
+        out = self.plain(["documents", "show", DOC_ID], blocked)
+        self.assertIn("Problems:\n- extraction: failed (unsupported_format)\n- indexing: blocked\n- wiki: blocked\n"
+                      "Next: This file type is not supported; save it as PDF and import it again. "
+                      f"Run: lifecontext documents retry {DOC_ID}.\n", out)
+        # A page without its model summary: the wiki stage is completed, the problem says what to run.
+        summary = {**COMPLETE_DOCUMENT, "outcome": "completed_with_errors", "problems": [
+            {"stage": "wiki", "code": "wiki_summary_missing", "reason": "wiki_summary_missing",
+             "next_step": f"Run: lifecontext documents retry {DOC_ID}"}]}
+        self.assertTrue(self.plain(["documents", "show", DOC_ID], summary).endswith(
+            f"Problems:\n- wiki: wiki_summary_missing\nNext: Run: lifecontext documents retry {DOC_ID}.\n"))
+        # Still running: nothing failed yet, so look again rather than retry.
+        running = {**COMPLETE_DOCUMENT, "outcome": "running", "stages": {
+            **COMPLETE_DOCUMENT["stages"], "wiki": stage("running")}}
+        self.assertTrue(self.plain(["documents", "show", DOC_ID], running).endswith(
+            f"Next: check again with `lifecontext documents show {COMPLETE_DOCUMENT['source_id']}`.\n"))
 
     def test_import_result_names_the_operation_and_the_document(self) -> None:
         out = self.plain(["documents", "import", "lease.pdf"], IMPORT_RESULT)
         self.assertTrue(out.startswith(f"Durable operation ID: {OP_ID}\nState: completed\n"
                                        f"Apartment lease ({DOC_ID} v1)\n"), out)
         self.assertIn("  [!] wiki        failed (provider_unavailable), attempt 2\n", out)
-        self.assertTrue(out.endswith(f"then run `lifecontext documents retry {OP_ID}`.\n"), out)
+        self.assertTrue(out.endswith(f"then run `lifecontext documents retry {DOC_ID}`.\n"), out)
+
+    def test_an_import_or_retry_that_did_not_complete_exits_4_and_says_what_to_run(self) -> None:
+        document = {**DOCUMENT, "outcome": "completed_with_errors", "problems": [PROBLEM],
+                    "stages": {**DOCUMENT["stages"], "wiki": stage("failed", "wiki_provider_failed")}}
+        result = {"operation_id": OP_ID, "state": "completed", "outcome": "completed_with_errors",
+                  "summary": IMPORT_RESULT["summary"], "document": document}
+        for argv in (["documents", "import", "lease.pdf"], ["documents", "retry", DOC_ID]):
+            with self.subTest(argv=argv):
+                code, out, err = run(argv, result)
+                self.assertEqual((code, err), (4, ""))
+                self.assertIn("  [!] wiki        failed (wiki_provider_failed)\n", out)
+                self.assertIn("Problems:\n- wiki: wiki_provider_failed\n", out)
+                self.assertTrue(out.endswith(f"then run: lifecontext documents retry {DOC_ID}.\n"), out)
+                # --json prints the same bytes as before; only the exit status says it.
+                code, out, err = run([*argv, "--json"], result)
+                self.assertEqual((code, err), (4, ""))
+                self.assertEqual(out, json.dumps(result, ensure_ascii=False, sort_keys=True,
+                                                 separators=(",", ":")) + "\n")
+        for outcome, expected in (("completed", 0), ("running", 4), ("retryable_failed", 4)):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(run(["documents", "import", "lease.pdf", "--json"],
+                                     {**IMPORT_RESULT, "outcome": outcome})[0], expected)
+        # An older service without `outcome` keeps exit 0.
+        self.assertEqual(run(["documents", "import", "lease.pdf", "--json"], IMPORT_RESULT)[0], 0)
 
     def test_recall_lists_texts_with_short_source_ids(self) -> None:
         self.assertEqual(self.plain(["recall", "--query", "rent"], RECALL), "\n".join([  # noqa: FLY002
@@ -346,7 +411,7 @@ class PlainRendererSnapshotTests(unittest.TestCase):
             "source_id": DOC_ID, "source_version": 1, "sha256": SHA, "title": "Apartment lease"}}],
             "truncated": True, "omitted_unresolvable": 0}
         self.assertEqual(self.plain(["recall", "--query", "rent"], titled),
-                         "- Rent: 900 EUR. (Apartment lease, doc_af7084b8 v1)\n"
+                         "- Rent: 900 EUR. (Apartment lease)\n"
                          "More matched than fit; raise --max-results or --max-tokens to see more.\n")
         self.assertEqual(self.plain(["recall", "--query", "x"], {"results": [], "truncated": False}),
                          "Nothing found.\n")
@@ -361,6 +426,46 @@ class PlainRendererSnapshotTests(unittest.TestCase):
             "inbox" + " " * 8 + "Inbox" + " " * 4 + "1" + " " * 9 + "-",
             "housing" + " " * 6 + "Housing  4" + " " * 9 + "home, rent",
         ]) + "\n")
+
+    def test_operations_list_is_a_table_and_passes_json_through(self) -> None:
+        import typing
+
+        from lifecontext.api import models
+
+        listed = {"operations": [
+            {"operation_id": OP_ID, "state": "completed", "outcome": "completed_with_errors",
+             "summary": {"sources": [{"source_id": DOC_ID, "source_version": 1, "sha256": SHA}]},
+             "operation_kind": "document_import", "created_at": "2026-11-17T09:00:00Z",
+             "updated_at": "2026-11-17T09:04:00Z"},
+            {"operation_id": "op_" + "2" * 32, "state": "completed", "summary": {"sources": []},
+             "operation_kind": "relationship_scan", "created_at": "2026-11-16T08:00:00Z",
+             "updated_at": "2026-11-16T08:00:01Z"}]}
+        self.assertEqual(self.plain(["operations", "list"], listed), "\n".join([
+            "OPERATION ID" + " " * 25 + "KIND" + " " * 15 + "STATE" + " " * 6 + "OUTCOME" + " " * 16 + "SOURCE"
+            + " " * 32 + "UPDATED",
+            OP_ID + "  document_import    completed  completed_with_errors  " + DOC_ID + "  2026-11-17T09:04:00Z",
+            "op_" + "2" * 32 + "  relationship_scan  completed  -" + " " * 22 + "-" + " " * 37 + "2026-11-16T08:00:01Z",
+            "2 operations.",
+            "Next: `lifecontext documents retry SOURCE_ID` runs a document's unfinished stages again.",
+        ]) + "\n")
+        self.assertEqual(self.plain(["operations", "list"], {"operations": []}), "No operations match.\n")
+        with patch.object(cli, "_http_exchange", return_value=(200, {}, json.dumps(listed).encode())) as exchange, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cli.main(["operations", "list", "--outcome", "completed_with_errors", "--json"]), 0)
+            self.assertEqual(cli.main(["operations", "list", "--state", "retryable_failed", "--limit", "5"]), 0)
+        self.assertEqual([call.args[1:3] for call in exchange.call_args_list], [
+            ("GET", "/v1/operations?outcome=completed_with_errors&limit=100"),
+            ("GET", "/v1/operations?state=retryable_failed&limit=5")])
+        self.assertTrue(out.getvalue().startswith(
+            json.dumps(listed, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"))
+        # The flags offer exactly what the API accepts.
+        parser = cli._build_parser()
+        for name in ("operations", "list"):
+            parser = next(action for action in parser._actions
+                          if isinstance(action, argparse._SubParsersAction)).choices[name]
+        options = {action.dest: set(action.choices) for action in parser._actions if action.dest in {"state", "outcome"}}
+        self.assertEqual(options["outcome"], set(typing.get_args(models._OUTCOMES)))
+        self.assertEqual(options["state"], set(typing.get_args(models._OUTCOMES)) - {"completed_with_errors"})
 
     def test_commands_without_a_renderer_keep_the_fallback(self) -> None:
         out = self.plain(["operations", "get", OP_ID], {"operation_id": OP_ID, "state": "completed",

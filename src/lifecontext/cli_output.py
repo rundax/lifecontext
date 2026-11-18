@@ -82,25 +82,36 @@ def _pages(document: Mapping[str, Any]) -> str:
 
 
 def _problem(item: object) -> str:
+    """``wiki: wiki_provider_failed`` for one of the API's ``{stage, code, reason, next_step}`` problems."""
     if isinstance(item, Mapping):
-        parts = [str(item[key]) for key in ("code", "message", "detail", "hint") if item.get(key)]
-        return _cell(": ".join(parts) or "problem", 200)
+        code, reason = item.get("code"), item.get("reason")
+        return _cell(f"{item.get('stage')}: {code}" + (f" ({reason})" if reason and reason != code else ""), 200)
     return _cell(item, 200)
 
 
-def _next_for_failure(document: Mapping[str, Any], operation_id: object) -> str | None:
+def _next_line(document: Mapping[str, Any]) -> str | None:
+    """What to run: the service's step for each problem, else a retry or a look by source ID."""
+    problems = document.get("problems")
+    steps = [item["next_step"].strip().rstrip(".") for item in problems if isinstance(item, Mapping)
+             and isinstance(item.get("next_step"), str) and item["next_step"].strip()] if isinstance(problems, list) else []
+    if steps:
+        return "Next: " + ". ".join(dict.fromkeys(steps)) + "."
+    source_id = document.get("source_id")
+    retry = f"`lifecontext documents retry {source_id}`"
     failed = _failed_stage(document)
-    if failed is None:
+    if failed is not None:
+        if failed[1].get("error_code") == "provider_unavailable":
+            return f"Next: check the model with `lifecontext doctor --model-probe`, then run {retry}."
+        return f"Next: run {retry}."
+    state = document_state(document)
+    if state in {"complete", "completed"}:
         return None
-    operation = document.get("last_operation_id") or operation_id
-    retry = (f"`lifecontext documents retry {operation}`" if isinstance(operation, str) and operation
-             else "`lifecontext documents retry OPERATION_ID` with the operation ID the import printed")
-    if failed[1].get("error_code") == "provider_unavailable":
-        return f"check the model with `lifecontext doctor --model-probe`, then run {retry}"
-    return f"run {retry}"
+    if state in {"running", "pending"} or not isinstance(document.get("outcome"), str):
+        return f"Next: check again with `lifecontext documents show {source_id}`."
+    return f"Next: run {retry}."
 
 
-def document_lines(document: Mapping[str, Any], *, operation_id: object = None) -> list[str]:
+def document_lines(document: Mapping[str, Any]) -> list[str]:
     from lifecontext.cli import _coverage_line
 
     title = document.get("title") or document.get("filename") or "Untitled document"
@@ -135,11 +146,9 @@ def document_lines(document: Mapping[str, Any], *, operation_id: object = None) 
     if isinstance(problems, list) and problems:
         lines.append("Problems:")
         lines.extend(f"- {_problem(item)}" for item in problems)
-    following = _next_for_failure(document, operation_id)
+    following = _next_line(document)
     if following:
-        lines.append(f"Next: {following}.")
-    elif document_state(document) not in {"complete", "completed"} and not isinstance(document.get("outcome"), str):
-        lines.append(f"Next: check again with `lifecontext documents show {document.get('source_id')}`.")
+        lines.append(following)
     return lines
 
 
@@ -158,9 +167,9 @@ def render_document_operation(value: Mapping[str, Any]) -> str | None:
     summary = value.get("summary")
     if isinstance(summary, Mapping) and summary.get("error_code"):
         lines.append(f"Error: {summary['error_code']}")
-    lines.extend(document_lines(document, operation_id=value["operation_id"]))
-    if value.get("state") == "retryable_failed" and not _failed_stage(document):
-        lines.append(f"Next: run `lifecontext documents retry {value['operation_id']}`.")
+    lines.extend(document_lines(document))
+    if value.get("state") == "retryable_failed" and not lines[-1].startswith("Next:"):
+        lines.append(f"Next: run `lifecontext documents retry {document.get('source_id')}`.")
     return "\n".join(lines)
 
 
@@ -176,6 +185,28 @@ def render_document_list(value: Mapping[str, Any]) -> str | None:
     lines.append(f"{len(documents)} document{'s' if len(documents) != 1 else ''}.")
     if any(_failed_stage(item) for item in documents):
         lines.append("Next: `lifecontext documents show SOURCE_ID` says what failed and how to retry it.")
+    return "\n".join(lines)
+
+
+def render_operation_list(value: Mapping[str, Any]) -> str | None:
+    operations = value.get("operations")
+    if not isinstance(operations, list) or not all(isinstance(item, Mapping) for item in operations):
+        return None
+    if not operations:
+        return "No operations match."
+    rows = []
+    for item in operations:
+        summary = item.get("summary") if isinstance(item.get("summary"), Mapping) else {}
+        sources = summary.get("sources") if isinstance(summary.get("sources"), list) else []
+        source = sources[0].get("source_id") if sources and isinstance(sources[0], Mapping) else None
+        rows.append((item.get("operation_id"), item.get("operation_kind"), item.get("state"),
+                     item.get("outcome") or "-", source or "-", item.get("updated_at")))
+    lines = table(("OPERATION ID", "KIND", "STATE", "OUTCOME", "SOURCE", "UPDATED"), rows)
+    lines.append(f"{len(operations)} operation{'s' if len(operations) != 1 else ''}.")
+    if any(str(item.get("operation_kind")).startswith("document_")
+           and (item.get("outcome") or item.get("state")) not in {"completed", "running", "pending"}
+           for item in operations):
+        lines.append("Next: `lifecontext documents retry SOURCE_ID` runs a document's unfinished stages again.")
     return "\n".join(lines)
 
 
@@ -285,7 +316,10 @@ def render_recall(value: Mapping[str, Any]) -> str | None:
     lines = []
     for item in results:
         evidence = item.get("evidence")
-        source = f" ({_citation(evidence)})" if isinstance(evidence, Mapping) else ""
+        name = evidence.get("title") or evidence.get("filename") if isinstance(evidence, Mapping) else None
+        # The title names a hit; without a title or file name (an older service) the short ID does.
+        source = (f" ({_cell(name, 120)})" if isinstance(name, str) and name.strip()
+                  else f" ({_citation(evidence)})" if isinstance(evidence, Mapping) else "")
         text = str(item.get("text", "")).strip().replace("\n", "\n  ")
         lines.append(f"- {text}{source}")
     if not results:
@@ -697,6 +731,7 @@ RENDERERS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {
     "wiki status": render_wiki_list,
     "wiki show": render_wiki_show,
     "categories list": render_categories,
+    "operations list": render_operation_list,
 }
 
 

@@ -40,6 +40,9 @@ EXPORT_MEDIA_TYPE = "application/vnd.lifeweave.bundle"
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 # `wiki lint --fail-on` found something; 1 stays "the command itself failed".
 LINT_FAILED_EXIT = 3
+# `documents import` or `retry` answered, but its `outcome` is not `completed`: a stage failed or is unfinished.
+IMPORT_PROBLEMS_EXIT = 4
+OPERATION_STATES = ("pending", "running", "retryable_failed", "permanent_failed", "completed", "cancelled")
 _SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _OPERATION_ID = re.compile(r"op_[0-9a-f]{32}\Z")
 _EDGE_ID = re.compile(r"edge_[0-9a-f]{64}\Z")
@@ -409,12 +412,18 @@ def _build_parser() -> argparse.ArgumentParser:
     import_command.add_argument("input", metavar="PATH", help="bundle file, or - for stdin")
     _mutation_options(import_command)
 
-    operations = commands.add_parser("operations", help="look up a completed operation")
+    operations = commands.add_parser("operations", help="list operations or look up one")
     _shared_options(operations)
     operation_commands = operations.add_subparsers(dest="operation_command", required=True)
     operation_get = operation_commands.add_parser("get", help="get one operation result")
     _shared_options(operation_get)
     operation_get.add_argument("operation_id", type=_operation_id)
+    operation_list = operation_commands.add_parser("list", help="list operations, newest first")
+    _shared_options(operation_list)
+    operation_list.add_argument("--state", choices=OPERATION_STATES)
+    operation_list.add_argument("--outcome", choices=(*OPERATION_STATES, "completed_with_errors"),
+                                help="what a document import or retry came to, among the newest 1000 operations")
+    operation_list.add_argument("--limit", type=_positive_int, default=100)
 
     documents = commands.add_parser("documents", help="manage original documents")
     _shared_options(documents)
@@ -1069,6 +1078,12 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
         )
         return _with_operation_id(value, operation_id)
     if args.command == "operations":
+        if args.operation_command == "list":
+            if args.limit > 1000:
+                raise CLIError("invalid_request")
+            query = {"state": args.state, "outcome": args.outcome, "limit": args.limit}
+            return _get(args, "/v1/operations?" + urlencode({key: value for key, value in query.items()
+                                                             if value is not None}))
         operation_id = quote(args.operation_id, safe="")
         return _get(args, f"/v1/operations/{operation_id}")
     raise CLIError("invalid_request")
@@ -1189,7 +1204,8 @@ def _human_result(value: dict[str, object]) -> str:
 def _command_name(args: argparse.Namespace) -> str:
     """``documents show`` for ``lifecontext documents show …``: the key of its plain renderer."""
     words = [args.command]
-    words += [getattr(args, name) for name in ("document_command", "category_command", "wiki_command")
+    words += [getattr(args, name) for name in ("document_command", "category_command", "wiki_command",
+                                               "operation_command")
               if isinstance(getattr(args, name, None), str)]
     return " ".join(words)
 
@@ -1817,7 +1833,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         return _interrupted()
-    return LINT_FAILED_EXIT if failing else 0
+    if failing:
+        return LINT_FAILED_EXIT
+    outcome = value.get("outcome")
+    if args.command == "documents" and args.document_command in {"import", "retry"} \
+            and isinstance(outcome, str) and outcome != "completed":
+        return IMPORT_PROBLEMS_EXIT
+    return 0
 
 
 def _lint_failures(args: argparse.Namespace, value: dict[str, object]) -> int:

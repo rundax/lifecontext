@@ -412,9 +412,28 @@ note is in the vault, `wiki_page_id` and `vault_path` (from the vault root, for
 example `Journal/wiki/Lease.md`). `lifecontext operations get OPERATION_ID --json`
 and `GET /v1/operations` show the same `outcome` for document imports and retries;
 `GET /v1/operations?state=retryable_failed` or `?outcome=completed_with_errors`
-(among the newest 1000 operations) finds what a retry can pick up. `lifecontext
+(among the newest 1000 operations) finds what a retry can pick up;
+`lifecontext operations list` asks the same (`--state STATE`, `--outcome OUTCOME`,
+`--limit N` up to 1000, default 100) and prints a table of operation ID, kind,
+state, outcome, source ID and last update, or the API's answer unchanged with
+`--json`. `lifecontext
 doctor` counts a failed import only until a later import, retry or rebuild
 completes for the same document at the same or a newer version.
+
+`documents import` and `documents retry` exit with status 4 when the answer's
+`outcome` is not `completed` (`completed_with_errors`, `running`, or a failed
+operation state); the `--json` output is the same as with status 0. Plain output
+then lists each failed stage under `Problems:` and ends with a `Next:` line built
+from their `next_step`, usually `lifecontext documents retry SOURCE_ID`. Status 1
+stays a command that failed, and 3 is `wiki lint --fail-on`.
+
+Before uploading, `documents import` refuses a file whose name does not end in
+one of the extensions the extraction reads (`.docx`, `.jpeg`, `.jpg`,
+`.markdown`, `.md`, `.pdf`, `.png`, `.pptx`, `.tif`, `.tiff`, `.txt`, `.xlsx`)
+with `unsupported_format`, and a file above the service's `max_file_bytes` from
+`lifecontext status` with `body_too_large`; each message names the formats or the
+limit. When status cannot be read, the upload goes ahead and the service applies
+its own limit.
 
 `lifecontext documents retry SOURCE_ID` is the one command to run; the
 operation ID of any of the document's operations works too. It runs again every
@@ -441,7 +460,9 @@ failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
 `wiki_evidence_limit` (one passage is too large for a model request) and
 `wiki_no_evidence` (the document has no text to summarise). The last two come back
 the same way on every retry, so their `next_step` suggests none. Any other failure
-inside LifeContext reports `internal_error`.
+inside LifeContext reports `internal_error`. A wiki stage that completed but whose
+page has no model summary is listed in `problems` as `wiki_summary_missing`;
+`documents retry SOURCE_ID` asks for the summary again.
 
 ## Startup checks
 
