@@ -46,8 +46,11 @@ CLI=lifecontext
    `SOURCE_ID` is the page ID without `source_`); a `stale` page is not current.
 3. `wiki show` returns the page text in `managed`. Each numbered claim is a
    literal quote from the document's extracted text, followed by its
-   citation(s), `[SOURCE_ID vVERSION/eEXTRACTION passages START:END]` (several
-   are joined by `; `). Quote the claim word for word with that citation. A
+   citation(s), a label such as `Title, p. N` (a slide or sheet number where
+   that is the unit; `vN` only when the document has several versions; a short
+   source ID when two documents share a title). The `citations` field lists each
+   label with its source ID, version and passages. Quote the claim word for word
+   with that citation. A
    "Model summary" paragraph is not a quote, and a "Contradiction" callout has
    two sides: give both. When `documents show` lists `ocr_page`,
    `ocr_text_suspect`, `text_layer_suspect` or `vision_` warnings, say the
@@ -55,18 +58,21 @@ CLI=lifecontext
 4. Only when the page does not answer it (a page holds at most 48 claims sampled
    across the document): run one `recall`, with a tool timeout of at least 300 s,
    one at a time, never resent. Each result's `evidence` gives `source_id`,
-   `source_version` and `sha256`; its `text` is a retrieved memory, not a
+   `source_version` and `sha256`, and for a document its `title` and
+   `filename`; its `text` is a retrieved memory, not a
    checked quote, so do not present it as the document's exact words.
-5. Name the source. For a document: `title` and `filename` from
-   `documents show SOURCE_ID --version VERSION`. A recall hit can be a journal
+5. Name the source. For a document: `title` and `filename` from the recall
+   `evidence` or from `documents show SOURCE_ID --version VERSION`. A recall hit can be a journal
    note. `documents show` then answers `source_not_found`; here that is
    expected and is not a failure to report. Read the note's `# Title` line with
    `evidence SOURCE_ID --version VERSION --include-content --json` instead.
 
-What a citation contains today: from the wiki page, the literal quote and its
-passage range in one source version; from recall, the source ID, its version
-and a checksum. Neither returns a page number: do not promise one or guess it.
-If neither answers the question, say so; recall is ranked, not exhaustive.
+What a citation contains today: from the wiki page, the literal quote, its
+label with the page (none for Word and text files) and, in `citations`, the
+source ID, version and passage range; from recall, the source ID, its version,
+a checksum and the title. Recall returns no page number: do not promise one or
+guess it. If neither answers the question, say so; recall is ranked, not
+exhaustive.
 
 ## Add a file
 
@@ -80,14 +86,18 @@ one import at a time. After a timeout, never import again with a new key:
 report it with the key you used (the workflows reference says how to replay it
 once).
 
-The response has `operation_id`, `state` and `document`. When
+The response has `operation_id`, `state`, `outcome` and `document`. When
 `document.stages.wiki.state` is `completed`, the page
 `source_<document.source_id>` exists; read it with `wiki show`. Any other wiki
 state (`pending`, `running`, `blocked`, `conflict` or `failed` with an
 `error_code`) means there is no page yet: report each stage as it is, plus the
 pages listed in `document.coverage.unresolved` and `document.coverage.partial`.
 If `document` is null, report the operation's `state` and `summary.error_code`.
-Checks and recovery are in the document and wiki workflows reference.
+Exit code 4 means the import answered but did not finish cleanly (`outcome` is
+not `completed`): the original is kept, and `document.problems` names each
+failed stage with its `next_step`, usually `"$CLI" documents retry SOURCE_ID`
+with the document's source ID. Checks and recovery are in the document and wiki
+workflows reference.
 
 ## Add a note
 
@@ -99,7 +109,12 @@ printf '%s\n' '# Title' 'Entry date: YYYY-MM-DD (Timezone).' '' 'Complete origin
 
 Use a new unique source ID and key for each note, and check that the read-back
 matches the original; the rules below and the capture reference have the rest.
-A note goes to the journal and recall, not to a wiki page.
+A note goes to the journal and recall, not to a wiki page. A retain that failed
+with `retain_failed` or `provider_unavailable` is kept, its entry is already in
+the vault, and `status` counts it in `indexing_pending`. Retry it once with the
+same source ID, key and bytes, never a new key. It runs again only after a wait
+that starts at 1 minute and grows to 6 hours; a retry before then gets the same
+error, so report it then.
 
 ## When the service is down
 
@@ -124,6 +139,10 @@ You operate this system through the CLI; you do not maintain it.
   put any suspected cause in the report, never apply it.
 - The only retries allowed are those a reference names for one specific
   transient error: same idempotency key and bytes, once.
+- With `--json` a failure is one object: `error`, `message`, `next_step`,
+  `retryable` and `request_id`. Follow `next_step`: a repair that is the owner's
+  is worded as one, so report it. When `retryable` is `false`, never send the
+  same call again.
 - `wiki list` and `wiki show PAGE_ID` are fast and use no LLM: use them to fetch
   wiki pages. `recall` takes 20-50 s (over 2 minutes when the machine is busy) and
   `reflect` longer: run one at a time with a tool timeout of at least 300 s, never in parallel, and never resend one that is still

@@ -30,7 +30,13 @@ boundaries in SKILL.md: report failures instead of repairing the environment.
   --idempotency-key unique-import-key --json
 "$CLI" documents show SOURCE_ID --version VERSION --json
 "$CLI" operations get OPERATION_ID --json
+"$CLI" operations list --outcome completed_with_errors --json
 ```
+
+`operations list` gives the newest operations first (`--state STATE`,
+`--outcome OUTCOME`, `--limit N`); each has its `operation_kind`, `state`,
+`outcome` for imports and retries, and the source ID in `summary.sources`. Use
+it to find an import whose ID you no longer have.
 
 For stdin supply `--filename original.txt`. Optional `--provenance` is JSON
 with only `source`, `source_ref`, `captured_at`, and `basename`; do not invent
@@ -45,7 +51,9 @@ timeout, oversized page or empty TIFF frame never fails the document: it is
 flagged and the rest is kept. A wholly unreadable PDF fails unless the owner's
 vision model reads it.
 Use `status.max_file_bytes` for the current limit (default 16 MiB), not the
-CLI's larger absolute ceiling. Do not silently truncate, split, decrypt, or
+CLI's larger absolute ceiling. Before uploading, `documents import` refuses an
+extension it cannot read with `unsupported_format` and a larger file with
+`body_too_large`; the `message` names the formats or the limit. Do not silently truncate, split, decrypt, or
 convert an original to bypass rejection. Handwriting, photos, diagrams, charts
 and tables stored as images are read only when the owner configured a `vision`
 block; otherwise they are listed as unread. Audio/video recognition and URL
@@ -136,7 +144,8 @@ deliberate attempt (the number above), and leave `--idempotency-key` out when no
 replay is needed.
 
 For a document whose `outcome` is not `completed` (`completed_with_errors`,
-`retryable_failed`), retry by source ID WITHOUT `--rerun-extraction`; `problems`
+`retryable_failed`; `documents import` and `documents retry` then exit with
+code 4), retry by source ID WITHOUT `--rerun-extraction`; `problems`
 names the stage and its `next_step`. The retry runs again every stage of the
 current version that is not completed: indexing, then the wiki page and the vault
 note, so one command also covers a wiki-only or projection failure. The same
