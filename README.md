@@ -223,8 +223,9 @@ lifecontext documents show SOURCE_ID         # stages and page coverage
 ```
 
 **Read the wiki.** Each document has a page `source_<source id>` with numbered,
-quote-backed claims; `index` lists up to 32 of them. The pages also appear under
-`Journal/wiki/` in the vault.
+quote-backed claims; `index` links as many as fit (up to 128), then says how
+many more there are and points to `lifecontext documents list`. The pages also
+appear under `Journal/wiki/` in the vault.
 
 ```bash
 lifecontext wiki list

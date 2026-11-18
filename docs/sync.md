@@ -81,7 +81,11 @@ changes or deletes the note. The rules:
   sent with a fixed idempotency key, so a run that stops half way is finished
   by the next one without a duplicate. If the service is not running or the API
   fails (a 5xx answer, or the model provider is unreachable), notes wait and are
-  counted under `pending`.
+  counted under `pending`. A note whose indexing failed (the model provider
+  refused or did not answer) is not lost: its entry is already in the vault
+  right after the original is kept, and LifeContext tries again by itself with
+  a growing wait (1 minute up to 6 hours). `lifecontext status` shows how many
+  notes are waiting.
 - **Refusals are reported, not retried.** If the API refuses a note for good
   (for example `source_conflict` after the entry was forgotten or deleted,
   `conflict` because the version moved on, or `body_too_large`), the run counts

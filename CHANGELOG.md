@@ -1,5 +1,110 @@
 # Unreleased
 
+- **A failed import says so.** A document or operation answer now has an
+  `outcome` (`completed`, `completed_with_errors`, or the failure state) and a
+  `problems` list (stage, code, reason, next step), plus `last_operation_id`
+  and, once the page exists, `wiki_page_id` and `vault_path`. A wiki stage that
+  fails names its cause (`wiki_provider_failed`, `wiki_update_rejected`,
+  `wiki_evidence_limit`, `wiki_no_evidence`, `wiki_interrupted`) instead of
+  `reflect_failed`. `documents retry SOURCE_ID` takes the document's source ID,
+  runs again every stage that did not finish, and brings the wiki page into
+  the vault after an indexing failure; only one retry per document runs at a
+  time. `doctor` stops counting a failed import once a later import, retry or
+  rebuild of the same document completed. The API's upload cap follows
+  `limits.max_file_bytes` (never above 32 MiB) and `/v1/status` reports it.
+  Recall citations carry the document's title and file name.
+- **A wiki page worth opening.** A long document now gets several claims
+  instead of one or two: each evidence window may yield up to 8, in proportion
+  to its size, and every claim's quote is checked on its own, so one bad quote
+  drops that claim and not the document. Citations read `Title, p. 3` (with
+  `v2` only for a document that has more than one version, and the short source
+  ID when two documents share a title) instead of `doc_<id> v1/e2 passages
+  3:4`; `wiki show` through the API lists each citation's source. A line under
+  the title says how many sections the claims come from and which pages were
+  not read. The `index` page links as many documents as fit (up to 128 links and
+  48 KB), then says "And N more" and points to `lifecontext documents list`;
+  it used to stop at 32.
+- **A stray file can no longer freeze the vault.** A `.DS_Store` or an image
+  in `Journal/wiki/` used to make every vault write fail with
+  `unsafe_permissions`. LifeContext now checks only the path it reads or
+  writes: each folder below `Journal` must be a real folder you own that group
+  and others cannot write, and an existing target must be a regular file you
+  own. The vault root and `Journal` stay `0700`. A refused path is named in
+  `status` (`dependencies.vault.refused_path`) and in `doctor`, which also scans
+  the tree read-only and lists what a write would refuse
+  (`vault_refusals`).
+- **A note that failed once is indexed on the next try.** A journal entry is
+  written to the vault right after the original is kept, so it is there even
+  while indexing waits. If the model provider refuses or does not answer, the
+  same request (same idempotency key) runs again from the kept original after a
+  growing wait, 1 minute up to 6 hours, and `capture` repeats it. Each start also
+  resubmits up to five refused notes, never a deleted or forgotten one. Once the
+  provider has indexed a note it counts as done even if the vault write then
+  fails (`reconcile` repairs the file). `status` reports how many journal
+  entries are waiting for indexing (`indexing_pending`); `doctor` and the MCP
+  `status` tool give the count only.
+- **Errors say what to do.** One table gives every error code a plain sentence
+  and a next command, used in the terminal, in `--json` errors (`error`,
+  `message`, `next_step`, `retryable`, `request_id`; success output is
+  unchanged) and in the "Failure codes" section of
+  [docs/operations.md](docs/operations.md), which is generated from it. A
+  refused connection is told apart from a timeout; with the user service
+  installed the hint is `lifecontext service status`, and a timeout says the
+  service may still be working. Ctrl-C prints one line and exits 130. Reads
+  time out after 30 seconds; `recall`, `reflect`, imports and retries keep
+  their longer limits.
+- **Installer dead ends.** `lifecontext llm set` with no flags in a terminal asks
+  for the key with a hidden prompt, as `init --api-key-stdin` now does at a
+  terminal; error hints now point to `lifecontext llm set`. A
+  re-run of the installer that finds no key asks for it, and offers to enter
+  one when the model check says the server rejected it. The installer checks a
+  model server URL at its prompt with LifeContext's own rules and asks again;
+  each refusal has its own sentence. A model server on a private network
+  (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`) works over plain
+  `http` without a flag; any other `http` host needs `--allow-insecure-http`,
+  and the key and your text then travel unencrypted, which init, `llm set` and
+  `doctor` say. A remote `openai_compatible` endpoint with no key asks for one.
+  In a terminal the installer asks "Install Tesseract with sudo now?" and drops
+  the sudo ticket afterwards. While it waits for the API it shows the elapsed
+  time and the log location, and prints the last log lines on a timeout; a
+  missing release says "release vX not found" instead of a bare 404. The summary
+  names the agents that got the skill, gives the PATH hint for your shell and
+  says to start a new agent session. The question about turning notes in
+  `Journal/Inbox` into journal entries now defaults to No.
+- **The agent skill answers questions.** Its description leads with answering
+  questions from your documents and notes (leases, contracts, letters, scans,
+  PDFs, journal) with cited quotes, and the body opens with three recipes:
+  answer a question, add a file, add a note. A test checks that every command
+  and flag the skill names exists.
+- **Documentation tells the truth about the release.** The README, install
+  guide, security policy and site say 1.2.0rc1 is a pre-release and give its
+  install command, say the Docker image is built locally until it is published
+  (with the `chown` line for Linux and the bind-mount note for opening the
+  vault in Obsidian), say `claude-sonnet-5` is expected to work but not yet
+  qualified end to end, warn that Claude Desktop and Cursor may time out on slow
+  recalls, and say a Claude Code or ChatGPT subscription is not an API key. The
+  sync guide says notes become indexed, searchable journal entries, not wiki
+  pages.
+- **Upgrading and downgrading.**
+  - Every page under `wiki/history/` and every wiki page and index in the vault
+    is rewritten once with the new citation labels. The text between your own
+    markers is kept, and no review is raised for it.
+  - 1.2.0rc1 rejects an index revision that links more than 32 pages, so an
+    index written by this version with more links does not load after a
+    downgrade.
+  - Under `Journal`, a folder that group or others can write (`0775`, for
+    example from a `umask 0002` in Obsidian) is refused for writes, and
+    `doctor` lists it; remove the group write bit (`chmod g-w`).
+  - The model server grant for plain `http` is stored in `config.yaml` as
+    `allow_insecure_http` holding the exact URL it was given for, and counts only
+    while `base_url` is still that string.
+    1.2.0rc1 does not know the setting and refuses a config that has it, so remove
+    the line before going back. `vision` stays loopback-only for plain `http`.
+  - The retry wait needs no new stored fields: it is worked out from each
+    operation's own timestamps, so 1.2.0rc1 still reads the rows.
+  - Exported bundles write the older `reflect_failed` code for the new wiki
+    failure codes, so an older release can read them.
+
 - **Breaking: no default model.** `lifecontext init` and `install.sh` no
   longer default to a provider or model. With a terminal both show a provider
   menu (Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server,
