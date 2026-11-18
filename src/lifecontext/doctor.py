@@ -168,15 +168,16 @@ def _operation_counts(catalog: Path) -> dict[str, int] | None:
         try:
             try:
                 # A failed document import, retry or rebuild is not counted once a later one
-                # completed for the same source at the same or a newer version. Other kinds
+                # completed for each of its sources at the same or a newer version. Other kinds
                 # (a category decision, a review) never hide it. rowid is the order.
                 rows = connection.execute(
                     """SELECT state, COUNT(*) FROM operations o
                        WHERE NOT (state IN ('retryable_failed', 'permanent_failed')
                          AND operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')
-                         AND EXISTS (
+                         AND EXISTS (SELECT 1 FROM json_each(o.result_json, '$.sources'))
+                         AND NOT EXISTS (
                            SELECT 1 FROM json_each(o.result_json, '$.sources') failed
-                           WHERE EXISTS (
+                           WHERE NOT EXISTS (
                              SELECT 1 FROM operations n, json_each(n.result_json, '$.sources') done
                              WHERE n.state = 'completed' AND n.rowid > o.rowid
                                AND n.operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')

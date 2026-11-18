@@ -221,6 +221,26 @@ class DoctorTests(unittest.TestCase):
             report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
             self.assertEqual(report["operations"], {"pending": 0, "retryable_failed": 4, "permanent_failed": 1})
 
+    def test_a_failed_rebuild_of_several_sources_is_counted_until_each_one_completed_later(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, operation_kind TEXT, state TEXT, result_json TEXT)")
+                sources = json.dumps({"sources": [{"source_id": f"doc_{n}", "source_version": 1} for n in (1, 2)]})
+
+                def done(source):
+                    return json.dumps({"sources": [{"source_id": source, "source_version": 1}]})
+                connection.executemany("INSERT INTO operations VALUES (?, ?, ?, ?)", [
+                    ("a", "wiki_rebuild", "permanent_failed", sources),
+                    ("b", "document_retry", "completed", done("doc_1"))])
+                connection.commit()
+                report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+                self.assertEqual(report["operations"]["permanent_failed"], 1)
+                connection.execute("INSERT INTO operations VALUES ('c', 'document_retry', 'completed', ?)", (done("doc_2"),))
+                connection.commit()
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"]["permanent_failed"], 0)
+
     def test_a_catalog_without_the_columns_to_match_counts_every_operation(self) -> None:
         with _temporary_home() as home:
             paths = _set_up(home)
