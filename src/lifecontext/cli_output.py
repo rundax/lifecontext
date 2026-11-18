@@ -422,6 +422,8 @@ _CLI: dict[str, ErrorText] = {
                                    "under the same HOME.", "{start}", True),
     "input_unavailable": ErrorText("Unable to read the selected source input.",
                                    "give an existing regular file, or - for standard input"),
+    "unsupported_format": ErrorText("LifeContext does not import files of that type; the message names the ones "
+                                    "it does.", "save the file in one of those formats and import that copy"),
     "vault_missing": ErrorText("The vault's Journal folder does not exist.",
                                "create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml",
                                agent_next_step="the owner creates it with mode 0700, or sets `vault` in "

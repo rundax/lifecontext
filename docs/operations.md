@@ -629,6 +629,7 @@ test fails when the two differ).
 - `invalid_api_response`: The service's answer is not what this command expects. Next: update the CLI and restart the service so both run the same version.
 - `token_unavailable`: No LifeContext API token for this user: the service writes it when it starts, under the same HOME. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
 - `input_unavailable`: Unable to read the selected source input. Next: give an existing regular file, or - for standard input.
+- `unsupported_format`: LifeContext does not import files of that type; the message names the ones it does. Next: save the file in one of those formats and import that copy.
 - `vault_missing`: The vault's Journal folder does not exist. Next: create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml.
 - `destination_exists`: The output file already exists; LifeContext never overwrites one. Next: choose a new file name.
 - `output_unavailable`: The output file cannot be written. Next: check that its folder exists and that you can write to it.

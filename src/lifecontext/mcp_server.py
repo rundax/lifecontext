@@ -80,10 +80,11 @@ class ImportDirError(ValueError):
     """An ``--import-dir`` the server refuses to start with."""
 
 
-def _failure(code: str, port: int, *, tool: str = "", message_code: str | None = None) -> ToolError:
+def _failure(code: str, port: int, *, tool: str = "", message_code: str | None = None,
+             message: str | None = None) -> ToolError:
     # An agent reports to the owner instead of repairing: the table words the next step that way.
-    message, next_step, _ = cli_output.describe(message_code or code, port=port, tool=tool, agent=True)
-    return ToolError(f"{code}: {message}" + (f" Next: {next_step}." if next_step else ""))
+    text, next_step, _ = cli_output.describe(message_code or code, port=port, tool=tool, agent=True)
+    return ToolError(f"{code}: {message or text}" + (f" Next: {next_step}." if next_step else ""))
 
 
 def _inside(path: Path, roots: Sequence[Path]) -> bool:
@@ -186,7 +187,7 @@ def build_server(port: int = cli.DEFAULT_PORT, *, allow_writes: bool = False,
         try:
             return cli._dispatch(argparse.Namespace(port=port, **fields))
         except cli.CLIError as exc:
-            raise _failure(exc.code, port, message_code=exc.message_code) from None
+            raise _failure(exc.code, port, message_code=exc.message_code, message=exc.message) from None
 
     def checked(validate, value: str) -> str:
         try:

@@ -103,6 +103,55 @@ class DocumentCLIContractTests(unittest.TestCase):
                     cli._dispatch(self.args("documents", "import", source.name, *flags))
                     self.assertEqual(request.call_args.kwargs["headers"].get("X-Document-Vision"), expected)
 
+    def test_document_import_refuses_an_unsupported_format_before_upload(self):
+        from lifecontext.extraction import SUPPORTED_SUFFIXES
+
+        with tempfile.TemporaryDirectory(dir=scratch_root()) as folder:
+            source = Path(folder) / "minutes.odt"
+            source.write_bytes(b"PK\x03\x04 fixture")
+            formats = ", ".join(sorted(SUPPORTED_SUFFIXES))
+            for arguments, kind in (((str(source),), ".odt files"), (("-", "--filename", "minutes.ODT"), ".odt files"),
+                                    (("-", "--filename", "README"), "files without an extension")):
+                with self.subTest(arguments=arguments), patch.object(cli, "_http_exchange") as exchange, \
+                        patch.object(cli, "_read_input", return_value=b"PK\x03\x04"), \
+                        self.assertRaises(cli.CLIError) as error:
+                    cli._dispatch(self.args("documents", "import", *arguments))
+                exchange.assert_not_called()
+                self.assertEqual((error.exception.code, error.exception.message),
+                                 ("unsupported_format", f"LifeContext does not import {kind}. It imports {formats}."))
+        self.assertTrue(formats.startswith(".docx, .jpeg, .jpg, .markdown, .md, .pdf"), formats)
+        stderr = io.StringIO()
+        with patch.object(cli, "_http_exchange") as exchange, patch.object(cli, "_read_input", return_value=b"x"), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(cli.main(["documents", "import", "-", "--filename", "minutes.odt"]), 1)
+        exchange.assert_not_called()
+        self.assertEqual(stderr.getvalue(), (
+            "LifeContext does not import .odt files. It imports " + ", ".join(sorted(SUPPORTED_SUFFIXES)) + ".\n"
+            "Next: save the file in one of those formats and import that copy.\n"))
+
+    def test_document_import_refuses_a_file_above_the_service_limit_before_upload(self):
+        status = json.dumps({"max_file_bytes": 16 * 1024 * 1024}).encode()
+        answers = [(200, {}, status)]
+        with patch.object(cli, "_read_input", return_value=b"x" * 18_000_000), \
+                patch.object(cli, "_http_exchange", side_effect=answers) as exchange, \
+                self.assertRaises(cli.CLIError) as error:
+            cli._dispatch(self.args("documents", "import", "scan.pdf"))
+        self.assertEqual([call.args[1:3] for call in exchange.call_args_list], [("GET", "/v1/status")])
+        self.assertEqual((error.exception.code, error.exception.message),
+                         ("body_too_large", "The file is larger than the 16 MiB the service accepts."))
+        # Above the CLI's own 32 MiB ceiling the limit is named too.
+        with patch.object(cli, "_read_input", side_effect=cli.CLIError("body_too_large")), \
+                patch.object(cli, "_http_exchange", side_effect=[(200, {}, status)]), \
+                self.assertRaises(cli.CLIError) as error:
+            cli._dispatch(self.args("documents", "import", "scan.pdf"))
+        self.assertEqual(error.exception.message, "The file is larger than the 16 MiB the service accepts.")
+        # A file within the limit is sent; when status cannot say, the service's own check decides.
+        for answer in ((200, {}, status), cli.CLIError("api_error")):
+            with self.subTest(status=answer), patch.object(cli, "_read_input", return_value=b"x" * 1000), \
+                    patch.object(cli, "_http_exchange", side_effect=[answer, (200, {"x-lifeweave-operation-id": "op_" + "b" * 32}, b"{}")]) as exchange:
+                cli._dispatch(self.args("documents", "import", "scan.pdf"))
+            self.assertEqual(exchange.call_args.args[1:3], ("POST", "/v1/documents"))
+
     def test_document_retry_takes_a_source_id_and_sends_a_key_only_when_given(self):
         with patch.object(cli, "_post_json", return_value={}) as post:
             args = self.args("documents", "retry", "doc_abc-1")

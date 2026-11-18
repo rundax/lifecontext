@@ -247,7 +247,9 @@ class MCPServerTests(unittest.TestCase):
                                                 "no_vision": True},
                            allow_writes=True, import_dirs=[str(self.inbox)])
         self.assertFalse(result.is_error, result.content)
-        [request] = self.api.requests
+        # The file limit is read first, so a file above it is refused before the upload.
+        status, request = self.api.requests
+        self.assertEqual((status["method"], status["target"]), ("GET", "/v1/status"))
         self.assertEqual((request["method"], request["target"]), ("POST", "/v1/documents"))
         self.assertEqual(request["body"], b"%PDF-1.4 fixture")
         self.assertEqual(request["headers"]["idempotency-key"], "import-lease")
@@ -294,6 +296,7 @@ class MCPServerTests(unittest.TestCase):
         (outside / "secret.txt").write_text("private", encoding="utf-8")
         (self.inbox / "linked").symlink_to(outside, target_is_directory=True)
         (self.inbox / "real.md").write_text("# Real\n", encoding="utf-8")
+        (self.inbox / "minutes.odt").write_bytes(b"PK\x03\x04")
         (self.inbox / "alias.md").symlink_to(self.inbox / "real.md")
         os.mkfifo(self.inbox / "pipe")
         (self.inbox / "folder").mkdir()
@@ -314,6 +317,8 @@ class MCPServerTests(unittest.TestCase):
             (self.inbox, self.inbox / "pipe", "input_unavailable"),
             (self.inbox, self.inbox / "folder", "input_unavailable"),
             (self.inbox, self.inbox / "missing.md", "input_unavailable"),
+            # Refused before anything is sent, with the formats it does import.
+            (self.inbox, self.inbox / "minutes.odt", "unsupported_format"),
             (self.inbox, Path("real.md"), "invalid_request"),
             (self.inbox, Path("-"), "invalid_request"),
             # Even when the owner allows everything, protected places stay closed.
@@ -331,6 +336,8 @@ class MCPServerTests(unittest.TestCase):
                 text = self.error_text(result)
                 self.assertTrue(text.startswith(f"Error executing tool documents_import: {code}:"), text)
                 self.assertNotIn("private", text)
+                if code == "unsupported_format":
+                    self.assertIn("LifeContext does not import .odt files. It imports .docx, .jpeg, ", text)
         self.assertEqual(self.api.requests, [])
 
         for allowed, path in ((self.inbox, self.inbox / "real.md"), (self.home, self.home / "Documents" / "plan.md"),
@@ -340,7 +347,7 @@ class MCPServerTests(unittest.TestCase):
                 result = self.call("documents_import", {"path": str(path), "idempotency_key": "import-ok"},
                                    allow_writes=True, import_dirs=[str(allowed)])
                 self.assertFalse(result.is_error, result.content)
-                [request] = self.api.requests
+                _, request = self.api.requests
                 self.assertEqual(request["body"], path.read_bytes())
 
     def test_unusable_import_dirs_stop_the_server_from_starting(self) -> None:
@@ -472,7 +479,8 @@ class MCPServerTests(unittest.TestCase):
         text = self._one_at_a_time("/v1/documents", [("documents_import", arguments)] * 3,
                                    allow_writes=True, import_dirs=[str(self.inbox)])
         self.assertIn("busy: A previous documents_import call is still finishing", text)
-        self.assertEqual(len(self.api.requests), 2)
+        self.assertEqual([item["target"] for item in self.api.requests if item["method"] == "POST"],
+                         ["/v1/documents", "/v1/documents"])
 
     def test_locks_are_released_after_an_api_error(self) -> None:
         original = self.inbox / "a.md"

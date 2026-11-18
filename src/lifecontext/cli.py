@@ -745,6 +745,14 @@ def _api_file_limit(args: argparse.Namespace) -> int:
     return maximum
 
 
+def _document_file_limit(args: argparse.Namespace) -> int:
+    """The service's upload limit; the CLI's own ceiling when status cannot say, since the service checks again."""
+    try:
+        return min(_api_file_limit(args), MAX_DOCUMENT_BYTES)
+    except CLIError:
+        return MAX_DOCUMENT_BYTES
+
+
 def _ensure_new_destination(destination: str) -> Path:
     target = Path(destination)
     try:
@@ -828,9 +836,26 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
                     raise ValueError
             except (ValueError, UnicodeError, ValidationError):
                 raise CLIError("invalid_request") from None
-            content = _read_input(args.input, maximum=MAX_DOCUMENT_BYTES)
-            if not content:
+            from lifecontext.extraction import SUPPORTED_SUFFIXES
+
+            try:
+                content: bytes | None = _read_input(args.input, maximum=MAX_DOCUMENT_BYTES)
+            except CLIError as exc:
+                if exc.code != "body_too_large":
+                    raise
+                content = None
+            # After the read, so a missing file, a folder or a pipe stays input_unavailable.
+            suffix = Path(filename).suffix.lower()
+            if suffix not in SUPPORTED_SUFFIXES:
+                kind = f"{suffix} files" if suffix else "files without an extension"
+                raise CLIError("unsupported_format", message=(
+                    f"LifeContext does not import {kind}. It imports {', '.join(sorted(SUPPORTED_SUFFIXES))}."))
+            if content == b"":
                 raise CLIError("invalid_request")
+            limit = _document_file_limit(args)
+            if content is None or len(content) > limit:
+                size = f"{limit // 1048576} MiB" if limit % 1048576 == 0 else f"{limit} bytes"
+                raise CLIError("body_too_large", message=f"The file is larger than the {size} the service accepts.")
             headers = {
                 **_idempotency_headers(args),
                 "Content-Type": "application/octet-stream",

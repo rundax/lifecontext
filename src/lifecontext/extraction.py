@@ -450,6 +450,23 @@ def coverage_summary(payload) -> dict:
     }
 
 
+# The file name extensions an import can read, and the format each one is read as.
+SUPPORTED_SUFFIXES = {
+    ".txt": "text",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".xlsx": "xlsx",
+    ".pptx": "pptx",
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+}
+
+
 class _Rejected(Exception):
     def __init__(self, status: Status, reason: str):
         self.status, self.reason = status, reason
@@ -683,21 +700,7 @@ def extract_document_with_images(
         if len(data) > limits.max_original_bytes:
             raise _Rejected("limit_exceeded", "original_byte_limit")
         suffix = PurePosixPath(filename).suffix.lower()
-        formats = {
-            ".txt": "text",
-            ".md": "markdown",
-            ".markdown": "markdown",
-            ".pdf": "pdf",
-            ".docx": "docx",
-            ".xlsx": "xlsx",
-            ".pptx": "pptx",
-            ".png": "png",
-            ".jpg": "jpeg",
-            ".jpeg": "jpeg",
-            ".tif": "tiff",
-            ".tiff": "tiff",
-        }
-        format = formats.get(suffix)
+        format = SUPPORTED_SUFFIXES.get(suffix)
         if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
             raise _Rejected(
                 "locked" if suffix in {".docx", ".xlsx", ".pptx"} else "unsupported",
