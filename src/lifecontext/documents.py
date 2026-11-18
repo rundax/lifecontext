@@ -56,13 +56,16 @@ _WIKI_STEPS = {
     "wiki_no_evidence": "The document has no readable text to summarise and a retry does not change that; check the extraction with: lifecontext documents show {source_id}",
     "wiki_update_rejected": "The page failed its checks; run: lifecontext documents retry {source_id}",
     "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
+    # The stage completed; only the page's model summary is missing.
+    "wiki_summary_missing": "The page has no model summary; run: lifecontext documents retry {source_id}",
 }
 
 
-def document_outcome(stages, operation_state=None, awaited=()):
+def document_outcome(stages, operation_state=None, awaited=(), summary_missing=False):
     """What an import came to, from its stage states; catalog states never change for it.
 
-    A finished operation whose wiki page or vault note failed is ``completed_with_errors``.
+    A finished operation whose wiki page or vault note failed, or whose page has no
+    model summary (``summary_missing``), is ``completed_with_errors``.
     One whose configured wiki or vault stage is still pending or running is ``running``,
     not ``completed``. ``awaited`` names the stages that have a hook to wait for. The
     values are the catalog operation states plus ``completed_with_errors``.
@@ -74,19 +77,21 @@ def document_outcome(stages, operation_state=None, awaited=()):
         return "retryable_failed"
     if any(state != "completed" for state in core):
         return "running"
-    if any(stages[name]["state"] in _PROBLEM_STATES for name in ("wiki", "projection")):
+    if summary_missing or any(stages[name]["state"] in _PROBLEM_STATES for name in ("wiki", "projection")):
         return "completed_with_errors"
     if any(stages[name]["state"] in {"pending", "running"} for name in awaited):
         return "running"
     return "completed"
 
 
-def document_problems(source_id, stages, extractions):
+def document_problems(source_id, stages, extractions, summary_missing=False):
     """One entry per failed, blocked or conflicting stage, with what to run next."""
     problems = []
     retry = f"Run: lifecontext documents retry {source_id}"
     for name in ("extraction", "indexing", "wiki", "projection"):
         stage = stages[name]
+        if name == "wiki" and summary_missing:
+            stage = {**stage, "state": "failed", "error_code": "wiki_summary_missing"}
         if stage["state"] not in _PROBLEM_STATES:
             continue
         code = stage["error_code"] or stage["state"]
@@ -127,6 +132,7 @@ class DocumentService:
         limits=None,
         extractor=extract_document,
         wiki_hook=None,
+        wiki_summary_hook=None,
         projection_hook=None,
         completion_hook=None,
         tesseract_path=None,
@@ -149,6 +155,8 @@ class DocumentService:
         self.limits = limits or ExtractionLimits()
         self.extractor = extractor
         self.wiki_hook, self.projection_hook = wiki_hook, projection_hook
+        # source_id -> True when the document's wiki page was published without its summary.
+        self.wiki_summary_hook = wiki_summary_hook
         self.completion_hook = completion_hook
         self.tesseract_path = tesseract_path
         self.max_chunk_bytes = max_chunk_bytes
@@ -394,7 +402,8 @@ class DocumentService:
         """Stages a retry runs again: indexing, and for the current version the wiki and vault stages that have a hook."""
         names = ["indexing", *self._awaited(sid, version)]
         return [name for name in names
-                if self.catalog.get_document_stage(sid, version, name)["state"] != "completed"]
+                if self.catalog.get_document_stage(sid, version, name)["state"] != "completed"
+                or (name == "wiki" and self._summary_missing(sid, version))]
 
     async def _rerun_stages(self, old, extractions, idempotency_key, request_digest):
         """A finished import whose wiki or vault stage did not complete runs those stages again."""
@@ -678,6 +687,7 @@ class DocumentService:
                         self.catalog.get_document_stage(sid, version, stage)["state"]
                         == "completed"
                         and not (stage == "projection" and wiki_ran)
+                        and not (stage == "wiki" and self._summary_missing(sid, version))
                     )
                 ):
                     continue
@@ -952,6 +962,12 @@ class DocumentService:
         return tuple(name for name, hook in (("wiki", self.wiki_hook), ("projection", self.projection_hook))
                      if hook is not None)
 
+    def _summary_missing(self, source_id, source_version):
+        """A current version's wiki stage completed but its page has no model summary."""
+        return (self.wiki_summary_hook is not None and self._is_current(source_id, source_version)
+                and self.catalog.get_document_stage(source_id, source_version, "wiki")["state"] == "completed"
+                and bool(self.wiki_summary_hook(source_id)))
+
     def operation_outcome(self, operation):
         """What a document import or retry came to; ``None`` for any other operation."""
         intent = operation["result"].get("recovery_intent") or {}
@@ -964,12 +980,14 @@ class DocumentService:
                   for name in ("extraction", "indexing", "wiki", "projection")}
         if any(stage is None for stage in stages.values()):
             return operation["state"]
-        return document_outcome(stages, operation["state"], self._awaited(sid, version))
+        return document_outcome(stages, operation["state"], self._awaited(sid, version),
+                                self._summary_missing(sid, version))
 
     def outcome(self, document, operation_state=None):
         """``document_outcome`` for a shown document, given the state of the operation reported."""
         return document_outcome(document["stages"], operation_state,
-                                self._awaited(document["source_id"], document["source_version"]))
+                                self._awaited(document["source_id"], document["source_version"]),
+                                self._summary_missing(document["source_id"], document["source_version"]))
 
     def show(self, source_id, source_version=None, *, last=_NOT_LOOKED_UP):
         if source_version is None:
@@ -1009,6 +1027,7 @@ class DocumentService:
         page = self.catalog.get_wiki_page(page_id)
         receipts = [row for row in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id)
                     if row["state"] == "projected"]
+        summary_missing = self._summary_missing(source_id, source_version)
         return {
             **metadata,
             "accepted": stages["custody"]["state"] == "accepted",
@@ -1018,8 +1037,8 @@ class DocumentService:
             "chunks": self.catalog.list_provider_chunks(source_id, source_version),
             "last_operation_id": last["operation_id"] if last else None,
             "outcome": document_outcome(stages, last["state"] if last else None,
-                                        self._awaited(source_id, source_version)),
-            "problems": document_problems(source_id, stages, extractions),
+                                        self._awaited(source_id, source_version), summary_missing),
+            "problems": document_problems(source_id, stages, extractions, summary_missing),
             # The page exists for the user once its note is in the vault.
             "wiki_page_id": page_id if page and page["current_revision"] and receipts else None,
             # Path of the page's newest projected note from the vault root; the receipt is

@@ -1143,6 +1143,22 @@ class WikiService:
         pages = self.list()
         return {"pages": pages, "semantic_support_verified": False, "summary_model_generated": True}
 
+    def summary_missing(self, source_id: str) -> bool:
+        """The document's own page is published with claims but without its model summary.
+
+        The stored page is the record: a failed summary leaves none, and a retry that
+        writes one clears it. An unreadable page is not reported here; lint names it.
+        """
+        page = self.catalog.get_wiki_page(source_page_id(source_id))
+        if not page or not page["current_revision"]:
+            return False
+        try:
+            row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"])
+            patch = self.store.read(page["page_id"], page["current_revision"], row["artifact_sha256"])
+        except (ValueError, TypeError, KeyError, OSError):
+            return False
+        return bool(patch.claims) and not patch.summary
+
     def lint(self, documents: Iterable[Mapping[str, Any]], *, documents_omitted: int = 0) -> dict:
         """Model-free health report over the catalog and stored revisions; never writes.
 

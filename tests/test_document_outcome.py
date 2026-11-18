@@ -1,6 +1,7 @@
 """An import says whether it ended with problems, why, and how to retry it."""
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from lifecontext.custody import LifeContextCustody
 from lifecontext.derived import DerivedStore
 from lifecontext.documents import DocumentService
 from lifecontext.paths import LifeContextPaths
-from lifecontext.wiki import source_page_id
+from lifecontext.wiki import WikiService, source_page_id
 from test_documents import FakeProvider
 
 
@@ -69,6 +70,49 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((problem["stage"], problem["code"]), ("wiki", "wiki_provider_failed"))
         self.assertIn("lifecontext documents retry " + result["document"]["source_id"], problem["next_step"])
         self.assertIn("doctor", problem["next_step"])
+
+    async def test_a_failed_summary_is_listed_and_a_retry_writes_it(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        compiler, down = FakeCompiler({}), [True]
+
+        async def ask(query, **kwargs):
+            # The summary request carries claims but no evidence or pages.
+            if down[0] and "UNTRUSTED_DATA=" in query and not {"evidence", "pages"} & set(
+                    json.loads(query.split("UNTRUSTED_DATA=", 1)[1])):
+                raise ConnectionError("model unreachable")
+            return await compiler(query, **kwargs)
+
+        wiki = WikiService(self.catalog, self.custody, DerivedStore(self.paths), self.provider, self.paths, compiler=ask)
+
+        async def update(document):
+            await wiki.update_for_document(document["source_id"], document["source_version"])
+            return {"state": "completed"}
+
+        self.service.wiki_hook, self.service.wiki_summary_hook = update, wiki.summary_missing
+        self.service.projection_hook = lambda document: {"state": "completed"}
+        result = await self.ingest()
+        document = result["document"]
+        sid = document["source_id"]
+        # The wiki stage completed; only the summary is missing.
+        self.assertEqual(document["stages"]["wiki"]["state"], "completed")
+        self.assertEqual(document["outcome"], "completed_with_errors")
+        self.assertEqual(document["problems"], [{
+            "stage": "wiki", "code": "wiki_summary_missing", "reason": "wiki_summary_missing",
+            "next_step": f"The page has no model summary; run: lifecontext documents retry {sid}",
+        }])
+        self.assertEqual(_document(document).problems[0].code, "wiki_summary_missing")
+        self.assertEqual(self.service.operation_outcome(self.catalog.get_operation(result["operation_id"])),
+                         "completed_with_errors")
+        # Retrying while the model is still down changes nothing.
+        await self.service.retry(sid)
+        self.assertEqual(self.service.show(sid)["outcome"], "completed_with_errors")
+        down[0] = False
+        retried = await self.service.retry(sid)
+        document = retried["document"]
+        self.assertEqual(document["outcome"], "completed")
+        self.assertEqual(document["problems"], [])
+        self.assertFalse(wiki.summary_missing(sid))
 
     async def test_a_projected_page_names_its_vault_path(self):
         result = await self.ingest()
