@@ -165,6 +165,7 @@ class JournalApplication:
             tesseract_path=shutil.which("tesseract"),
             vision=vision,
             vision_cache=VisionCache(self.paths.lifeweave_home),
+            journal_prefix=self.vault.journal_path.relative_to(self.vault.vault_root).as_posix(),
         )
         self._transfer_lock = asyncio.Lock()
         self._closed = False
@@ -222,7 +223,9 @@ class JournalApplication:
             outcome = await self.documents.retry(operation_id, rerun_extraction, vision,
                                                  idempotency_key=idempotency_key)
             document = outcome.get("document")
-            if document and document["stages"]["indexing"]["state"] == "completed":
+            # A retry that found a run in progress ran nothing; that run classifies the document.
+            if (document and document["stages"]["indexing"]["state"] == "completed"
+                    and not self.documents.in_flight(document["source_id"])):
                 await self._classify_document(document)
                 outcome["document"] = self.documents.show(document["source_id"], document["source_version"])
             return outcome
@@ -599,6 +602,10 @@ class JournalApplication:
             operation = self.catalog.set_operation_intent(operation["operation_id"], result)
             operation = self._start_admitted_operation(operation)
             for target in targets:
+                if self.documents.in_flight(target["source_id"]):
+                    # An import or retry of it is running and writes the page itself; a
+                    # rebuild with a new key once it is done does the rest.
+                    raise ApplicationError("conflict")
                 revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
                 result["item_count"] += len(revisions)
                 self.catalog.save_operation_result(operation["operation_id"], result)
@@ -1905,6 +1912,8 @@ class JournalApplication:
                 tesseract_path=self.documents.tesseract_path,
                 max_chunk_bytes=self.documents.max_chunk_bytes,
             )
+            # One in-flight map, so a retry or rebuild meanwhile sees the restore's runs.
+            restored_documents._inflight = self.documents._inflight
             metadata = {(row["source_id"], row["source_version"]): row for row in snapshot.metadata}
             for source_id, record in latest.items():
                 if source_id in document_sources:
@@ -2469,6 +2478,10 @@ class JournalApplication:
             self._fail_operation(operation["operation_id"], code, retryable=(
                 action == "delete" and source is not None and source["layer"] == "document"
                 and code in {"conflict", "vault_unavailable", "unsafe_path", "unsafe_permissions"}
+            ) or (
+                # A document reindex refused while an import or retry of it runs (nothing
+                # awaited since the refusal, so the map still holds the source).
+                action == "reindex" and code == "conflict" and self.documents.in_flight(source_id)
             ))
             raise ApplicationError(code) from None
 
@@ -2510,6 +2523,9 @@ class JournalApplication:
 
     async def _reindex_document(self, manifest: SourceManifest, key: str) -> dict[str, Any]:
         sid, version = manifest.source_id, manifest.source_version
+        if self.documents.in_flight(sid):
+            # Before any operation or stale mark: the same request runs once that run is done.
+            raise ApplicationError("conflict")
         digest = self._request_digest("document-reindex", {"source_id": sid, "source_version": version, "key": key})
         existing = self.catalog.lookup_operation("document-reindex:" + key, digest, "document_retry")
         if existing is not None:
@@ -3137,7 +3153,12 @@ class JournalApplication:
             rows = self.catalog.list_operations(state=state, limit=1000 if outcome else limit)
         except CatalogError:
             raise ApplicationError("invalid_request") from None
-        items = [{**self.operation_status(row["operation_id"]), "operation_kind": row["operation_kind"],
+        try:
+            # From the rows already read: one stage query for every document operation.
+            outcomes = self.documents.operation_outcomes(rows)
+        except CatalogError:
+            raise ApplicationError("operation_status_unavailable") from None
+        items = [{**self._operation_status(row, outcomes.get(row["operation_id"])), "operation_kind": row["operation_kind"],
                   "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
         if outcome:
             items = [item for item in items if item.get("outcome") == outcome][:limit]
@@ -3151,6 +3172,14 @@ class JournalApplication:
             raise ApplicationError("operation_status_unavailable") from None
         if operation is None:
             raise ApplicationError("operation_status_unavailable")
+        # A document import or retry also says whether its wiki page and vault note came out.
+        outcome = None
+        if operation["operation_kind"] in {"document_import", "document_retry"}:
+            outcome = self.documents.operation_outcome(operation)
+        return self._operation_status(operation, outcome)
+
+    @staticmethod
+    def _operation_status(operation: Mapping[str, Any], outcome: str | None) -> dict[str, Any]:
         result = operation["result"]
         summary: dict[str, Any] = {}
         if "sources" in result:
@@ -3168,11 +3197,8 @@ class JournalApplication:
             "state": operation["state"],
             "summary": summary,
         }
-        # A document import or retry also says whether its wiki page and vault note came out.
-        if operation["operation_kind"] in {"document_import", "document_retry"}:
-            outcome = self.documents.operation_outcome(operation)
-            if outcome is not None:
-                status["outcome"] = outcome
+        if outcome is not None:
+            status["outcome"] = outcome
         return status
 
     @staticmethod

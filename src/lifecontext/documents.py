@@ -33,7 +33,8 @@ from lifecontext.wiki import source_page_id
 VISION_OPT_OUT = "vision_opted_out; this document is never sent to a vision model"
 
 _PROBLEM_STATES = {"failed", "blocked", "conflict"}
-# Vault receipts are relative to the Journal folder; responses give the path from the vault root.
+# Vault receipts are relative to the Journal folder; responses give the path from the vault
+# root. The service passes the configured folder; this is the default one.
 _JOURNAL_FOLDER = default_journal_paths("")[1].name
 _NOT_LOOKED_UP = object()
 _FORMATS = "PDF, DOCX, XLSX, PPTX, TXT, Markdown, PNG, JPEG or TIFF"
@@ -61,14 +62,16 @@ _WIKI_STEPS = {
 }
 
 
-def document_outcome(stages, operation_state=None, awaited=(), summary_missing=False):
+def document_outcome(stages, operation_state=None, awaited=(), summary_missing=False, in_flight=True):
     """What an import came to, from its stage states; catalog states never change for it.
 
     A finished operation whose wiki page or vault note failed, or whose page has no
     model summary (``summary_missing``), is ``completed_with_errors``.
-    One whose configured wiki or vault stage is still pending or running is ``running``,
-    not ``completed``. ``awaited`` names the stages that have a hook to wait for. The
-    values are the catalog operation states plus ``completed_with_errors``.
+    One whose configured wiki or vault stage is still pending or running is ``running``
+    while this process runs the document (``in_flight``), not ``completed``; with nothing
+    running it, such a stage waits for a retry, so it is ``completed_with_errors``.
+    ``awaited`` names the stages that have a hook to wait for. The values are the catalog
+    operation states plus ``completed_with_errors``.
     """
     if operation_state not in (None, "completed"):
         return operation_state
@@ -80,19 +83,22 @@ def document_outcome(stages, operation_state=None, awaited=(), summary_missing=F
     if summary_missing or any(stages[name]["state"] in _PROBLEM_STATES for name in ("wiki", "projection")):
         return "completed_with_errors"
     if any(stages[name]["state"] in {"pending", "running"} for name in awaited):
-        return "running"
+        return "running" if in_flight else "completed_with_errors"
     return "completed"
 
 
-def document_problems(source_id, stages, extractions, summary_missing=False):
-    """One entry per failed, blocked or conflicting stage, with what to run next."""
+def document_problems(source_id, stages, extractions, summary_missing=False, stalled=()):
+    """One entry per failed, blocked or conflicting stage, with what to run next.
+
+    ``stalled`` names pending or running stages that nothing runs; a retry runs them.
+    """
     problems = []
     retry = f"Run: lifecontext documents retry {source_id}"
     for name in ("extraction", "indexing", "wiki", "projection"):
         stage = stages[name]
         if name == "wiki" and summary_missing:
             stage = {**stage, "state": "failed", "error_code": "wiki_summary_missing"}
-        if stage["state"] not in _PROBLEM_STATES:
+        if stage["state"] not in _PROBLEM_STATES and name not in stalled:
             continue
         code = stage["error_code"] or stage["state"]
         reason = code
@@ -139,6 +145,7 @@ class DocumentService:
         max_chunk_bytes=1_048_576,
         vision=None,
         vision_cache=None,
+        journal_prefix=_JOURNAL_FOLDER,
     ):
         if (
             isinstance(max_chunk_bytes, bool)
@@ -161,13 +168,20 @@ class DocumentService:
         self.tesseract_path = tesseract_path
         self.max_chunk_bytes = max_chunk_bytes
         self.vision, self.vision_cache = vision, vision_cache
+        # The Journal folder's path from the vault root, for ``vault_path``.
+        self.journal_prefix = journal_prefix
         self._coverage_cache: dict[str, dict] = {}
         # Reports read coverage off the event loop; the cache is shared.
         self._coverage_lock = threading.Lock()
         # Operation IDs and source IDs this process is running right now, with counts. A
         # retry that finds its operation or source here reports the current state instead of
         # starting a second run; after a crash the set is empty and startup recovery resumes.
+        # Every service of one application shares it.
         self._inflight: dict[str, int] = {}
+
+    def in_flight(self, source_id):
+        """This process is running an import or retry of the source right now."""
+        return source_id in self._inflight
 
     async def import_document(
         self,
@@ -489,12 +503,14 @@ class DocumentService:
         for key in keys:
             self._inflight[key] = self._inflight.get(key, 0) + 1
         try:
-            return await self._run_stages(operation, intent, original_bytes)
+            operation = await self._run_stages(operation, intent, original_bytes)
         finally:
             for key in keys:
                 self._inflight[key] -= 1
                 if not self._inflight[key]:
                     del self._inflight[key]
+        # Shown once this run has left the map, so its outcome is not ``running`` for it.
+        return self._response(operation)
 
     async def _run_stages(self, operation, intent, original_bytes):
         sid, version = intent["source_id"], intent["source_version"]
@@ -673,9 +689,10 @@ class DocumentService:
                 indexing_failed = True
             # Hooks own their effects; only an explicit completed response is acknowledgement.
             wiki_ran = False
-            # A retry never rebuilds the page of a version a newer one replaced.
+            # No run, an import's by its operation ID included, rebuilds the page of a
+            # version a newer one replaced.
             hooks = (("wiki", self.wiki_hook), ("projection", self.projection_hook))
-            if intent["kind"] == "document_retry" and not self._is_current(sid, version):
+            if not self._is_current(sid, version):
                 hooks = ()
             for stage, hook in hooks:
                 if (
@@ -719,10 +736,9 @@ class DocumentService:
                     self._stage(sid, version, stage, "failed", "internal_error")
             if indexing_failed:
                 return self._fail(operation, result, "provider_unavailable")
-            operation = self.catalog.transition_operation(
+            return self.catalog.transition_operation(
                 operation["operation_id"], "running", "completed", result=result
             )
-            return self._response(operation)
         except VisionUnavailable:
             if self.catalog.list_tombstones(sid):
                 # Forgotten while a model was reading it: drop what this run cached.
@@ -746,14 +762,13 @@ class DocumentService:
             return self._fail(operation, result, code)
 
     def _fail(self, operation, result, code):
-        operation = self.catalog.transition_operation(
+        return self.catalog.transition_operation(
             operation["operation_id"],
             "running",
             "retryable_failed",
             result=result,
             error_code=code,
         )
-        return self._response(operation)
 
     def _bound_segments(self, artifact):
         segments, offset = [], 0
@@ -970,24 +985,45 @@ class DocumentService:
 
     def operation_outcome(self, operation):
         """What a document import or retry came to; ``None`` for any other operation."""
-        intent = operation["result"].get("recovery_intent") or {}
-        if operation["operation_kind"] not in {"document_import", "document_retry"} or "source_id" not in intent:
-            return None
-        if operation["state"] != "completed":
-            return operation["state"]
-        sid, version = intent["source_id"], intent["source_version"]
-        stages = {name: self.catalog.get_document_stage(sid, version, name)
-                  for name in ("extraction", "indexing", "wiki", "projection")}
-        if any(stage is None for stage in stages.values()):
-            return operation["state"]
-        return document_outcome(stages, operation["state"], self._awaited(sid, version),
-                                self._summary_missing(sid, version))
+        return self.operation_outcomes([operation]).get(operation["operation_id"])
+
+    def operation_outcomes(self, operations):
+        """``operation_outcome`` by operation ID for the document imports and retries among
+        ``operations``, from one catalog query for all of their stages."""
+        wanted = {}
+        for operation in operations:
+            intent = operation["result"].get("recovery_intent") or {}
+            if operation["operation_kind"] in {"document_import", "document_retry"} and "source_id" in intent:
+                wanted[operation["operation_id"]] = (operation["state"], intent["source_id"], intent["source_version"])
+        stages, current = {}, {}
+        for row in self.catalog.list_document_stages({sid for state, sid, _ in wanted.values() if state == "completed"}):
+            current[row["source_id"]] = row.pop("current_version")
+            stages.setdefault((row["source_id"], row["source_version"]), {})[row["stage"]] = row
+        hooked = tuple(name for name, hook in (("wiki", self.wiki_hook), ("projection", self.projection_hook))
+                       if hook is not None)
+        missing, outcomes = {}, {}
+        for operation_id, (state, sid, version) in wanted.items():
+            found = stages.get((sid, version), {})
+            if state != "completed" or any(name not in found for name in ("extraction", "indexing", "wiki", "projection")):
+                outcomes[operation_id] = state
+                continue
+            is_current = current.get(sid) == version
+            summary = False
+            # As _summary_missing; the page is read once per source.
+            if is_current and self.wiki_summary_hook is not None and found["wiki"]["state"] == "completed":
+                if sid not in missing:
+                    missing[sid] = bool(self.wiki_summary_hook(sid))
+                summary = missing[sid]
+            outcomes[operation_id] = document_outcome(found, state, hooked if is_current else (), summary,
+                                                      self.in_flight(sid))
+        return outcomes
 
     def outcome(self, document, operation_state=None):
         """``document_outcome`` for a shown document, given the state of the operation reported."""
         return document_outcome(document["stages"], operation_state,
                                 self._awaited(document["source_id"], document["source_version"]),
-                                self._summary_missing(document["source_id"], document["source_version"]))
+                                self._summary_missing(document["source_id"], document["source_version"]),
+                                self.in_flight(document["source_id"]))
 
     def show(self, source_id, source_version=None, *, last=_NOT_LOOKED_UP):
         if source_version is None:
@@ -1028,6 +1064,11 @@ class DocumentService:
         receipts = [row for row in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id)
                     if row["state"] == "projected"]
         summary_missing = self._summary_missing(source_id, source_version)
+        awaited, in_flight = self._awaited(source_id, source_version), self.in_flight(source_id)
+        outcome = document_outcome(stages, last["state"] if last else None, awaited, summary_missing, in_flight)
+        # A wiki or vault stage that nothing runs once the import finished waits for a retry.
+        stalled = () if in_flight or outcome != "completed_with_errors" else [
+            name for name in awaited if stages[name]["state"] in {"pending", "running"}]
         return {
             **metadata,
             "accepted": stages["custody"]["state"] == "accepted",
@@ -1036,14 +1077,13 @@ class DocumentService:
             "coverage": self._coverage(source_id, source_version, extractions),
             "chunks": self.catalog.list_provider_chunks(source_id, source_version),
             "last_operation_id": last["operation_id"] if last else None,
-            "outcome": document_outcome(stages, last["state"] if last else None,
-                                        self._awaited(source_id, source_version), summary_missing),
-            "problems": document_problems(source_id, stages, extractions, summary_missing),
+            "outcome": outcome,
+            "problems": document_problems(source_id, stages, extractions, summary_missing, stalled),
             # The page exists for the user once its note is in the vault.
             "wiki_page_id": page_id if page and page["current_revision"] and receipts else None,
             # Path of the page's newest projected note from the vault root; the receipt is
             # relative to the Journal folder.
-            "vault_path": f"{_JOURNAL_FOLDER}/{receipts[-1]['projection_path']}" if receipts else None,
+            "vault_path": f"{self.journal_prefix}/{receipts[-1]['projection_path']}" if receipts else None,
         }
 
     def _coverage(self, source_id, source_version, extractions):

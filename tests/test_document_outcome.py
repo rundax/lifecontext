@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -131,13 +132,49 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(shown["vault_path"], "Journal/wiki/Sample.md")
         self.assertEqual(shown["wiki_page_id"], source_page_id(sid))
 
-    async def test_a_completed_import_whose_wiki_stages_have_not_finished_is_running(self):
-        self.service.wiki_hook = lambda document: {"state": "pending"}
+    async def test_an_unfinished_wiki_stage_is_running_only_while_the_run_lasts(self):
+        seen = []
+
+        def wiki(document):
+            # Asked as if the operation had completed: the run still holds the document.
+            seen.append(self.service.outcome(self.service.show(document["source_id"]), "completed"))
+            return {"state": "pending"}
+
+        self.service.wiki_hook = wiki
         self.service.projection_hook = lambda document: {"state": "completed"}
         result = await self.ingest()
+        sid = result["document"]["source_id"]
+        self.assertEqual(seen, ["running"])
         self.assertEqual(result["state"], "completed")
-        self.assertEqual(result["document"]["outcome"], "running")
-        self.assertEqual(self.service.operation_outcome(self.catalog.get_operation(result["operation_id"])), "running")
+        # Nothing runs the stage now; it waits for a retry instead of looking busy.
+        document = result["document"]
+        self.assertEqual(document["outcome"], "completed_with_errors")
+        self.assertEqual(document["problems"], [{
+            "stage": "wiki", "code": "running", "reason": "running",
+            "next_step": f"Run: lifecontext documents retry {sid}",
+        }])
+        self.assertEqual(_document(document).problems[0].stage, "wiki")
+        self.assertEqual(self.service.operation_outcome(self.catalog.get_operation(result["operation_id"])),
+                         "completed_with_errors")
+
+    async def test_a_vault_note_a_category_change_put_back_to_pending_is_a_problem_a_retry_fixes(self):
+        projected = []
+        self.service.wiki_hook = lambda document: {"state": "completed"}
+        self.service.projection_hook = lambda document: projected.append(1) or {"state": "completed"}
+        document = (await self.ingest())["document"]
+        sid = document["source_id"]
+        self.assertEqual(document["outcome"], "completed")
+        self.catalog.assign_document_category(sid, "inbox", expected_revision=document["category_revision"])
+        shown = self.service.show(sid)
+        self.assertEqual(shown["stages"]["projection"]["state"], "pending")
+        self.assertEqual(shown["outcome"], "completed_with_errors")
+        self.assertEqual(shown["problems"], [{
+            "stage": "projection", "code": "pending", "reason": "pending",
+            "next_step": f"Run: lifecontext documents retry {sid}",
+        }])
+        retried = await self.service.retry(sid)
+        self.assertEqual(retried["document"]["outcome"], "completed")
+        self.assertEqual(len(projected), 2)
 
     async def test_a_clean_import_is_completed_without_problems(self):
         self.service.wiki_hook = lambda document: {"state": "completed"}
@@ -200,6 +237,10 @@ class OperationOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["operation_id"] for item in found], [broken["operation_id"]])
         self.assertEqual([item["operation_id"] for item in application.list_operations(outcome="completed", limit=1)],
                          [fine["operation_id"]])
+        # The list reads each operation once and every stage in one query, not per operation.
+        with patch.object(self.catalog, "get_operation", side_effect=AssertionError("per operation read")), \
+                patch.object(self.catalog, "get_document_stage", side_effect=AssertionError("per stage read")):
+            self.assertEqual(application.list_operations(outcome="completed_with_errors"), found)
 
 
 class DeletedDocumentRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -358,6 +399,25 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), before)
         self.assertEqual(self.service._unfinished_stages(sid, 1), [])
 
+    async def test_an_unfinished_import_of_an_old_version_retried_by_its_operation_id_leaves_the_page(self):
+        calls = []
+        self.service.wiki_hook = lambda document: calls.append(("wiki", document["source_version"])) or {
+            "state": "completed"}
+        self.service.projection_hook = lambda document: calls.append(("projection", document["source_version"])) or {
+            "state": "completed"}
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        self.assertEqual(first["state"], "retryable_failed")
+        sid = first["document"]["source_id"]
+        await self.service.import_document(b"second version", "sample.txt", "text/plain", {}, "v2",
+                                           source_id=sid, source_version=2)
+        before = list(calls)
+        self.assertIn(("wiki", 2), before)
+        retried = await self.service.retry(first["operation_id"])
+        self.assertEqual((retried["operation_id"], retried["state"]), (first["operation_id"], "completed"))
+        # Its evidence is indexed, but the page and note stay those of version 2.
+        self.assertEqual(calls, before)
+
     async def test_list_asks_for_every_latest_operation_in_one_query(self):
         await self.ingest(key="one")
         await self.ingest(b"another document", key="two")
@@ -397,6 +457,81 @@ class WikiReachesVaultAfterRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["state"], "completed")
         self.assertEqual(projected, ["pending", "completed"])
         self.assertEqual(recovered["document"]["outcome"], "completed")
+
+
+class ApplicationRunGuardTests(unittest.TestCase):
+    """A reindex, rebuild or retry leaves a document alone while an import or retry of it runs."""
+
+    def setUp(self):
+        from test_document_bundle_application import Provider
+        from wiki_fake_compiler import FakeCompiler
+
+        from lifecontext.application import JournalApplication
+        from lifecontext.vault import ManagedVault
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name) / "home"
+        home.mkdir(mode=0o700)
+        vault = home / "vault"
+        # An older config may keep the Journal folder under another name.
+        journal = vault / "Diary"
+        (journal / "entries").mkdir(parents=True, mode=0o700)
+        vault.chmod(0o700)
+        journal.chmod(0o700)
+        self.compiler = FakeCompiler({})
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            self.app = JournalApplication(paths=LifeContextPaths.current(), hindsight=Provider(),
+                                          vault=ManagedVault(vault, journal), compiler=self.compiler)
+        self.addCleanup(self.app.close)
+        outcome = asyncio.run(self.app.import_document(b"Coffee is a stimulant.", "Notes.txt", "text/plain",
+                                                       {"source": "fixture"}, "import"))
+        self.assertEqual(outcome["document"]["outcome"], "completed", outcome)
+        self.sid = outcome["document"]["source_id"]
+
+    def running(self):
+        """As while an import or retry of the document runs."""
+        self.app.documents._inflight[self.sid] = 1
+        self.addCleanup(self.app.documents._inflight.pop, self.sid, None)
+
+    def test_vault_path_starts_at_the_configured_journal_folder(self):
+        self.assertTrue(self.app.show_document(self.sid)["vault_path"].startswith("Diary/wiki/"))
+
+    def test_a_reindex_while_the_document_runs_is_a_conflict_the_same_request_retries(self):
+        from lifecontext.application import ApplicationError
+
+        page = self.app.catalog.get_wiki_page(source_page_id(self.sid))
+        self.running()
+        request = {"action": "reindex", "source_id": self.sid}
+        with self.assertRaises(ApplicationError) as caught:
+            asyncio.run(self.app.curate(request, idempotency_key="reindex"))
+        self.assertEqual(caught.exception.code, "conflict")
+        kinds = {row["operation_kind"]: row for row in self.app.catalog.list_operations()}
+        self.assertEqual((kinds["curation"]["state"], kinds["curation"]["error_code"]), ("retryable_failed", "conflict"))
+        # No reindex operation was left pending and the page was not marked stale.
+        self.assertNotIn("document_retry", kinds)
+        self.assertEqual(self.app.catalog.get_wiki_page(source_page_id(self.sid))["state"], page["state"])
+        self.app.documents._inflight.pop(self.sid)
+        self.assertEqual(asyncio.run(self.app.curate(request, idempotency_key="reindex"))["state"], "completed")
+
+    def test_a_rebuild_of_a_document_that_runs_is_refused_as_a_conflict(self):
+        windows = len(self.compiler.queries["window"])
+        self.running()
+        result = asyncio.run(self.app.rebuild_wiki(source_id=self.sid, idempotency_key="rebuild"))
+        self.assertEqual((result["state"], result["summary"]["error_code"]), ("permanent_failed", "conflict"))
+        self.assertEqual(len(self.compiler.queries["window"]), windows)
+
+    def test_a_retry_that_finds_the_document_running_does_not_classify_it(self):
+        from unittest.mock import AsyncMock
+
+        classify = AsyncMock(return_value=True)
+        self.running()
+        with patch.object(self.app, "_classify_document", classify):
+            asyncio.run(self.app.retry_document(self.sid))
+            classify.assert_not_awaited()
+            self.app.documents._inflight.pop(self.sid)
+            asyncio.run(self.app.retry_document(self.sid))
+            classify.assert_awaited()
 
 
 class CitationLabelTests(unittest.TestCase):

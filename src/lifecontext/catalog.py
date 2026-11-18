@@ -2697,6 +2697,23 @@ class LifeContextCatalog:
         row = self._connection.execute("SELECT * FROM document_stages WHERE source_id=? AND source_version=? AND stage=?", (*identity, stage)).fetchone()
         return dict(row) if row else None
 
+    def list_document_stages(self, source_ids: set[str]) -> list[dict[str, Any]]:
+        """Every stage row of these sources, each with its source's ``current_version``, in one query."""
+        if any(not isinstance(sid, str) or not _SOURCE_ID.fullmatch(sid) for sid in source_ids):
+            raise CatalogError("invalid catalog identity")
+        if not source_ids:
+            return []
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                "SELECT s.*,(SELECT MAX(v.source_version) FROM source_versions v WHERE v.source_id=s.source_id) "
+                "AS current_version FROM document_stages s WHERE s.source_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(source_ids)),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def transition_document_stage(
         self, source_id: str, source_version: int, stage: str, *, expected_state: str,
         expected_revision: int, state: str, error_code: str | None = None,

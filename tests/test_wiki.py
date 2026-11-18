@@ -107,6 +107,7 @@ class WikiTests(unittest.TestCase):
                 raise ApplicationError("source_not_found")
             return {"source_id": sid, "source_version": version or manifest.source_version}
         app.documents.show.side_effect = show
+        app.documents.in_flight.return_value = False
         app.document_projections = Mock()
         app.document_projections.project_wiki.return_value = {"state": "completed"}
         app.document_projections.project_wiki_pages.side_effect = lambda pages: [

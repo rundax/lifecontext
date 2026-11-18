@@ -349,6 +349,23 @@ class DocumentBundleApplicationTests(unittest.TestCase):
         self.assertEqual(result["item_count"], 1)
         self.assertEqual(self.destination.catalog.list_incomplete_transfers(), [])
 
+    def test_a_restore_holds_its_documents_in_the_service_in_flight_map(self):
+        outcome = self.import_document()
+        sid = outcome["document"]["source_id"]
+        raw = self.source.export_bundle()
+        seen, retain = [], self.destination_provider.retain
+
+        async def watch(source_id, content, **kwargs):
+            # A retry or rebuild of the document at this moment would see the restore running.
+            seen.append(self.destination.documents.in_flight(sid))
+            return await retain(source_id, content, **kwargs)
+
+        self.destination_provider.retain = watch
+        asyncio.run(self.destination.import_bundle(raw, idempotency_key="watched"))
+        self.assertTrue(seen)
+        self.assertTrue(all(seen))
+        self.assertFalse(self.destination.documents.in_flight(sid))
+
     def test_outage_restore_resumes_after_restart(self):
         outcome = self.import_document()
         raw = self.source.export_bundle()
