@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import logging
 import mimetypes
 import re
 import threading
@@ -719,8 +720,9 @@ class DocumentService:
                             if inspect.isawaitable(written):
                                 written = await written
                             wiki_ran = bool(written)
-                        except Exception:  # noqa: BLE001 -- the page stays as it was; problems names the gap
-                            pass
+                        except Exception as exc:  # noqa: BLE001 -- the page stays as it was; problems names the gap
+                            logging.getLogger(__name__).warning(
+                                "Wiki summary retry for %s failed: %s", sid, type(exc).__name__)
                     continue
                 wiki_ran = wiki_ran or stage == "wiki"
                 self._active(sid, version)

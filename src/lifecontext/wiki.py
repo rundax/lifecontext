@@ -1165,7 +1165,8 @@ class WikiService:
         not reported here; lint names it.
         """
         page = self.catalog.get_wiki_page(source_page_id(source_id))
-        if not page or not page["current_revision"]:
+        # A page in review conflict refuses a commit, so a summary could not be saved.
+        if not page or not page["current_revision"] or page["state"] == "conflict":
             return False
         try:
             row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"], dependencies=False)
@@ -1188,7 +1189,7 @@ class WikiService:
         """
         page_id = source_page_id(source_id)
         page = self.catalog.get_wiki_page(page_id)
-        patch = self._read(page_id, page["current_revision"]) if page else None
+        patch = self._read(page_id, page["current_revision"]) if page and page["state"] != "conflict" else None
         if patch is None or not lacks_summary(patch):
             return []
         reads = _READS.set({})

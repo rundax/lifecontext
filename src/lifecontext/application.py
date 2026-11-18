@@ -623,7 +623,8 @@ class JournalApplication:
                     result["sources"].remove(target)
                     self.catalog.save_operation_result(operation["operation_id"], result)
                     continue
-                # Held while it runs: an import or retry of the source started meanwhile waits.
+                # Held while it runs: a retry started meanwhile returns the running state instead
+                # of a second run. An import with a new key (a new version too) still runs beside it.
                 with self.documents.hold(target["source_id"]):
                     revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
                     result["item_count"] += len(revisions)

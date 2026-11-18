@@ -130,6 +130,39 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(after.summary)
         self.assertEqual(len(projected), 2)
 
+    async def test_a_page_in_review_conflict_is_not_flagged_and_its_retry_asks_no_summary(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        compiler, asked = FakeCompiler({}), []
+
+        async def ask(query, **kwargs):
+            if "UNTRUSTED_DATA=" in query and not {"evidence", "pages"} & set(
+                    json.loads(query.split("UNTRUSTED_DATA=", 1)[1])):
+                asked.append(1)
+                raise ConnectionError("model unreachable")
+            return await compiler(query, **kwargs)
+
+        wiki = WikiService(self.catalog, self.custody, DerivedStore(self.paths), self.provider, self.paths, compiler=ask)
+
+        async def update(document):
+            await wiki.update_for_document(document["source_id"], document["source_version"])
+            return {"state": "completed"}
+
+        self.service.wiki_hook, self.service.wiki_summary_hook = update, wiki.summary_missing
+        self.service.wiki_summary_retry_hook = wiki.write_missing_summary
+        self.service.projection_hook = lambda document: {"state": "completed"}
+        sid = (await self.ingest())["document"]["source_id"]
+        self.assertTrue(wiki.summary_missing(sid))
+        # A hand edit of the vault note puts the page in review conflict; a commit is refused.
+        self.catalog._connection.execute("UPDATE wiki_pages SET state='conflict' WHERE page_id=?",
+                                         (source_page_id(sid),))
+        self.catalog._connection.commit()
+        self.assertFalse(wiki.summary_missing(sid))
+        summaries = len(asked)
+        await self.service.retry(sid)
+        self.assertEqual(await wiki.write_missing_summary(sid, 1), [])
+        self.assertEqual(len(asked), summaries)
+
     async def test_a_long_document_keeps_room_on_its_page_for_the_largest_summary(self):
         from wiki_fake_compiler import FakeCompiler
 
