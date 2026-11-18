@@ -160,6 +160,7 @@ class JournalApplication:
             self.catalog, self.custody, self.derived, self.hindsight,
             wiki_hook=self._update_document_wiki,
             wiki_summary_hook=self.wiki.summary_missing,
+            wiki_summary_retry_hook=self.wiki.write_missing_summary,
             projection_hook=lambda document: self.document_projections.project_document_with_wiki(document["source_id"], document["source_version"]),
             completion_hook=self._retire_superseded_document_versions,
             tesseract_path=shutil.which("tesseract"),

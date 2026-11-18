@@ -3490,13 +3490,15 @@ class LifeContextCatalog:
             if connection.execute("UPDATE wiki_pages SET title=? WHERE page_id=?", (title, page_id)).rowcount != 1:
                 raise CatalogConflict("wiki page identity conflict")
 
-    def get_wiki_revision(self, page_id: str, revision: int) -> dict[str, Any] | None:
+    def get_wiki_revision(self, page_id: str, revision: int, *, dependencies: bool = True) -> dict[str, Any] | None:
         _validate_identity(page_id, revision)
         self._ensure_open()
         row = self._connection.execute("SELECT * FROM wiki_revisions WHERE page_id=? AND revision=?", (page_id, revision)).fetchone()
         if row is None:
             return None
         result = dict(row)
+        if not dependencies:
+            return result
         result["dependencies"] = [dict(item) for item in self._connection.execute("SELECT source_id,source_version,extraction_revision,passage_start,passage_end,original_sha256 FROM wiki_dependencies WHERE page_id=? AND revision=? ORDER BY source_id,source_version,extraction_revision,passage_start", (page_id, revision))]
         return result
 

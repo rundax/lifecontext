@@ -60,6 +60,11 @@ MAX_TITLE_CHARACTERS = 120
 # per entry instead.
 MAX_SUMMARY_SENTENCES = 5
 MAX_SUMMARY_CHARACTERS = 300
+# A document's own page keeps room for what is added after its claims are fitted, so
+# neither can push it over MAX_PATCH_BYTES: the largest summary (5 sentences of 300
+# characters of at most 4 bytes, each citing up to 4 claim numbers) and 32 page links.
+SUMMARY_RESERVE_BYTES = MAX_SUMMARY_SENTENCES * (4 * MAX_SUMMARY_CHARACTERS + 64)
+OWN_PAGE_RESERVE_BYTES = SUMMARY_RESERVE_BYTES + 32 * (128 + 3)
 SUMMARY_LABEL = "> Model summary, generated from the numbered claims below; verify before relying on it."
 INDEX_SUMMARY_LABEL = ("> Lines marked \"Model summary\" are generated from the numbered claims on that document's "
                        "page; verify before relying on them.")
@@ -293,6 +298,12 @@ def parse_patches(raw: str) -> list[WikiPatch]:
         raise
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise WikiError("invalid wiki patch batch") from None
+
+
+def lacks_summary(patch: WikiPatch) -> bool:
+    """A page with claims, no summary, and room for the largest one: asking again can add it."""
+    return (bool(patch.claims) and not patch.summary
+            and len(_patch_json(patch).encode()) + SUMMARY_RESERVE_BYTES <= MAX_PATCH_BYTES)
 
 
 def parse_summary(raw: str, claim_count: int) -> tuple[SummarySentence, ...]:
@@ -760,6 +771,8 @@ class WikiService:
         self.store = WikiRevisionStore(paths)
         self._locator_cache: OrderedDict = OrderedDict()
         self._locator_lock = threading.Lock()
+        # (page_id, revision, artifact sha256) -> lacks_summary; a stored revision never changes.
+        self._summary_gaps: dict[tuple, bool] = {}
 
     def source_withdrawn(self, source_id: str, version: int | None = None) -> bool:
         """The document version (by default the current one) was forgotten or deleted:
@@ -1144,20 +1157,57 @@ class WikiService:
         return {"pages": pages, "semantic_support_verified": False, "summary_model_generated": True}
 
     def summary_missing(self, source_id: str) -> bool:
-        """The document's own page is published with claims but without its model summary.
+        """The document's own page is published with claims but without its model summary,
+        and has room for one (``lacks_summary``), so ``write_missing_summary`` can add it.
 
         The stored page is the record: a failed summary leaves none, and a retry that
-        writes one clears it. An unreadable page is not reported here; lint names it.
+        writes one clears it. Each stored revision is read once. An unreadable page is
+        not reported here; lint names it.
         """
         page = self.catalog.get_wiki_page(source_page_id(source_id))
         if not page or not page["current_revision"]:
             return False
         try:
-            row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"])
-            patch = self.store.read(page["page_id"], page["current_revision"], row["artifact_sha256"])
+            row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"], dependencies=False)
+            key = (page["page_id"], page["current_revision"], row["artifact_sha256"])
+            if key not in self._summary_gaps:
+                gap = lacks_summary(self.store.read(*key))
+                if len(self._summary_gaps) >= 4096:
+                    self._summary_gaps.pop(next(iter(self._summary_gaps)), None)
+                self._summary_gaps[key] = gap
+            return self._summary_gaps[key]
         except (ValueError, TypeError, KeyError, OSError):
             return False
-        return bool(patch.claims) and not patch.summary
+
+    async def write_missing_summary(self, source_id: str, version: int) -> list[dict]:
+        """Ask only for the summary a published page lacks, and publish its claims with it.
+
+        The claims, links and contradictions stay as they are, so no evidence window is
+        asked again. Nothing happens when the page has a summary or no room for one. A
+        failed request or a page that changed meanwhile raises and leaves the page as it is.
+        """
+        page_id = source_page_id(source_id)
+        page = self.catalog.get_wiki_page(page_id)
+        patch = self._read(page_id, page["current_revision"]) if page else None
+        if patch is None or not lacks_summary(patch):
+            return []
+        reads = _READS.set({})
+        try:
+            dependencies = self._validate(patch)
+            patch = replace(patch, expected_revision=page["current_revision"])
+            patch = await self._summarize(patch, source_id, version, self._evidence(source_id, version)["extraction_revision"])
+            with self.catalog.wiki_publication():
+                if not self._still_current(patch):
+                    raise WikiError("stale wiki claim")
+                results = [self._commit(patch, self.store.write(patch), dependencies)]
+        finally:
+            _READS.reset(reads)
+        try:
+            results.extend(self._publish_index())
+        except Exception as exc:  # noqa: BLE001 -- the index is a convenience; the page is done
+            reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
+            logging.getLogger(__name__).warning("Wiki index not updated: %s", reason)
+        return results
 
     def lint(self, documents: Iterable[Mapping[str, Any]], *, documents_omitted: int = 0) -> dict:
         """Model-free health report over the catalog and stored revisions; never writes.
@@ -1490,12 +1540,12 @@ class WikiService:
                 continue
         return source_id
 
-    def _fit(self, patch: WikiPatch, source_id: str, limit: int) -> WikiPatch:
+    def _fit(self, patch: WikiPatch, source_id: str, limit: int, reserve: int = 0) -> WikiPatch:
         """Bring a page within its bounds, then validate its shape once.
 
         At most ``limit`` claims cite the source, at most 128 claims and 32 links in
-        all; above 128 claims or MAX_PATCH_BYTES, the source's last claims go first,
-        so other documents keep theirs. Contradictions always stay visible.
+        all; above 128 claims or MAX_PATCH_BYTES less ``reserve``, the source's last
+        claims go first, so other documents keep theirs. Contradictions always stay visible.
         """
         kept, count = [], 0
         for claim in patch.claims:
@@ -1515,7 +1565,7 @@ class WikiService:
             # A summary names claims by number; it goes when any claim does.
             summary = patch.summary if len(kept) == len(patch.claims) else ()
             raw = _patch_json(replace(patch, claims=tuple(kept), contradictions=tuple(contradictions), summary=summary))
-            if len(raw.encode()) <= MAX_PATCH_BYTES:
+            if len(raw.encode()) <= MAX_PATCH_BYTES - reserve:
                 return WikiPatch.parse(raw)
             if len(kept) > 1:
                 own = [i for i, claim in enumerate(kept) if _cites(claim, source_id)]
@@ -1994,8 +2044,12 @@ class WikiService:
                     # kept only if no window yields anything else.
                     fallback = fallback or patch
                     continue
-                combined = patch if merged is None else self._combine(merged, patch)
-                if len(_patch_json(combined).encode()) > MAX_PATCH_BYTES:
+                if merged is None:
+                    merged = patch
+                    continue
+                combined = self._combine(merged, patch)
+                # Room stays for the summary and links added later (OWN_PAGE_RESERVE_BYTES).
+                if len(_patch_json(combined).encode()) > MAX_PATCH_BYTES - OWN_PAGE_RESERVE_BYTES:
                     # Claims fill the page: keep what fits and stop asking the model.
                     logging.getLogger(__name__).warning("Wiki page %s full after evidence window %s", own_id, window_count)
                     break
@@ -2003,7 +2057,8 @@ class WikiService:
             merged = merged or fallback
             if merged is None:
                 raise WikiError("wiki has no evidence windows")
-            patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id, MAX_SOURCE_CLAIMS)
+            patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id,
+                              MAX_SOURCE_CLAIMS, OWN_PAGE_RESERVE_BYTES)
             self._validate(patch)
             patch = await self._with_summary(patch, source_id, version, extraction_revision)
             routes = await self._route(patch, source_id, version, extraction_revision)

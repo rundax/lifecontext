@@ -90,11 +90,14 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
             await wiki.update_for_document(document["source_id"], document["source_version"])
             return {"state": "completed"}
 
+        projected = []
         self.service.wiki_hook, self.service.wiki_summary_hook = update, wiki.summary_missing
-        self.service.projection_hook = lambda document: {"state": "completed"}
+        self.service.wiki_summary_retry_hook = wiki.write_missing_summary
+        self.service.projection_hook = lambda document: projected.append(1) or {"state": "completed"}
         result = await self.ingest()
         document = result["document"]
         sid = document["source_id"]
+        windows, summaries = len(compiler.queries["window"]), len(compiler.queries["summary"])
         # The wiki stage completed; only the summary is missing.
         self.assertEqual(document["stages"]["wiki"]["state"], "completed")
         self.assertEqual(document["outcome"], "completed_with_errors")
@@ -109,11 +112,111 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         await self.service.retry(sid)
         self.assertEqual(self.service.show(sid)["outcome"], "completed_with_errors")
         down[0] = False
+        page = self.catalog.get_wiki_page(source_page_id(sid))
         retried = await self.service.retry(sid)
         document = retried["document"]
         self.assertEqual(document["outcome"], "completed")
         self.assertEqual(document["problems"], [])
         self.assertFalse(wiki.summary_missing(sid))
+        # Each retry asked only for the summary, never the evidence windows again; the
+        # same claims came back with it, and the vault note followed the new revision.
+        self.assertEqual(len(compiler.queries["window"]), windows)
+        self.assertEqual(len(compiler.queries["summary"]), summaries + 1)
+        new = self.catalog.get_wiki_page(source_page_id(sid))
+        self.assertEqual(new["current_revision"], page["current_revision"] + 1)
+        before, after = (wiki.store.read(row["page_id"], row["current_revision"], self.catalog.get_wiki_revision(
+            row["page_id"], row["current_revision"])["artifact_sha256"]) for row in (page, new))
+        self.assertEqual((after.claims, after.links), (before.claims, before.links))
+        self.assertTrue(after.summary)
+        self.assertEqual(len(projected), 2)
+
+    async def test_a_long_document_keeps_room_on_its_page_for_the_largest_summary(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        from lifecontext.wiki import MAX_PATCH_BYTES, _patch_json
+
+        compiler = FakeCompiler({})
+
+        async def ask(query, **kwargs):
+            data = json.loads(query.split("UNTRUSTED_DATA=", 1)[1]) if "UNTRUSTED_DATA=" in query else {}
+            if data and not {"evidence", "pages"} & set(data):
+                # The largest summary the checks accept: 5 sentences of 300 four-byte characters.
+                count = len(data["claims"])
+                sentence = {"text": "\U0001F600" * 300, "claims": list(range(max(1, count - 3), count + 1))}
+                return {"text": json.dumps({"summary": [sentence] * 5})}
+            return await compiler(query, **kwargs)
+
+        derived = DerivedStore(self.paths)
+        wiki = WikiService(self.catalog, self.custody, derived, self.provider, self.paths, compiler=ask)
+        service = DocumentService(self.catalog, self.custody, derived, self.provider)
+
+        async def update(document):
+            await wiki.update_for_document(document["source_id"], document["source_version"])
+            return {"state": "completed"}
+
+        service.wiki_hook, service.wiki_summary_hook = update, wiki.summary_missing
+        # Long passages whose claims filled the page to within a summary of 48 KB before.
+        text = "\n\n".join(f"Paragraph {i} says " + "x" * 1100 + "." for i in range(60))
+        result = await service.import_document(text.encode(), "long.txt", "text/plain", {}, "long")
+        self.assertEqual(result["document"]["outcome"], "completed", result["document"]["problems"])
+        page = self.catalog.get_wiki_page(source_page_id(result["document"]["source_id"]))
+        stored = wiki.store.read(page["page_id"], page["current_revision"], self.catalog.get_wiki_revision(
+            page["page_id"], page["current_revision"])["artifact_sha256"])
+        self.assertEqual(len(stored.summary), 5)
+        self.assertLessEqual(len(_patch_json(stored).encode()), MAX_PATCH_BYTES)
+        self.assertGreater(len(stored.claims), 7)  # more than one window's claims
+
+    def test_the_largest_summary_fits_its_reserve_and_a_full_page_is_not_flagged(self):
+        from dataclasses import replace
+
+        from lifecontext.wiki import (
+            MAX_PATCH_BYTES, SUMMARY_RESERVE_BYTES, Citation, Claim, SummarySentence, WikiPatch,
+            _patch_json, lacks_summary)
+
+        claims = tuple(Claim(f"claim {n}", (Citation("doc_a", 1, 1, n, n + 1, "a" * 64, f"claim {n}"),))
+                       for n in range(128))
+        page = WikiPatch("source_doc_a", "A", 1, claims, (), ())
+        largest = tuple(SummarySentence("\U0001F600" * 300, (125, 126, 127, 128)) for _ in range(5))
+        grown = len(_patch_json(replace(page, summary=largest)).encode()) - len(_patch_json(page).encode())
+        self.assertLessEqual(grown, SUMMARY_RESERVE_BYTES)
+        self.assertTrue(lacks_summary(page))
+        self.assertFalse(lacks_summary(replace(page, summary=largest)))
+        # Too full to take a summary: a retry could not add one, so it is not reported.
+        long = Claim("x" * 2000, (Citation("doc_a", 1, 1, 0, 1, "a" * 64, "y" * 2000),))
+        full = replace(page, claims=(long,) * 11)
+        self.assertGreater(len(_patch_json(full).encode()) + SUMMARY_RESERVE_BYTES, MAX_PATCH_BYTES)
+        self.assertLessEqual(len(_patch_json(full).encode()), MAX_PATCH_BYTES)
+        self.assertFalse(lacks_summary(full))
+
+    async def test_the_summary_check_reads_each_page_revision_once(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        from lifecontext import wiki as wiki_module
+
+        wiki = WikiService(self.catalog, self.custody, DerivedStore(self.paths), self.provider, self.paths,
+                           compiler=FakeCompiler({}))
+
+        async def update(document):
+            await wiki.update_for_document(document["source_id"], document["source_version"])
+            return {"state": "completed"}
+
+        self.service.wiki_hook, self.service.wiki_summary_hook = update, wiki.summary_missing
+        self.service.projection_hook = lambda document: {"state": "completed"}
+        checks, check = [], wiki_module.lacks_summary
+        with patch.object(wiki_module, "lacks_summary", side_effect=lambda page: checks.append(page) or check(page)):
+            result = await self.ingest()
+            self.assertEqual(result["document"]["outcome"], "completed")
+            # One import response looked at its page once.
+            self.assertEqual(len(checks), 1)
+            sid = result["document"]["source_id"]
+            for _ in range(3):
+                self.service.show(sid)
+                self.service.list()
+            self.assertEqual(len(checks), 1)
+            # A new revision is a new page to look at.
+            await wiki.update_for_document(sid, 1)
+            self.service.show(sid)
+            self.assertEqual(len(checks), 2)
 
     async def test_a_projected_page_names_its_vault_path(self):
         result = await self.ingest()

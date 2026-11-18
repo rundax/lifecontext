@@ -139,6 +139,7 @@ class DocumentService:
         extractor=extract_document,
         wiki_hook=None,
         wiki_summary_hook=None,
+        wiki_summary_retry_hook=None,
         projection_hook=None,
         completion_hook=None,
         tesseract_path=None,
@@ -164,6 +165,8 @@ class DocumentService:
         self.wiki_hook, self.projection_hook = wiki_hook, projection_hook
         # source_id -> True when the document's wiki page was published without its summary.
         self.wiki_summary_hook = wiki_summary_hook
+        # (source_id, version) -> revisions written: asks only for that summary, on the same page.
+        self.wiki_summary_retry_hook = wiki_summary_retry_hook
         self.completion_hook = completion_hook
         self.tesseract_path = tesseract_path
         self.max_chunk_bytes = max_chunk_bytes
@@ -695,18 +698,23 @@ class DocumentService:
             if not self._is_current(sid, version):
                 hooks = ()
             for stage, hook in hooks:
-                if (
-                    hook is None
-                    or (stage == "wiki" and indexing_failed)
-                    # The vault note and page follow every wiki run, even after an
-                    # earlier projection completed without them.
-                    or (
-                        self.catalog.get_document_stage(sid, version, stage)["state"]
-                        == "completed"
-                        and not (stage == "projection" and wiki_ran)
-                        and not (stage == "wiki" and self._summary_missing(sid, version))
-                    )
-                ):
+                if hook is None or (stage == "wiki" and indexing_failed):
+                    continue
+                # The vault note and page follow every wiki run, even after an
+                # earlier projection completed without them.
+                if (self.catalog.get_document_stage(sid, version, stage)["state"] == "completed"
+                        and not (stage == "projection" and wiki_ran)):
+                    if (stage == "wiki" and self.wiki_summary_retry_hook is not None
+                            and self._summary_missing(sid, version)):
+                        # Only the summary is missing: ask for it alone, not the whole page.
+                        self._active(sid, version)
+                        try:
+                            written = self.wiki_summary_retry_hook(sid, version)
+                            if inspect.isawaitable(written):
+                                written = await written
+                            wiki_ran = bool(written)
+                        except Exception:  # noqa: BLE001 -- the page stays as it was; problems names the gap
+                            pass
                     continue
                 wiki_ran = wiki_ran or stage == "wiki"
                 self._active(sid, version)
@@ -1063,8 +1071,10 @@ class DocumentService:
         page = self.catalog.get_wiki_page(page_id)
         receipts = [row for row in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id)
                     if row["state"] == "projected"]
-        summary_missing = self._summary_missing(source_id, source_version)
         awaited, in_flight = self._awaited(source_id, source_version), self.in_flight(source_id)
+        # As _summary_missing, from the stages and current version already read.
+        summary_missing = ("wiki" in awaited and stages["wiki"]["state"] == "completed"
+                           and self.wiki_summary_hook is not None and bool(self.wiki_summary_hook(source_id)))
         outcome = document_outcome(stages, last["state"] if last else None, awaited, summary_missing, in_flight)
         # A wiki or vault stage that nothing runs once the import finished waits for a retry.
         stalled = () if in_flight or outcome != "completed_with_errors" else [
