@@ -407,21 +407,25 @@ An operation can be `completed` while the document's wiki page or vault note did
 not come out. The document and operation responses therefore carry an `outcome`
 beside the unchanged catalog `state`: `completed` (every stage is done),
 `completed_with_errors` (the import finished but the wiki or vault stage failed),
-`running` (a configured wiki or vault stage has not finished yet), or the
+`running` (the service is still running a configured wiki or vault stage), or the
 operation's own state (`pending`, `retryable_failed`, `permanent_failed`,
-`cancelled`). A document also lists `problems` (each with `stage`, `code`,
-`reason` and the `next_step` to run), its `last_operation_id`, and, once the page's
-note is in the vault, `wiki_page_id` and `vault_path` (from the vault root, for
-example `Journal/wiki/Lease.md`). `lifecontext operations get OPERATION_ID --json`
+`cancelled`). A wiki or vault stage that is pending or running with nothing
+running it, for example a vault note a category rename, merge or reassignment
+put back to pending, makes the outcome `completed_with_errors`; it is listed in
+`problems` with its state (`pending` or `running`) as the `code` and
+`lifecontext documents retry SOURCE_ID` as the `next_step`. A document also lists
+`problems` (each with `stage`, `code`, `reason` and the `next_step` to run), its
+`last_operation_id`, and, once the page's note is in the vault, `wiki_page_id` and
+`vault_path` (from the vault root, starting with the configured Journal folder,
+for example `Journal/wiki/Lease.md`). `lifecontext operations get OPERATION_ID --json`
 and `GET /v1/operations` show the same `outcome` for document imports and retries;
 `GET /v1/operations?state=retryable_failed` or `?outcome=completed_with_errors`
 (among the newest 1000 operations) finds what a retry can pick up;
 `lifecontext operations list` asks the same (`--state STATE`, `--outcome OUTCOME`,
 `--limit N` up to 1000, default 100) and prints a table of operation ID, kind,
 state, outcome, source ID and last update, or the API's answer unchanged with
-`--json`. `lifecontext
-doctor` counts a failed import only until a later import, retry or rebuild
-completes for the same document at the same or a newer version.
+`--json`. `lifecontext doctor` counts a failed import, retry or rebuild until a
+later one completes for each of its documents at the same or a newer version.
 
 `documents import` and `documents retry` exit with status 4 when the answer's
 `outcome` is not `completed` (`completed_with_errors`, `running`, or a failed
@@ -442,12 +446,16 @@ its own limit.
 operation ID of any of the document's operations works too. It runs again every
 stage of the current version that is not completed: indexing, then the wiki page
 and the vault note, so an indexing failure that is fixed also puts the page in the
-vault. A completed stage is not repeated, and a version a newer one replaced does
-not rebuild its page. If the last extraction could not read the file, the retry
-reads it again; `--rerun-extraction` (with `--vision` or `--no-vision`) does it
-on demand. A retry of a document that is still being processed by the running
-service does not start a second run: it returns the operation's current state.
-A deleted document is not found, and a forgotten one is not retried.
+vault. A completed stage is not repeated, and no retry, by source ID or by any of
+its operation IDs, rebuilds the page or vault note of a version a newer one
+replaced. If the last extraction could not read the file, the retry reads it
+again; `--rerun-extraction` (with `--vision` or `--no-vision`) does it on demand.
+A retry of a document that is still being processed by the running service does
+not start a second run: it returns the operation's current state. A reindex of
+such a document is refused with `conflict`; send the same request with the same
+key once it finishes. `wiki rebuild` refuses it with `conflict`; rebuild again
+with a new key. A deleted document is not found, and a forgotten one is not
+retried.
 
 Idempotency: without `--idempotency-key`, each retry is a new attempt, so a
 failed wiki stage can be retried as often as needed, and the key a repeated

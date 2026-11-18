@@ -12,7 +12,23 @@
   time. `doctor` stops counting a failed import once a later import, retry or
   rebuild of the same document completed. The API's upload cap follows
   `limits.max_file_bytes` (never above 32 MiB) and `/v1/status` reports it.
-  Recall citations carry the document's title and file name.
+  Recall citations carry the document's title and file name. While a document is
+  being imported or retried, a reindex or `wiki rebuild` of it is refused with
+  `conflict` instead of running beside it.
+- **The terminal shows what happened to an import.** `documents import` and
+  `documents retry` exit with status 4 when the outcome is not `completed`
+  (the `--json` output is unchanged), list each failed stage and end with a
+  `Next:` line, usually `lifecontext documents retry SOURCE_ID`. `documents
+  show` and the import result show the stages, the wiki page and its vault
+  path. `lifecontext operations list` (`--state`, `--outcome`, `--limit`) finds
+  failed or incomplete operations again. Before uploading, `documents import`
+  refuses a file with an extension the extraction cannot read
+  (`unsupported_format`, with the list of formats) or above the service's file
+  limit (`body_too_large`, naming the limit). `recall` prints each hit with its
+  document's title. A page whose model summary failed is listed in `problems`
+  as `wiki_summary_missing`, and a retry writes the summary. Plain `status`
+  shows a refused vault path and how many journal entries wait for indexing,
+  and a refused write names the path.
 - **A wiki page worth opening.** A long document now gets several claims
   instead of one or two: each evidence window may yield up to 8, in proportion
   to its size, and every claim's quote is checked on its own, so one bad quote

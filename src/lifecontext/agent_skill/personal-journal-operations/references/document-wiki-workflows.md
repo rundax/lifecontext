@@ -152,7 +152,11 @@ note, so one command also covers a wiki-only or projection failure. The same
 applies when the vision endpoint was unreachable (extraction `failed` with
 `provider_unavailable`): a plain retry resumes the same revision and asks the
 model only about pages it has not read yet. A retry that finds the document still
-being processed returns the running operation instead of starting another run.
+being processed returns the running operation instead of starting another run;
+a reindex or `wiki rebuild` of it fails with `conflict` (reindex: same key once it
+finishes; rebuild: a new key). A pending or running stage that nothing is running
+shows as `completed_with_errors` with the stage state as its problem `code`: retry
+by source ID. No retry rebuilds the page of a version a newer one replaced.
 `wiki_evidence_limit` and `wiki_no_evidence` fail the same way every time, so do
 not retry them. Give each deliberate retry its own `--idempotency-key`; the same
 key replays the retry it started instead of running it again. After an
