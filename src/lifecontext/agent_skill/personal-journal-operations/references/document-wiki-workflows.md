@@ -126,22 +126,30 @@ After the owner has fixed an extraction problem and asks for it, request a new
 extraction revision:
 
 ```bash
-"$CLI" documents retry OPERATION_ID --rerun-extraction \
-  --idempotency-key unique-extraction-retry-key --json
+"$CLI" documents retry SOURCE_ID --rerun-extraction \
+  --idempotency-key extraction-retry-ATTEMPT-NUMBER --json
 ```
 
-For transient indexing failures in an incomplete, recoverable operation, retry
-WITHOUT `--rerun-extraction`, with its own stable mutation key. The same applies
-when the vision endpoint was unreachable (extraction `failed` with
+The key is binding: repeating the same key and request replays the retry it
+started; the same key with another request is a conflict. Use a new key for each
+deliberate attempt (the number above), and leave `--idempotency-key` out when no
+replay is needed.
+
+For a document whose `outcome` is not `completed` (`completed_with_errors`,
+`retryable_failed`), retry by source ID WITHOUT `--rerun-extraction`; `problems`
+names the stage and its `next_step`. The retry runs again every stage of the
+current version that is not completed: indexing, then the wiki page and the vault
+note, so one command also covers a wiki-only or projection failure. The same
+applies when the vision endpoint was unreachable (extraction `failed` with
 `provider_unavailable`): a plain retry resumes the same revision and asks the
-model only about pages it has not read yet. Inspect the
-operation first: it may be `completed` despite wiki/projection failure, and
-retry then does nothing. Use reconciliation for projection-only failures;
-use standalone rebuild below for wiki-only failures. After an
+model only about pages it has not read yet. A retry that finds the document still
+being processed returns the running operation instead of starting another run.
+`wiki_evidence_limit` and `wiki_no_evidence` fail the same way every time, so do
+not retry them. Give each deliberate retry its own `--idempotency-key`; the same
+key replays the retry it started instead of running it again. After an
 uncertain import outcome, replay the identical keyed import or inspect its
-known operation before another mutation. Do not repeat an extraction rerun
-blindly: the retry endpoint allocates a new extraction revision and does not
-consume the CLI idempotency header. First inspect the existing document/operation.
+known operation before another mutation. First inspect the existing
+document/operation (`operations get`, `outcome`, `problems`).
 A timed-out synchronous retain may still run remotely; matching provider
 memory counts can be partial. Report uncertainty rather than certifying full
 indexing while that retain is still processing. Allow one identical-key retry for a
@@ -195,8 +203,9 @@ returns the saved status without another LLM call; it is not a retry. For a
 transient provider failure, diagnose the cause and use a new rebuild key once.
 If publication succeeded but projection failed, reconcile first rather than
 republishing. An operation stuck `running` after a crash needs inspection;
-replay does not force it to run again. Document retry of a completed operation
-is also a no-op; use standalone rebuild for wiki-only failures.
+replay does not force it to run again. Document retry by source ID also covers a
+wiki-only failure of a completed import; standalone rebuild remains the way to
+refresh a page that did not fail.
 
 Use `"$CLI" reconcile --json` to repair local projections from existing
 revisions; this does not generate new wiki content. After forgetting or

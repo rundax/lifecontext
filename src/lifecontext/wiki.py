@@ -82,6 +82,10 @@ USER_START = "<!-- life-context:user:start -->"
 USER_END = "<!-- life-context:user:end -->"
 
 
+class WikiProviderError(Exception):
+    """The model or compiler call itself failed; nothing was wrong with the document."""
+
+
 class WikiError(ValueError):
     """Redacted retryable wiki failure."""
 
@@ -1247,7 +1251,7 @@ class WikiService:
                 failed = stage["state"] in {"failed", "blocked", "conflict"}
                 detail = f"{name}: {stage['state']}" + (f" ({stage['error_code']})" if stage.get("error_code") else "")
                 add("stage_failed" if failed else "stage_pending", "error" if failed else "warning",
-                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry OPERATION_ID --json",
+                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry {source_id} --json",
                     source_id=source_id, detail=detail)
                 reported = name
                 break
@@ -1375,7 +1379,10 @@ class WikiService:
         for attempt in range(2 if self.compiler is not None else 1):
             if len(query.encode()) > MAX_QUERY_BYTES:
                 raise WikiError("wiki query size limit")
-            response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            try:
+                response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            except Exception as exc:  # any model failure is a provider failure
+                raise WikiProviderError(type(exc).__name__) from exc
             try:
                 return parse(response.get("text"))
             except WikiError as exc:
@@ -1917,7 +1924,7 @@ class WikiService:
         _integer(version)
         old = self.catalog.get_document_stage(source_id, version, "wiki")
         if old and old["state"] == "running":
-            self._stage(source_id, version, "failed", "reflect_failed")
+            self._stage(source_id, version, "failed", "wiki_interrupted")
         if old and old["state"] == "completed":
             self._stage(source_id, version, "pending")
         self._stage(source_id, version, "running")
@@ -1979,16 +1986,22 @@ class WikiService:
                 merged = combined
             merged = merged or fallback
             if merged is None:
-                raise WikiError("wiki evidence window limit")
+                raise WikiError("wiki has no evidence windows")
             patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id, MAX_SOURCE_CLAIMS)
             self._validate(patch)
             patch = await self._with_summary(patch, source_id, version, extraction_revision)
             routes = await self._route(patch, source_id, version, extraction_revision)
             results = self._publish(patch, routes, source_id, version, own_links)
         except Exception as exc:  # noqa: BLE001 -- provider failures must leave retryable stage
-            reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
+            reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
             logging.getLogger(__name__).warning("Wiki update rejected at evidence window %s: %s", window_count, reason)
-            self._stage(source_id, version, "failed", "reflect_failed")
+            # The reason is kept in the stage's error code, so documents show and doctor can name it.
+            # Only the model call maps to the provider code; a bug or a conflict keeps the generic one.
+            code = ("wiki_provider_failed" if isinstance(exc, WikiProviderError)
+                    else {"wiki evidence window limit": "wiki_evidence_limit",
+                          "wiki has no evidence windows": "wiki_no_evidence"}.get(reason, "wiki_update_rejected")
+                    if isinstance(exc, WikiError) else "internal_error")
+            self._stage(source_id, version, "failed", code)
             raise WikiError("wiki update failed; retry available") from None
         finally:
             _READS.reset(reads)

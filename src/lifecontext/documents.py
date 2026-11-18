@@ -25,10 +25,81 @@ from lifecontext.extraction import (
     extract_document,
 )
 from lifecontext.hindsight_adapter import source_scope_tag
+from lifecontext.vault import default_journal_paths
 from lifecontext.vision import VisionUnavailable
+from lifecontext.wiki import source_page_id
 
 # Written into every extraction a document opted out of; any later rerun path reads it.
 VISION_OPT_OUT = "vision_opted_out; this document is never sent to a vision model"
+
+_PROBLEM_STATES = {"failed", "blocked", "conflict"}
+# Vault receipts are relative to the Journal folder; responses give the path from the vault root.
+_JOURNAL_FOLDER = default_journal_paths("")[1].name
+_NOT_LOOKED_UP = object()
+_FORMATS = "PDF, DOCX, XLSX, PPTX, TXT, Markdown, PNG, JPEG or TIFF"
+# What a person can do about an extraction that could not read the file.
+_EXTRACTION_STEPS = {
+    "unsupported_format": f"This file type is not supported; save it as {_FORMATS} and import it again.",
+    "macro_enabled_office": f"Macro-enabled Office files are not supported; save it as {_FORMATS} and import it again.",
+    "encrypted_or_legacy_office": "The file is password-protected or in an old Office format; remove the password or save it as DOCX, XLSX or PPTX and import it again.",
+    "encrypted_pdf": "The PDF is password-protected; save an unlocked copy and import it again.",
+    "encrypted_zip": "The archive is password-protected; import an unlocked copy.",
+    "no_extractable_text": "No text could be read; install tesseract for OCR or turn on vision, then run: lifecontext documents retry {source_id} --rerun-extraction",
+    "ocr_backend_not_configured": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
+    "ocr_executable_unavailable": "OCR is not available; install tesseract, then run: lifecontext documents retry {source_id} --rerun-extraction",
+}
+# What a person can do about a wiki stage that failed, by the reason it stored.
+_WIKI_STEPS = {
+    "wiki_provider_failed": "The model did not answer; check it with: lifecontext doctor, then run: lifecontext documents retry {source_id}",
+    # A retry would fail the same way, so these two suggest none.
+    "wiki_evidence_limit": "One passage is too large for a single model request and a retry does not change that; import a version with shorter passages.",
+    "wiki_no_evidence": "The document has no readable text to summarise and a retry does not change that; check the extraction with: lifecontext documents show {source_id}",
+    "wiki_update_rejected": "The page failed its checks; run: lifecontext documents retry {source_id}",
+    "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
+}
+
+
+def document_outcome(stages, operation_state=None, awaited=()):
+    """What an import came to, from its stage states; catalog states never change for it.
+
+    A finished operation whose wiki page or vault note failed is ``completed_with_errors``.
+    One whose configured wiki or vault stage is still pending or running is ``running``,
+    not ``completed``. ``awaited`` names the stages that have a hook to wait for. The
+    values are the catalog operation states plus ``completed_with_errors``.
+    """
+    if operation_state not in (None, "completed"):
+        return operation_state
+    core = [stages[name]["state"] for name in ("extraction", "indexing")]
+    if any(state in _PROBLEM_STATES for state in core):
+        return "retryable_failed"
+    if any(state != "completed" for state in core):
+        return "running"
+    if any(stages[name]["state"] in _PROBLEM_STATES for name in ("wiki", "projection")):
+        return "completed_with_errors"
+    if any(stages[name]["state"] in {"pending", "running"} for name in awaited):
+        return "running"
+    return "completed"
+
+
+def document_problems(source_id, stages, extractions):
+    """One entry per failed, blocked or conflicting stage, with what to run next."""
+    problems = []
+    retry = f"Run: lifecontext documents retry {source_id}"
+    for name in ("extraction", "indexing", "wiki", "projection"):
+        stage = stages[name]
+        if stage["state"] not in _PROBLEM_STATES:
+            continue
+        code = stage["error_code"] or stage["state"]
+        reason = code
+        if name == "extraction" and extractions and extractions[-1].get("reason"):
+            reason = extractions[-1]["reason"]
+        steps = {"extraction": _EXTRACTION_STEPS, "wiki": _WIKI_STEPS}.get(name, {})
+        next_step = steps.get(reason, retry)
+        if stage["state"] == "conflict":
+            next_step = "The vault copy was edited; resolve the conflict, then " + retry[0].lower() + retry[1:]
+        problems.append({"stage": name, "code": code, "reason": reason,
+                         "next_step": next_step.format(source_id=source_id)})
+    return problems
 
 
 def _digest(value: Any) -> str:
@@ -85,6 +156,10 @@ class DocumentService:
         self._coverage_cache: dict[str, dict] = {}
         # Reports read coverage off the event loop; the cache is shared.
         self._coverage_lock = threading.Lock()
+        # Operation IDs and source IDs this process is running right now, with counts. A
+        # retry that finds its operation or source here reports the current state instead of
+        # starting a second run; after a crash the set is empty and startup recovery resumes.
+        self._inflight: dict[str, int] = {}
 
     async def import_document(
         self,
@@ -199,7 +274,7 @@ class DocumentService:
             operation = self.catalog.set_operation_intent(
                 operation["operation_id"], self._envelope(intent)
             )
-        if operation["state"] in {"completed", "permanent_failed", "cancelled"}:
+        if operation["state"] in {"completed", "permanent_failed", "cancelled"} or self._running(operation):
             return self._response(operation)
         return await self._run(operation, original_bytes=original_bytes)
 
@@ -221,28 +296,69 @@ class DocumentService:
             "document_retry",
         }:
             raise CatalogError("document operation unavailable")
-        if operation["state"] in {"completed", "permanent_failed", "cancelled"}:
+        if operation["state"] in {"completed", "permanent_failed", "cancelled"} or self._running(operation, by_source=True):
             return self._response(operation)
         return await self._run(operation)
 
-    async def retry(self, operation_id, rerun_extraction=False, vision=None):
-        operation = self.catalog.get_operation(operation_id)
+    def _running(self, operation, *, by_source=False):
+        """This process is already running the operation, or (by_source) any operation on its source."""
+        intent = operation["result"].get("recovery_intent") or {}
+        keys = [operation["operation_id"]] + ([intent["source_id"]] if by_source and "source_id" in intent else [])
+        return any(key in self._inflight for key in keys)
+
+    def _retry_target(self, target):
+        """An operation ID, or a source ID whose current version's latest operation is used."""
+        if not isinstance(target, str):
+            raise CatalogError("document operation unavailable")
+        if re.fullmatch(r"op_[0-9a-f]{32}", target):
+            operation = self.catalog.get_operation(target)
+            if operation is not None:
+                return operation, False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", target):
+            raise CatalogError("document operation unavailable")
+        current = self.catalog.get_current_manifest(target)
+        if current is None:
+            raise CatalogError("document operation unavailable")
+        # A forgotten or deleted document is not retried by its source ID.
+        self._active(target, current.source_version)
+        if self.catalog.list_tombstones(target):
+            raise CatalogConflict("document evidence unavailable")
+        return self.catalog.latest_document_operation(target, current.source_version), True
+
+    async def retry(self, operation_id, rerun_extraction=False, vision=None, idempotency_key=None):
         if (
-            not operation
-            or operation["operation_kind"] not in {"document_import", "document_retry"}
-            or not isinstance(rerun_extraction, bool)
+            not isinstance(rerun_extraction, bool)
             or (vision is not None and not isinstance(vision, bool))
             or (vision is not None and not rerun_extraction)
         ):
             raise CatalogError("document operation unavailable")
-        if not rerun_extraction:
-            return await self.recover(operation)
+        operation, by_source = self._retry_target(operation_id)
+        if (
+            not operation
+            or operation["operation_kind"] not in {"document_import", "document_retry"}
+        ):
+            raise CatalogError("document operation unavailable")
+        request_digest = _digest({"retry": operation_id, "rerun_extraction": rerun_extraction, "vision": vision})
+        if idempotency_key is not None:
+            # The same key and request replays (or resumes) the retry it started.
+            prior = self.catalog.lookup_operation(idempotency_key, request_digest, "document_retry")
+            if prior is not None:
+                return await self.recover(prior)
         old = operation["result"].get("recovery_intent")
         if not old:
             raise CatalogError("document intent unavailable")
+        if self._running(operation, by_source=True):
+            return self._response(operation)
         sid, version = old["source_id"], old["source_version"]
-        self._active(sid, version)
         extractions = self.catalog.list_extractions(sid, version)
+        if by_source and not rerun_extraction and extractions and extractions[-1]["status"] != "completed":
+            # A recorded extraction that could not read the file is only retried by reading it again.
+            rerun_extraction = True
+        if not rerun_extraction:
+            if operation["state"] == "completed" and self._unfinished_stages(sid, version):
+                return await self._rerun_stages(old, extractions, idempotency_key, request_digest)
+            return await self.recover(operation)
+        self._active(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
         intent = {
             k: old[k] for k in ("source_id", "source_version", "sha256", "size_bytes")
@@ -260,15 +376,46 @@ class DocumentService:
         # The choice is part of the key, so --no-vision can follow a rerun that is
         # stuck on a vision outage instead of conflicting with it.
         choice = "" if vision is None else (":vision" if vision else ":no-vision")
-        retry = self.catalog.begin_operation(
-            f"document-rerun:{sid}:{version}:{revision}{choice}", digest, "document_retry"
-        )
+        if idempotency_key is not None:
+            retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
+        else:
+            retry = self.catalog.begin_operation(
+                f"document-rerun:{sid}:{version}:{revision}{choice}", digest, "document_retry"
+            )
         if not retry["result"]:
             retry = self.catalog.set_operation_intent(
                 retry["operation_id"], self._envelope(intent)
             )
         elif retry["result"].get("recovery_intent") != intent:
             raise CatalogConflict("document retry identity conflict")
+        return await self._run(retry)
+
+    def _unfinished_stages(self, sid, version):
+        """Stages a retry runs again: indexing, and for the current version the wiki and vault stages that have a hook."""
+        names = ["indexing", *self._awaited(sid, version)]
+        return [name for name in names
+                if self.catalog.get_document_stage(sid, version, name)["state"] != "completed"]
+
+    async def _rerun_stages(self, old, extractions, idempotency_key, request_digest):
+        """A finished import whose wiki or vault stage did not complete runs those stages again."""
+        sid, version = old["source_id"], old["source_version"]
+        self._active(sid, version)
+        if not extractions:
+            raise CatalogError("document intent unavailable")
+        intent = {k: old[k] for k in ("source_id", "source_version", "sha256", "size_bytes")}
+        intent.update(kind="document_retry", extraction_revision=extractions[-1]["extraction_revision"])
+        intent["request_digest"] = _digest(intent)
+        if idempotency_key is not None:
+            retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
+        else:
+            # Each plain retry is a new attempt; a finished one is never replayed instead.
+            retry = self.catalog.begin_operation(
+                f"document-stages:{sid}:{version}:{uuid.uuid4().hex}", intent["request_digest"], "document_retry"
+            )
+        if not retry["result"]:
+            retry = self.catalog.set_operation_intent(retry["operation_id"], self._envelope(intent))
+        if retry["state"] in {"completed", "permanent_failed", "cancelled"}:
+            return self._response(retry)
         return await self._run(retry)
 
     def _active(self, sid, version):
@@ -329,6 +476,18 @@ class DocumentService:
         intent = operation["result"].get("recovery_intent")
         if not intent:
             raise CatalogError("document intent unavailable")
+        keys = (operation["operation_id"], intent["source_id"])
+        for key in keys:
+            self._inflight[key] = self._inflight.get(key, 0) + 1
+        try:
+            return await self._run_stages(operation, intent, original_bytes)
+        finally:
+            for key in keys:
+                self._inflight[key] -= 1
+                if not self._inflight[key]:
+                    del self._inflight[key]
+
+    async def _run_stages(self, operation, intent, original_bytes):
         sid, version = intent["source_id"], intent["source_version"]
         result = self._envelope(intent)
         if operation["state"] != "running":
@@ -504,17 +663,25 @@ class DocumentService:
             except Exception:  # noqa: BLE001 -- durable boundary redacts dependency failures
                 indexing_failed = True
             # Hooks own their effects; only an explicit completed response is acknowledgement.
-            for stage, hook in (
-                ("wiki", self.wiki_hook),
-                ("projection", self.projection_hook),
-            ):
+            wiki_ran = False
+            # A retry never rebuilds the page of a version a newer one replaced.
+            hooks = (("wiki", self.wiki_hook), ("projection", self.projection_hook))
+            if intent["kind"] == "document_retry" and not self._is_current(sid, version):
+                hooks = ()
+            for stage, hook in hooks:
                 if (
                     hook is None
                     or (stage == "wiki" and indexing_failed)
-                    or self.catalog.get_document_stage(sid, version, stage)["state"]
-                    == "completed"
+                    # The vault note and page follow every wiki run, even after an
+                    # earlier projection completed without them.
+                    or (
+                        self.catalog.get_document_stage(sid, version, stage)["state"]
+                        == "completed"
+                        and not (stage == "projection" and wiki_ran)
+                    )
                 ):
                     continue
+                wiki_ran = wiki_ran or stage == "wiki"
                 self._active(sid, version)
                 self._stage(sid, version, stage, "running")
                 try:
@@ -766,12 +933,45 @@ class DocumentService:
         self._stage(sid, version, "indexing", "completed")
 
     def list(self, *, limit=100):
+        # One query for every document's latest operation, instead of a scan for each.
+        latest = self.catalog.latest_document_operations()
         return [
-            self.show(row["source_id"], row["source_version"])
+            self.show(row["source_id"], row["source_version"],
+                      last=latest.get((row["source_id"], row["source_version"])))
             for row in self.catalog.list_documents(limit=limit, deleted=False)
         ]
 
-    def show(self, source_id, source_version=None):
+    def _is_current(self, source_id, source_version):
+        current = self.catalog.get_current_manifest(source_id)
+        return current is not None and current.source_version == source_version
+
+    def _awaited(self, source_id, source_version):
+        """Stages whose hook a current version waits for; an old version never runs them again."""
+        if not self._is_current(source_id, source_version):
+            return ()
+        return tuple(name for name, hook in (("wiki", self.wiki_hook), ("projection", self.projection_hook))
+                     if hook is not None)
+
+    def operation_outcome(self, operation):
+        """What a document import or retry came to; ``None`` for any other operation."""
+        intent = operation["result"].get("recovery_intent") or {}
+        if operation["operation_kind"] not in {"document_import", "document_retry"} or "source_id" not in intent:
+            return None
+        if operation["state"] != "completed":
+            return operation["state"]
+        sid, version = intent["source_id"], intent["source_version"]
+        stages = {name: self.catalog.get_document_stage(sid, version, name)
+                  for name in ("extraction", "indexing", "wiki", "projection")}
+        if any(stage is None for stage in stages.values()):
+            return operation["state"]
+        return document_outcome(stages, operation["state"], self._awaited(sid, version))
+
+    def outcome(self, document, operation_state=None):
+        """``document_outcome`` for a shown document, given the state of the operation reported."""
+        return document_outcome(document["stages"], operation_state,
+                                self._awaited(document["source_id"], document["source_version"]))
+
+    def show(self, source_id, source_version=None, *, last=_NOT_LOOKED_UP):
         if source_version is None:
             manifest = self.catalog.get_current_manifest(source_id)
             if manifest is None:
@@ -803,6 +1003,12 @@ class DocumentService:
                     )
                 except ValueError:
                     record["reason"] = "evidence_unavailable"
+        if last is _NOT_LOOKED_UP:
+            last = self.catalog.latest_document_operation(source_id, source_version)
+        page_id = source_page_id(source_id)
+        page = self.catalog.get_wiki_page(page_id)
+        receipts = [row for row in self.catalog.list_artifact_projections(layer="wiki", artifact_id=page_id)
+                    if row["state"] == "projected"]
         return {
             **metadata,
             "accepted": stages["custody"]["state"] == "accepted",
@@ -810,6 +1016,15 @@ class DocumentService:
             "extractions": extractions,
             "coverage": self._coverage(source_id, source_version, extractions),
             "chunks": self.catalog.list_provider_chunks(source_id, source_version),
+            "last_operation_id": last["operation_id"] if last else None,
+            "outcome": document_outcome(stages, last["state"] if last else None,
+                                        self._awaited(source_id, source_version)),
+            "problems": document_problems(source_id, stages, extractions),
+            # The page exists for the user once its note is in the vault.
+            "wiki_page_id": page_id if page and page["current_revision"] and receipts else None,
+            # Path of the page's newest projected note from the vault root; the receipt is
+            # relative to the Journal folder.
+            "vault_path": f"{_JOURNAL_FOLDER}/{receipts[-1]['projection_path']}" if receipts else None,
         }
 
     def _coverage(self, source_id, source_version, extractions):

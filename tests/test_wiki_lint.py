@@ -179,6 +179,8 @@ class WikiLintTests(WikiFixture):
         # A failed or pending wiki stage already explains the missing page.
         self.assertEqual(self.found(self.lint([self.document(wiki="failed", projection="pending", error_code="reflect_failed")])),
                          [("stage_failed", "error", None, "doc_1", "wiki: failed (reflect_failed)")])
+        hint = self.lint([self.document(wiki="failed", projection="pending", error_code="reflect_failed")])["findings"][0]["hint"]
+        self.assertIn("lifecontext documents retry doc_1 --json", hint)
 
     def test_orphan_shared_pages_and_links_to_missing_pages(self):
         self.publish("topic_sky", "Sky")

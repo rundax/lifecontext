@@ -103,19 +103,34 @@ class DocumentCLIContractTests(unittest.TestCase):
                     cli._dispatch(self.args("documents", "import", source.name, *flags))
                     self.assertEqual(request.call_args.kwargs["headers"].get("X-Document-Vision"), expected)
 
+    def test_document_retry_takes_a_source_id_and_sends_a_key_only_when_given(self):
+        with patch.object(cli, "_post_json", return_value={}) as post:
+            args = self.args("documents", "retry", "doc_abc-1")
+            cli._dispatch(args)
+            post.assert_called_once_with(args, "/v1/documents/operations/doc_abc-1/retry",
+                                         {"rerun_extraction": False}, random_key=False)
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            self.args("documents", "retry", "not/a source")
+        self.assertEqual(cli._idempotency_headers(self.args("documents", "retry", "doc_abc-1"), random_key=False),
+                         {"Accept": "application/json"})
+        explicit = self.args("documents", "retry", "doc_abc-1", "--idempotency-key", "k1")
+        self.assertEqual(cli._idempotency_headers(explicit, random_key=False)["Idempotency-Key"], "k1")
+        self.assertIn("Idempotency-Key", cli._idempotency_headers(self.args("status")))
+
     def test_document_retry_and_wiki_routes(self):
         operation = "op_" + "a" * 32
         with patch.object(cli, "_post_json", return_value={}) as post:
             args = self.args("documents", "retry", operation, "--rerun-extraction")
             cli._dispatch(args)
-            post.assert_called_once_with(args, f"/v1/documents/operations/{operation}/retry", {"rerun_extraction": True})
+            post.assert_called_once_with(args, f"/v1/documents/operations/{operation}/retry", {"rerun_extraction": True},
+                                         random_key=False)
         for flag, value in (("--no-vision", False), ("--vision", True)):
             with self.subTest(flag=flag), patch.object(cli, "_post_json", return_value={}) as post:
                 args = self.args("documents", "retry", operation, "--rerun-extraction", flag)
                 cli._dispatch(args)
                 post.assert_called_once_with(
                     args, f"/v1/documents/operations/{operation}/retry",
-                    {"rerun_extraction": True, "vision": value},
+                    {"rerun_extraction": True, "vision": value}, random_key=False,
                 )
         with patch.object(cli, "_post_json", return_value={}) as post, self.assertRaises(cli.CLIError):
             cli._dispatch(self.args("documents", "retry", operation, "--no-vision"))

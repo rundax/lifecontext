@@ -174,6 +174,11 @@ class JournalApplication:
         *, source_id: str | None = None, source_version: int | None = None,
         vision: bool = True,
     ) -> dict[str, Any]:
+        # limits.max_file_bytes is the one effective limit; a larger file is too large, not invalid.
+        if isinstance(original_bytes, bytes) and len(original_bytes) > min(
+            self.limits.max_file_bytes, self.documents.limits.max_original_bytes, self.custody.max_bytes
+        ):
+            raise ApplicationError("body_too_large")
         try:
             outcome = await self.documents.import_document(
                 original_bytes, filename, declared_mime, provenance, idempotency_key,
@@ -205,9 +210,16 @@ class JournalApplication:
             raise ApplicationError("source_not_found") from None
 
     async def retry_document(self, operation_id: str, rerun_extraction: bool = False,
-                             vision: bool | None = None) -> dict[str, Any]:
+                             vision: bool | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        """Retry by operation ID or by source ID (its current version's latest operation)."""
         try:
-            outcome = await self.documents.retry(operation_id, rerun_extraction, vision)
+            if not re.fullmatch(r"op_[0-9a-f]{32}", operation_id) and any(
+                item["tombstone_type"] == "deleted" for item in self.catalog.list_tombstones(operation_id)
+            ):
+                # Like show_document: a deleted document is not found.
+                raise ApplicationError("source_not_found")
+            outcome = await self.documents.retry(operation_id, rerun_extraction, vision,
+                                                 idempotency_key=idempotency_key)
             document = outcome.get("document")
             if document and document["stages"]["indexing"]["state"] == "completed":
                 await self._classify_document(document)
@@ -3116,6 +3128,20 @@ class JournalApplication:
             },
         }
 
+    def list_operations(self, *, state: str | None = None, outcome: str | None = None,
+                        limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state or with one document outcome."""
+        try:
+            # An outcome is computed, so it is matched among the newest 1000 operations.
+            rows = self.catalog.list_operations(state=state, limit=1000 if outcome else limit)
+        except CatalogError:
+            raise ApplicationError("invalid_request") from None
+        items = [{**self.operation_status(row["operation_id"]), "operation_kind": row["operation_kind"],
+                  "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+        if outcome:
+            items = [item for item in items if item.get("outcome") == outcome][:limit]
+        return items
+
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         """Expose durable state with only the API's bounded summary fields."""
         try:
@@ -3136,11 +3162,17 @@ class JournalApplication:
             summary["item_count"] = 1
         if operation["error_code"] is not None:
             summary["error_code"] = operation["error_code"]
-        return {
+        status = {
             "operation_id": operation["operation_id"],
             "state": operation["state"],
             "summary": summary,
         }
+        # A document import or retry also says whether its wiki page and vault note came out.
+        if operation["operation_kind"] in {"document_import", "document_retry"}:
+            outcome = self.documents.operation_outcome(operation)
+            if outcome is not None:
+                status["outcome"] = outcome
+        return status
 
     @staticmethod
     def _request_digest(action: str, request: Mapping[str, Any]) -> str:

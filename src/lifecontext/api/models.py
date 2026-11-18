@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_serializer
 
 from lifecontext.config import LIMIT_CEILINGS, JournalLimits
 
@@ -143,6 +143,14 @@ class Citation(APIModel):
     source_id: SourceId
     source_version: Version
     sha256: Sha256
+    # A document's title and file name from the catalog; absent for journal sources.
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("filename")
+    @classmethod
+    def safe_citation_filename(cls, value: str | None) -> str | None:
+        return _basename(value)
 
 
 class RecallResult(APIModel):
@@ -223,6 +231,20 @@ class DocumentCoverage(APIModel):
     complete: bool
 
 
+_OUTCOMES = Literal[
+    "pending", "running", "retryable_failed", "permanent_failed", "completed", "completed_with_errors", "cancelled"
+]
+
+
+class DocumentProblem(APIModel):
+    """A stage that did not complete, why, and what to run next."""
+
+    stage: Literal["extraction", "indexing", "wiki", "projection"]
+    code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    reason: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    next_step: str = Field(min_length=1, max_length=512)
+
+
 class DocumentResponse(APIModel):
     source_id: SourceId
     source_version: Version
@@ -236,6 +258,13 @@ class DocumentResponse(APIModel):
     download_url: str
     extraction_warnings: list[Annotated[str, StringConstraints(max_length=1024)]] = Field(default_factory=list, max_length=1000)
     coverage: DocumentCoverage | None = None
+    # Added in 1.2.0; optional so older clients and servers keep working.
+    outcome: _OUTCOMES | None = None
+    problems: list[DocumentProblem] = Field(default_factory=list, max_length=5)
+    last_operation_id: Annotated[str, StringConstraints(pattern=r"^op_[0-9a-f]{32}$")] | None = None
+    extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    wiki_page_id: SourceId | None = None
+    vault_path: str | None = Field(default=None, min_length=1, max_length=1024)
 
     @field_validator("filename")
     @classmethod
@@ -253,7 +282,11 @@ class DocumentRetryRequest(APIModel):
     vision: bool | None = None
 
 
-class RetainResponse(Citation):
+class RetainResponse(APIModel):
+    # Its own fields: a retain receipt keeps exactly the citation identity it always had.
+    source_id: SourceId
+    source_version: Version
+    sha256: Sha256
     size_bytes: int = Field(ge=0, le=LIMIT_CEILINGS["max_text_bytes"])
     submission_state: Literal["submitted"]
 
@@ -321,7 +354,30 @@ class OperationResponse(APIModel):
     summary: OperationSummary = Field(default_factory=OperationSummary)
 
 
-class DocumentOperationResponse(OperationResponse):
+class OperationStatusResponse(OperationResponse):
+    """An operation as ``operations get`` and the list show it; ``outcome`` appears for document imports and retries."""
+
+    outcome: _OUTCOMES | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_outcome(self, handler):
+        data = handler(self)
+        if data.get("outcome") is None:
+            data.pop("outcome", None)
+        return data
+
+
+class OperationListItem(OperationStatusResponse):
+    operation_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    created_at: str = Field(max_length=64)
+    updated_at: str = Field(max_length=64)
+
+
+class OperationListResponse(APIModel):
+    operations: list[OperationListItem] = Field(max_length=1000)
+
+
+class DocumentOperationResponse(OperationStatusResponse):
     document: DocumentResponse | None = None
 
 
