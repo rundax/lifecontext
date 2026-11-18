@@ -265,6 +265,18 @@ class CliHTTPTests(unittest.TestCase):
         self.assertEqual(scan()["captured"], 0)
         self.assertEqual(len(self.client.retain_calls), 2)
 
+    def test_a_healthy_import_exits_0_with_outcome_completed(self) -> None:
+        from wiki_fake_compiler import FakeCompiler
+
+        # A model that answers: the page, its summary and the vault note all come out.
+        self.application.wiki.compiler = FakeCompiler({})
+        source = self.base / "healthy.txt"
+        source.write_bytes(b"The sky is blue.")
+        result = self._run(["documents", "import", str(source), "--json"], home=self.api_home)
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        value = json.loads(result.stdout.decode("utf-8"))
+        self.assertEqual((value["state"], value["outcome"], value["document"]["problems"]), ("completed", "completed", []))
+
     def test_documents_categories_and_wiki_use_authenticated_http(self) -> None:
         source = self.base / "résumé.txt"
         source.write_bytes(b"Non-sensitive document fixture.")

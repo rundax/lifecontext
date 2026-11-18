@@ -145,6 +145,12 @@ class DocumentCLIContractTests(unittest.TestCase):
                 self.assertRaises(cli.CLIError) as error:
             cli._dispatch(self.args("documents", "import", "scan.pdf"))
         self.assertEqual(error.exception.message, "The file is larger than the 16 MiB the service accepts.")
+        # When status cannot say, the 32 MiB named is the command's own ceiling, not the service's.
+        with patch.object(cli, "_read_input", side_effect=cli.CLIError("body_too_large")), \
+                patch.object(cli, "_http_exchange", side_effect=[cli.CLIError("api_error")]), \
+                self.assertRaises(cli.CLIError) as error:
+            cli._dispatch(self.args("documents", "import", "scan.pdf"))
+        self.assertEqual(error.exception.message, "The file is larger than the 32 MiB documents import uploads.")
         # A file within the limit is sent; when status cannot say, the service's own check decides.
         for answer in ((200, {}, status), cli.CLIError("api_error")):
             with self.subTest(status=answer), patch.object(cli, "_read_input", return_value=b"x" * 1000), \
