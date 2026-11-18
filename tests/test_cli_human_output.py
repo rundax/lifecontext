@@ -292,6 +292,23 @@ class PlainRendererSnapshotTests(unittest.TestCase):
             "Next: `lifecontext doctor` says what is wrong and how to fix it.",
         ]) + "\n")
 
+    def test_status_names_the_refused_vault_path_and_the_entries_waiting_for_indexing(self) -> None:
+        value = {**STATUS, "dependencies": {**STATUS["dependencies"], "vault": {
+            "ready": True, "permissions": True, "error": None, "refused_path": "Journal/wiki/Lease.md"}},
+            "indexing_pending": {"count": 3, "entries": ["Journal/2026/2026-11-17 - Call.md",
+                                                        "Journal/2026/2026-11-18 - Rent.md"]}}
+        out = self.plain(["status"], value)
+        self.assertIn("- vault: ready\nReconciliation: nothing to repair\n"
+                      "Refused vault path: Journal/wiki/Lease.md (`lifecontext doctor` lists every path a write "
+                      "would refuse)\n"
+                      "Journal entries waiting for indexing: 3 (Journal/2026/2026-11-17 - Call.md, "
+                      "Journal/2026/2026-11-18 - Rent.md and 1 more); the next capture run or service start tries "
+                      "a failed one again once its delay (1 minute to 6 hours) has passed\n"
+                      "Largest accepted file: 32 MiB\n", out)
+        # Nothing refused and nothing waiting: no lines for them.
+        quiet = {**STATUS, "indexing_pending": {"count": 0, "entries": []}}
+        self.assertEqual(self.plain(["status"], quiet), self.plain(["status"], STATUS))
+
     def test_brief_uses_the_vault_renderer(self) -> None:
         from lifecontext.brief import render_brief
 
@@ -573,6 +590,32 @@ class ErrorTableTests(unittest.TestCase):
         code, _, err = run(["documents", "show", DOC_ID], status=404, raw=api_error("source_not_found", False))
         self.assertTrue(err.startswith("No source or page has that ID.\nNext: `lifecontext documents list`"), err)
         self.assertNotIn("a" * 64, err)
+
+    def test_a_vault_refusal_names_the_refused_path_from_status_in_plain_mode_only(self) -> None:
+        headers = {"content-type": "application/json"}
+        status = {**STATUS, "dependencies": {**STATUS["dependencies"], "vault": {
+            "ready": True, "permissions": True, "error": None, "refused_path": "Journal/wiki/Lease.md"}}}
+        refusal = (409, headers, api_error("unsafe_path", False))
+        for argv, answers, expected in (
+                (["wiki", "rebuild"], [refusal, (200, headers, json.dumps(status).encode())],
+                 ("The service refused a path outside the vault or through a symbolic link.\n"
+                  "Refused vault path: Journal/wiki/Lease.md\nNext: `lifecontext doctor` names the path to fix.\n")),
+                # Status cannot be read: the message stays as it was.
+                (["wiki", "rebuild"], [refusal, cli.CLIError("api_unavailable")],
+                 ("The service refused a path outside the vault or through a symbolic link.\n"
+                  "Next: `lifecontext doctor` names the path to fix.\n"))):
+            stderr = io.StringIO()
+            with self.subTest(answers=answers), patch.object(cli, "_http_exchange", side_effect=answers), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(cli.main(argv), 1)
+            self.assertEqual(stderr.getvalue(), expected)
+        # --json keeps the API's error untouched and never asks status for the path.
+        with patch.object(cli, "_http_exchange", side_effect=[refusal]) as exchange, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cli.main(["wiki", "rebuild", "--json"]), 1)
+        self.assertEqual(exchange.call_count, 1)
+        self.assertNotIn("Journal/", out.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["error"], "unsafe_path")
 
 
 class RepairWordingTests(unittest.TestCase):

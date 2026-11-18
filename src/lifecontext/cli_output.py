@@ -286,6 +286,18 @@ def render_status(value: Mapping[str, Any]) -> str | None:
             lines.append(f"Reconciliation: {reconciliation['fact_count']} to repair ({found or 'see --json'})")
         else:
             lines.append("Reconciliation: nothing to repair")
+    vault = dependencies.get("vault")
+    refused = vault.get("refused_path") if isinstance(vault, Mapping) else None
+    if isinstance(refused, str) and refused:
+        lines.append(f"Refused vault path: {refused} (`lifecontext doctor` lists every path a write would refuse)")
+    pending = value.get("indexing_pending")
+    count = pending.get("count") if isinstance(pending, Mapping) else None
+    if isinstance(count, int) and not isinstance(count, bool) and count:
+        entries = [str(entry) for entry in pending.get("entries") or [] if isinstance(entry, str)]
+        listed = ", ".join(entries) + (f" and {count - len(entries)} more" if entries and count > len(entries) else "")
+        lines.append(f"Journal entries waiting for indexing: {count}" + (f" ({listed})" if entries else "")
+                     + "; the next capture run or service start tries a failed one again once its delay "
+                       "(1 minute to 6 hours) has passed")
     maximum = value.get("max_file_bytes")
     if isinstance(maximum, int) and not isinstance(maximum, bool):
         lines.append(f"Largest accepted file: {maximum // (1024 * 1024)} MiB")

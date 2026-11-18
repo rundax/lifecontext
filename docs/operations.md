@@ -163,7 +163,10 @@ refuse (a symlink, a special file, an entry owned by another user, a folder
 that group or others can write). Those paths are often document titles. The
 scan is read-only, does not enter a folder on another device than `Journal`
 (it lists those under `skipped`), and stops after 200,000 entries (`truncated`). `status` names the last refused path as
-`dependencies.vault.refused_path` until it is acceptable again.
+`dependencies.vault.refused_path` until it is acceptable again, and its plain
+output prints it on a `Refused vault path:` line. A command that fails with
+`unsafe_path` or `unsafe_permissions` names that path in its plain message too
+(read from `status`; never in the API error body or under `--json`).
 
 It exits 1 only for broken prerequisites, listed in `problems`:
 `python_unsupported`, `hindsight_packages`, `home_missing`, `home_unsafe`,
@@ -1087,7 +1090,8 @@ resubmits up to five refused journal notes from custody and stops at the first
 one the provider refuses again. A deleted or forgotten note is never
 resubmitted. `lifecontext status --json` reports `indexing_pending`: how many
 current journal entries are not indexed yet (pending or failed) and up to 20 of
-their vault-relative paths; `doctor` and the MCP `status` tool show only the
+their vault-relative paths (plain `lifecontext status` prints both on one
+`Journal entries waiting for indexing:` line); `doctor` and the MCP `status` tool show only the
 count. For a known provider
 failure you can also run `curate reindex <source-id> --expected-version <N>`
 with an explicit new idempotency key after repairing the route. For projection

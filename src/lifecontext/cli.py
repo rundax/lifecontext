@@ -1238,8 +1238,26 @@ def _print_error(args: argparse.Namespace, error: CLIError) -> None:
     start = None
     if error.code in {"api_unavailable", "token_unavailable"}:
         start = cli_output.start_hint(args.port, service_installed=_service_installed())
+    message = error.message
+    if error.code in {"unsafe_path", "unsafe_permissions"} and error.status is not None:
+        # The API error body never names a path; status names the vault-relative one it refused last.
+        refused = _refused_vault_path(args)
+        if refused:
+            message = cli_output.describe(error.code, port=args.port)[0] + f"\nRefused vault path: {refused}"
     print(cli_output.error_text(error.code, port=args.port, start=start, message_code=error.message_code,
-                                message=error.message), file=sys.stderr)
+                                message=message), file=sys.stderr)
+
+
+def _refused_vault_path(args: argparse.Namespace) -> str | None:
+    """``dependencies.vault.refused_path`` from ``/v1/status``, or None when status cannot say."""
+    try:
+        status = _get(args, "/v1/status")
+    except CLIError:
+        return None
+    dependencies = status.get("dependencies")
+    vault = dependencies.get("vault") if isinstance(dependencies, dict) else None
+    path = vault.get("refused_path") if isinstance(vault, dict) else None
+    return path if isinstance(path, str) and path else None
 
 
 def _service_installed() -> bool:
