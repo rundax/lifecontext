@@ -213,6 +213,14 @@ class CliHTTPTests(unittest.TestCase):
             assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
         return json.loads(result.stdout.decode("utf-8"))
 
+    @staticmethod
+    def _import_result(result: subprocess.CompletedProcess[bytes]) -> dict[str, object]:
+        """An import's answer; it exits 4 exactly when its outcome is not completed (here the wiki stage fails)."""
+        value = json.loads(result.stdout.decode("utf-8"))
+        expected = 0 if value.get("outcome") == "completed" else 4
+        assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+        return value
+
     def test_capture_completes_a_note_the_provider_refused_once(self) -> None:
         from lifecontext import cli
         from lifecontext.capture import SETTLE_SECONDS, run_once
@@ -260,7 +268,7 @@ class CliHTTPTests(unittest.TestCase):
     def test_documents_categories_and_wiki_use_authenticated_http(self) -> None:
         source = self.base / "résumé.txt"
         source.write_bytes(b"Non-sensitive document fixture.")
-        imported = self._json_result(self._run([
+        imported = self._import_result(self._run([
             "documents", "import", str(source), "--json",
             "--idempotency-key", "document-cli-import",
         ], home=self.api_home))
@@ -283,7 +291,7 @@ class CliHTTPTests(unittest.TestCase):
         self.assertEqual(downloaded["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
         self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
         source.write_bytes(b"Explicit updated original.")
-        replacement = self._json_result(self._run([
+        replacement = self._import_result(self._run([
             "documents", "import", str(source), "--source-id", sid,
             "--source-version", "2", "--json",
         ], home=self.api_home))
@@ -317,7 +325,7 @@ class CliHTTPTests(unittest.TestCase):
 
         source = self.base / "fixture.txt"
         source.write_bytes(b"The sky is blue.")
-        imported = self._json_result(self._run(["documents", "import", str(source), "--json"], home=self.api_home))
+        imported = self._import_result(self._run(["documents", "import", str(source), "--json"], home=self.api_home))
         sid = imported["document"]["source_id"]
         proposal_file = self.base / "classification.json"
         proposal_file.write_text(json.dumps({
