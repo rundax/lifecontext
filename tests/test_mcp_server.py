@@ -374,6 +374,20 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(result.structured_content, {"ready": True, "indexing_pending": {"count": 2}})
         self.assertNotIn("Private lawyer call", json.dumps([item.text for item in result.content]))
 
+    def test_status_says_a_vault_path_was_refused_but_never_names_it(self) -> None:
+        refused = "Journal/entries/2026-11-17 - Private lawyer call.md"
+        for path, expected in ((refused, True), (None, False)):
+            status = {"ready": False, "dependencies": {"vault": {"ready": False, "refused_path": path}}}
+            self.api.routes[("GET", "/v1/status")] = (200, json.dumps(status).encode(), {})
+            with self.subTest(path=path):
+                result = self.call("status", {})
+                self.assertFalse(result.is_error, result.content)
+                vault = result.structured_content["dependencies"]["vault"]
+                self.assertNotIn("refused_path", vault)
+                self.assertEqual("path_refused" in vault, expected)
+                self.assertIn("lifecontext status", vault.get("path_refused", "lifecontext status"))
+                self.assertNotIn("Private lawyer call", json.dumps([item.text for item in result.content]))
+
     def test_api_errors_become_tool_errors_with_the_redacted_code(self) -> None:
         self.api.routes[("GET", "/v1/wiki/missing")] = (404, _typed_error("source_not_found"), {})
         self.api.routes[("GET", "/v1/status")] = (500, b"Traceback: /home/private/secret.md", {})

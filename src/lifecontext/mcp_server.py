@@ -221,6 +221,12 @@ def build_server(port: int = cli.DEFAULT_PORT, *, allow_writes: bool = False,
         if isinstance(pending, dict):
             # Entry paths carry note titles; an agent gets the count, `lifecontext status` the paths.
             value["indexing_pending"] = {"count": pending.get("count")}
+        dependencies = value.get("dependencies")
+        vault = dependencies.get("vault") if isinstance(dependencies, dict) else None
+        if isinstance(vault, dict) and "refused_path" in vault:
+            # The path can be a journal note's; an agent learns only that one was refused.
+            if vault.pop("refused_path"):
+                vault["path_refused"] = "A vault path was refused; the owner sees which with `lifecontext status` in a terminal."
         return value
 
     @server.tool(annotations=_READ, description=(
