@@ -1156,7 +1156,7 @@ main() {
 	detect_platform
 	command -v curl >/dev/null 2>&1 || die "curl is needed to download uv and the release"
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/lifecontext-install.XXXXXX")
-	trap 'rm -rf "$tmp"; restore_tty; [ "${sudo_asked:-0}" -ne 1 ] || sudo -k 2>/dev/null' EXIT
+	trap 'rm -rf "$tmp"; restore_tty; [ "${sudo_asked:-0}" -ne 1 ] || sudo -k 2>/dev/null || true' EXIT
 	trap 'exit 1' HUP INT TERM
 	package_changed=0
 	key_changed=0

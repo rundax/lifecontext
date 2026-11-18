@@ -388,6 +388,15 @@ class InstallOcrTests(unittest.TestCase):
                                         timeout=60, check=False)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(self.logged(), expected)
+        # Under the installer's `set -eu`, a failing `sudo -k` must not change the exit code.
+        _stub(self.stubs / "sudo", "exit 1\n")
+        harness = Path(self.temp.name) / "trap-errexit.sh"
+        harness.write_text("set -eu\ntmp=$(mktemp -d)\nsudo_asked=1\n" + _functions("restore_tty")
+                           + f"\ntrap '{trap}' EXIT\nexit 0\n")
+        result = subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
+                                env={"PATH": f"{self.stubs}:/usr/bin:/bin"}, stdin=subprocess.DEVNULL,
+                                timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_an_existing_installation_is_left_alone(self) -> None:
         self.sudo(works=True)
