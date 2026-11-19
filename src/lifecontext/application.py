@@ -647,6 +647,10 @@ class JournalApplication:
 
     async def recover_startup(self, *, limit: int = 100) -> dict[str, int]:
         """Resume bounded local work and reconcile interrupted external effects."""
+        # The first compile, perhaps one this recovery resumes, then finds the provider layer loaded.
+        warm = getattr(self.compiler, "warm", None)
+        if callable(warm):
+            warm()
         try:
             operations = self.catalog.list_recoverable_operations(limit=limit)
         except CatalogError:
