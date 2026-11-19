@@ -97,6 +97,33 @@ class DocumentSnapshotCatalogTests(unittest.TestCase):
             self.target.commit_wiki_revision("topic_1", expected_revision=2, artifact_path="wiki_revisions/new.json", artifact_sha256="f" * 64,
                 dependencies=self.target.get_wiki_revision("topic_1", 2)["dependencies"])
 
+    def test_an_exported_wiki_stage_code_is_one_an_earlier_release_accepts(self):
+        # The error codes of 7d2bbbf, before the wiki stage codes were added.
+        earlier = {
+            "invalid_request", "body_too_large", "response_too_large", "host_not_allowed",
+            "origin_not_allowed", "source_not_found", "source_conflict", "evidence_unavailable",
+            "invalid_source_text", "invalid_provider_response", "provider_unavailable",
+            "retain_failed", "recall_failed", "reflect_failed", "unattributed_evidence",
+            "result_limit_exceeded", "operation_status_unavailable", "curation_unavailable",
+            "transfer_unavailable", "conflict", "relationship_unavailable", "unsafe_path",
+            "unsafe_permissions", "vault_unavailable", "internal_error",
+        }
+        codes = ("wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
+                 "wiki_interrupted", "wiki_forget_pending", "internal_error")
+        for number, code in enumerate(codes, 1):
+            manifest = self.document(f"doc_{number}")
+            self.source.transition_document_stage(manifest.source_id, 1, "wiki", expected_state="pending", expected_revision=1, state="running")
+            self.source.transition_document_stage(manifest.source_id, 1, "wiki", expected_state="running", expected_revision=2, state="failed", error_code=code)
+        exported = {row["source_id"]: row["error_code"] for row in self.source.export_document_snapshot()["stage_intents"]
+                    if row["stage"] == "wiki"}
+        self.assertEqual(len(exported), len(codes))
+        self.assertLessEqual(set(exported.values()), earlier)
+        self.assertEqual(exported["doc_1"], "reflect_failed")
+        self.assertEqual(exported["doc_6"], "reflect_failed")
+        self.assertEqual(exported["doc_7"], "internal_error")
+        # The stored stage keeps the precise code.
+        self.assertEqual(self.source.get_document_stage("doc_1", 1, "wiki")["error_code"], "wiki_provider_failed")
+
     def review_snapshots(self):
         manifest = self.document()
         self.page(manifest)

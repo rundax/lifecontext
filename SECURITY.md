@@ -28,9 +28,12 @@ never send real journal entries, documents, vault files, API keys or tokens.
 | Version | Security fixes |
 |---|---|
 | 1.2.x (latest release) | Yes |
-| Earlier than 1.2.0 | No |
+| The newest 1.2.0 release candidate (now 1.2.0rc1), until 1.2.0 is released | Yes |
+| Anything older | No |
 
-Only the latest minor release receives fixes. Upgrade before reporting if you
+Only the latest minor release receives fixes. Until 1.2.0 is out, that is the
+newest 1.2.0 release candidate, and a fix ships in the next release candidate
+or the final. Upgrade before reporting if you
 can.
 
 ## Scope

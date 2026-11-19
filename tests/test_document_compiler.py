@@ -2,11 +2,22 @@
 import asyncio
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from lifecontext.hindsight import HindsightStartupError, document_compiler
+
+
+class StatusError(Exception):
+    """A provider SDK's HTTP error: a status, the response headers and a message holding the key."""
+
+    def __init__(self, status, headers=None):
+        super().__init__("provider said private-test-key")
+        self.status_code = status
+        self.response = SimpleNamespace(headers=headers or {})
 
 
 class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
@@ -78,3 +89,92 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await asyncio.to_thread(server.shutdown)
             server.server_close()
+
+    async def failure_of(self, error):
+        """The failure of one compile whose provider call raises ``error``."""
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}), \
+                patch("hindsight_api.engine.llm_wrapper.LLMProvider") as factory:
+            model = factory.return_value
+            model.call = AsyncMock(side_effect=[error, '{"claims":[]}'])
+            model.cleanup = AsyncMock()
+            compile_document = document_compiler({"llm": {"provider": "openai", "model": "chosen"}})
+            with self.assertRaises(HindsightStartupError) as failure:
+                await compile_document("evidence")
+            # One attempt, its client closed: the wiki decides whether to ask again.
+            self.assertEqual(model.call.await_count, 1)
+            model.cleanup.assert_awaited_once()
+            self.assertEqual(failure.exception.code, "document_generation_failed")
+            self.assertNotIn("private-test-key", str(failure.exception))
+            return failure.exception.retry
+
+    @staticmethod
+    def caused(error, cause):
+        error.__cause__ = cause
+        return error
+
+    @staticmethod
+    def handled(error, earlier):
+        error.__context__ = earlier
+        return error
+
+    async def test_a_failure_says_whether_asking_again_may_help(self):
+        cases = [
+            (TimeoutError(), ("timeout", None)),
+            (type("APITimeoutError", (Exception,), {})(), ("timeout", None)),
+            (StatusError(503), ("transient", None)),
+            (StatusError(408), ("transient", None)),
+            (StatusError(429, {"retry-after": "7"}), ("transient", 7.0)),
+            (ConnectionResetError("reset"), ("transient", None)),
+            # A connect timeout is a failed connection, asked again up to three times, even inside
+            # an SDK error named after timeouts; a read timeout stays a timeout.
+            (type("ConnectTimeout", (Exception,), {})(), ("transient", None)),
+            (self.caused(type("APITimeoutError", (Exception,), {})(), type("ConnectTimeout", (Exception,), {})()),
+             ("transient", None)),
+            (self.caused(type("APITimeoutError", (Exception,), {})(), type("ReadTimeout", (Exception,), {})()),
+             ("timeout", None)),
+            # Only what an error was raised from is read: one raised while another was handled
+            # (a 401 or an unusable answer after a reset or a timeout) is permanent.
+            (self.handled(StatusError(401), ConnectionResetError("reset")), None),
+            (self.handled(StatusError(401), TimeoutError()), None),
+            (self.handled(ValueError("invalid response"), ConnectionResetError("reset")), None),
+            # A wait longer than the cap is not asked again.
+            (StatusError(429, {"retry-after": "600"}), None),
+            (StatusError(401), None),
+            (StatusError(400), None),
+            (ValueError("invalid response"), None),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__, status=getattr(error, "status_code", None)):
+                self.assertEqual(await self.failure_of(error), expected)
+
+    async def test_the_compiler_names_its_model(self):
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}):
+            self.assertEqual(document_compiler({"llm": {"provider": "openai", "model": "chosen"}}).model, "chosen")
+
+
+class WarmImportTests(unittest.TestCase):
+    def compiler(self):
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}):
+            return document_compiler({"llm": {"provider": "openai", "model": "chosen"}})
+
+    def test_the_warm_import_never_blocks_or_fails_the_caller(self):
+        release, started = threading.Event(), threading.Event()
+
+        def slow_import(name):
+            started.set()
+            release.wait(30)
+            raise ImportError("missing")
+
+        compiler = self.compiler()
+        with patch("lifecontext.hindsight.importlib.import_module", side_effect=slow_import) as imported:
+            begun = time.monotonic()
+            thread = compiler.warm()
+            self.assertLess(time.monotonic() - begun, 5)
+            self.assertTrue(started.wait(5))
+            self.assertTrue(thread.daemon and thread.is_alive())
+            with self.assertLogs("lifecontext.hindsight", "WARNING") as logged:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        imported.assert_called_once_with("hindsight_api.engine.llm_wrapper")
+        self.assertEqual(logged.output, ["WARNING:lifecontext.hindsight:Model client preload failed: ImportError"])

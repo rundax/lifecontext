@@ -4,7 +4,7 @@
     "name": "Roman Slysh",
     "url": "https://github.com/rundax"
   },
-  "description": "LifeContext: a private, durable context layer for AI. Journal entries and documents stay on your machine; agents read and add to them through one CLI, with citations.",
+  "description": "LifeContext: your documents, compiled, every claim cited. Contracts, letters, scans and notes stay on your machine; Claude Code and your other agents import them and answer from them with citations through one CLI.",
   "plugins": [
     {
       "name": "lifecontext",

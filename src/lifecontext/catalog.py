@@ -169,7 +169,15 @@ _OPERATION_ERROR_CODES = {
     "result_limit_exceeded", "operation_status_unavailable", "curation_unavailable",
     "transfer_unavailable", "conflict", "relationship_unavailable", "unsafe_path",
     "unsafe_permissions", "vault_unavailable", "internal_error",
+    # Why a document's wiki stage failed; stored in the stage's error code.
+    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
+    "wiki_interrupted", "wiki_forget_pending",
 }
+# Codes an earlier release rejects in a snapshot; a bundle carries ``reflect_failed`` for them.
+_WIKI_STAGE_CODES = frozenset({
+    "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
+    "wiki_interrupted", "wiki_forget_pending",
+})
 _OPERATION_RESULT_FIELDS = {
     "sources", "item_count", "size_bytes", "error_code", "recovery_intent"
 }
@@ -2175,6 +2183,96 @@ class LifeContextCatalog:
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 
+    def take_over_operation(
+        self,
+        idempotency_key: str,
+        request_digest: str,
+        operation_kind: str,
+        result: dict[str, Any],
+        original_id: str,
+    ) -> dict[str, Any]:
+        """Admit or replay a keyed operation with its intent and cancel the one it replaces.
+
+        One transaction, so a restart finds the original or its replacement, never both.
+        """
+        with self.transaction():
+            operation = self.begin_operation(idempotency_key, request_digest, operation_kind)
+            if not operation["result"]:
+                operation = self.set_operation_intent(operation["operation_id"], result)
+            original = self.get_operation(original_id)
+            if original is None:
+                raise CatalogError("operation not found")
+            kept = {key: value for key, value in original["result"].items() if key != "error_code"}
+            state = original["state"]
+            if state == "running":
+                # Left running by a stopped process; only a resting operation can be cancelled.
+                state = self.transition_operation(original_id, "running", "retryable_failed",
+                                                  result=kept, error_code="internal_error")["state"]
+            if state != "cancelled":
+                self.transition_operation(original_id, state, "cancelled", result=kept)
+            return operation
+
+    def latest_document_operation(self, source_id: str, source_version: int) -> dict[str, Any] | None:
+        """The newest import or retry operation recorded for one document version."""
+        _validate_identity(source_id, source_version)
+        self._ensure_open()
+        try:
+            row = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json,
+                          error_code, created_at, updated_at
+                   FROM operations
+                   WHERE operation_kind IN ('document_import', 'document_retry')
+                     AND json_extract(result_json, '$.recovery_intent.source_id') = ?
+                     AND json_extract(result_json, '$.recovery_intent.source_version') = ?
+                   ORDER BY rowid DESC LIMIT 1""",
+                (source_id, source_version),
+            ).fetchone()
+            return self._operation_from_row(row) if row is not None else None
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def latest_document_operations(self) -> dict[tuple[str, int], dict[str, Any]]:
+        """The newest import or retry operation of every document version, in one query."""
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json, error_code,
+                          created_at, updated_at
+                   FROM operations WHERE rowid IN (
+                       SELECT MAX(rowid) FROM operations
+                       WHERE operation_kind IN ('document_import', 'document_retry')
+                       GROUP BY json_extract(result_json, '$.recovery_intent.source_id'),
+                                json_extract(result_json, '$.recovery_intent.source_version'))"""
+            ).fetchall()
+            found = {}
+            for row in rows:
+                operation = self._operation_from_row(row)
+                intent = operation["result"].get("recovery_intent") or {}
+                if "source_id" in intent:
+                    found[(intent["source_id"], intent["source_version"])] = operation
+            return found
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def list_operations(self, *, state: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise CatalogError("invalid operation limit")
+        if state is not None and state not in _OPERATION_TRANSITIONS:
+            raise CatalogError("invalid operation state")
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                """SELECT operation_id, operation_kind, state, result_json,
+                          error_code, created_at, updated_at
+                   FROM operations WHERE (? IS NULL OR state = ?)
+                   ORDER BY rowid DESC LIMIT ?""",
+                (state, state, limit),
+            ).fetchall()
+            return [self._operation_from_row(row) for row in rows]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def list_recoverable_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
         """Return a bounded ordered batch of operations eligible for recovery."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
@@ -2628,6 +2726,23 @@ class LifeContextCatalog:
         row = self._connection.execute("SELECT * FROM document_stages WHERE source_id=? AND source_version=? AND stage=?", (*identity, stage)).fetchone()
         return dict(row) if row else None
 
+    def list_document_stages(self, source_ids: set[str]) -> list[dict[str, Any]]:
+        """Every stage row of these sources, each with its source's ``current_version``, in one query."""
+        if any(not isinstance(sid, str) or not _SOURCE_ID.fullmatch(sid) for sid in source_ids):
+            raise CatalogError("invalid catalog identity")
+        if not source_ids:
+            return []
+        self._ensure_open()
+        try:
+            rows = self._connection.execute(
+                "SELECT s.*,(SELECT MAX(v.source_version) FROM source_versions v WHERE v.source_id=s.source_id) "
+                "AS current_version FROM document_stages s WHERE s.source_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(source_ids)),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def transition_document_stage(
         self, source_id: str, source_version: int, stage: str, *, expected_state: str,
         expected_revision: int, state: str, error_code: str | None = None,
@@ -2950,7 +3065,10 @@ class LifeContextCatalog:
             for row in metadata:
                 for stage in _DOCUMENT_STAGE_STATES:
                     current = self.get_document_stage(row["source_id"], row["source_version"], stage)
-                    stages.append({key: current[key] for key in ("source_id", "source_version", "stage", "state", "revision", "attempt", "error_code")})
+                    exported = {key: current[key] for key in ("source_id", "source_version", "stage", "state", "revision", "attempt", "error_code")}
+                    if exported["error_code"] in _WIKI_STAGE_CODES:
+                        exported["error_code"] = "reflect_failed"
+                    stages.append(exported)
             included = [row for row in proposals if row["proposal_id"] in included_proposals]
             if any((row["source_id"], row["source_version"]) in deleted for proposal in included for row in proposal["documents"]):
                 raise CatalogError("deleted proposal evidence unavailable")
@@ -3401,13 +3519,15 @@ class LifeContextCatalog:
             if connection.execute("UPDATE wiki_pages SET title=? WHERE page_id=?", (title, page_id)).rowcount != 1:
                 raise CatalogConflict("wiki page identity conflict")
 
-    def get_wiki_revision(self, page_id: str, revision: int) -> dict[str, Any] | None:
+    def get_wiki_revision(self, page_id: str, revision: int, *, dependencies: bool = True) -> dict[str, Any] | None:
         _validate_identity(page_id, revision)
         self._ensure_open()
         row = self._connection.execute("SELECT * FROM wiki_revisions WHERE page_id=? AND revision=?", (page_id, revision)).fetchone()
         if row is None:
             return None
         result = dict(row)
+        if not dependencies:
+            return result
         result["dependencies"] = [dict(item) for item in self._connection.execute("SELECT source_id,source_version,extraction_revision,passage_start,passage_end,original_sha256 FROM wiki_dependencies WHERE page_id=? AND revision=? ORDER BY source_id,source_version,extraction_revision,passage_start", (page_id, revision))]
         return result
 
@@ -3674,6 +3794,24 @@ class LifeContextCatalog:
             "AND revision=(SELECT max(revision) FROM artifact_projections q WHERE q.layer=p.layer AND q.artifact_id=p.artifact_id) "
             "UNION ALL SELECT 'journal',source_id,source_version,state FROM projection_states WHERE state IN ('conflict','failed') "
             "ORDER BY 1,2,3 LIMIT ?", (limit,))]
+
+    def list_unindexed_journal_paths(self) -> list[str | None]:
+        """Entry paths of current journal versions the provider has not indexed yet, oldest first."""
+        self._ensure_open()
+        try:
+            return [row[0] for row in self._connection.execute(
+                "SELECT pr.projection_path FROM provider_states AS ps "
+                "JOIN sources AS s ON s.source_id=ps.source_id AND s.layer='journal' "
+                "LEFT JOIN projection_states AS pr "
+                "ON pr.source_id=ps.source_id AND pr.source_version=ps.source_version "
+                "WHERE ps.submission_state IN ('pending','failed') AND ps.recall_visibility!='not_visible' "
+                "AND ps.source_version=(SELECT max(v.source_version) FROM source_versions AS v "
+                "WHERE v.source_id=ps.source_id) "
+                "AND NOT EXISTS(SELECT 1 FROM tombstones AS t WHERE t.source_id=ps.source_id) "
+                "AND NOT EXISTS(SELECT 1 FROM transfer_tombstones AS t WHERE t.source_id=ps.source_id) "
+                "ORDER BY ps.updated_at, ps.source_id")]
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
 
     def get_source(self, source_id: str) -> dict[str, Any] | None:
         if not isinstance(source_id, str) or not _SOURCE_ID.fullmatch(source_id):
@@ -4203,6 +4341,21 @@ class LifeContextCatalog:
                     raise CatalogError("source version not registered")
         except CatalogError:
             raise
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def forget_running(self, source_id: str) -> bool:
+        """A confirmed forget of the source has started and has neither finished nor failed. Its
+        history is written with the confirmation, before any effect, while the versions stay
+        recallable until the provider's chunks are retired."""
+        _validate_identity(source_id, 1)
+        self._ensure_open()
+        try:
+            return self._connection.execute(
+                "SELECT 1 FROM curation_history AS h JOIN operations AS o ON o.operation_id=h.operation_id "
+                "WHERE h.source_id=? AND h.action='forget' AND o.state='running' LIMIT 1",
+                (source_id,),
+            ).fetchone() is not None
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 

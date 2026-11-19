@@ -521,8 +521,8 @@ raise AssertionError('kill point was not reached')
         self.assertIn("\nstate: current\n", text.split("---", 2)[1])
         self.assertNotIn(STALE_CALLOUT, text)
         self.assertIn("\n> [!note] Contradiction (2026-01-01 / 2026-02-01)\n"
-                      "> - The sky is blue. (doc_1 v1/e1 passages 0:1)\n"
-                      "> - sky is blue (doc_1 v1/e1 passages 0:1)\n", text)
+                      "> - The sky is blue. (Original, line 1)\n"
+                      "> - sky is blue (Original, line 1)\n", text)
         user = f"{USER_START}\nMy notes — kept byte for byte.\r\n<!-- life-context:user:end -->\n".encode()
         page.write_bytes(page.read_bytes().replace(f"{USER_START}\n\n<!-- life-context:user:end -->\n".encode(), user))
         fixture.catalog.mark_dependent_wiki_stale("doc_1", 1)
@@ -549,14 +549,14 @@ raise AssertionError('kill point was not reached')
                                                 desired_hash="a" * 64, state="projected", last_projected_hash="a" * 64)
         self.publish(fixture, source_page_id("doc_2"), "Grass", [{"text": "Grass is green.", "citations": [citation]}])
         self.publish(fixture, source_page_id("doc_1"), "Sky", [{"text": "The sky is blue.", "citations": [fixture.citation]}])
-        for page_id, line in ((source_page_id("doc_2"), "1. Grass is green. ([doc_2 v1/e1 passages 0:1](../documents/inbox/doc_2-v1.md#Page%203))"),
-                              (source_page_id("doc_1"), "1. The sky is blue. (doc_1 v1/e1 passages 0:1)")):
+        for page_id, line in ((source_page_id("doc_2"), "1. Grass is green. ([Grass, p. 3](../documents/inbox/doc_2-v1.md#Page%203))"),
+                              (source_page_id("doc_1"), "1. The sky is blue. (Sky, line 1)")):
             with self.subTest(page_id=page_id):
                 self.assertEqual(projection.project_wiki(page_id)["state"], "completed")
                 receipt = fixture.catalog.get_artifact_projection("wiki", page_id, 1)
                 self.assertIn("\n" + line + "\n", (self.journal / receipt["projection_path"]).read_text())
         # The plain text shown by the CLI and API keeps the bracketed citation.
-        self.assertIn("1. Grass is green. [doc_2 v1/e1 passages 0:1]", fixture.service.show(source_page_id("doc_2"))["managed"])
+        self.assertIn("1. Grass is green. [Grass, p. 3]", fixture.service.show(source_page_id("doc_2"))["managed"])
 
     def test_wiki_related_links_resolve_once_the_target_is_projected(self):
         from test_wiki import PAGE
@@ -615,6 +615,32 @@ raise AssertionError('kill point was not reached')
         self.assertTrue(page.read_text().endswith(user))
         self.assertIn("1. The sky is blue.", page.read_text())
 
+    def test_a_page_written_by_the_previous_renderer_is_rewritten_without_a_review(self):
+        from test_wiki import PAGE
+
+        from lifecontext.wiki import WikiService, _citation_label
+        fixture, projection = self.wiki_fixture()
+        fixture.update()
+        # Projected by v1.2.0rc1, which labelled citations with source ID and passages.
+        with patch.object(WikiService, "_citation_labels", lambda service, citations=(): _citation_label):
+            self.assertEqual(projection.project_wiki(PAGE)["state"], "completed")
+        receipt = fixture.catalog.get_artifact_projection("wiki", PAGE, 1)
+        page = self.journal / receipt["projection_path"]
+        history = self.journal / fixture.catalog.get_artifact_projection("wiki", PAGE + "_history", 1)["projection_path"]
+        self.assertIn("1. The sky is blue. (doc_1 v1/e1 passages 0:1)", page.read_text())
+        user = f"{USER_START}\nMy notes.\n<!-- life-context:user:end -->\n"
+        page.write_text(page.read_text().replace(f"{USER_START}\n\n<!-- life-context:user:end -->\n", user))
+        # This renderer writes people's label for the same stored revision.
+        result = projection.project_wiki(PAGE)
+        self.assertEqual(result["state"], "completed", result)
+        self.assertEqual([review["code"] for review in fixture.catalog.list_wiki_reviews(PAGE)], [])
+        self.assertIn("1. The sky is blue. (Original, line 1)", page.read_text())
+        self.assertIn("1. The sky is blue. [Original, line 1]", history.read_text())
+        for path in (page, history):
+            self.assertNotIn("passages 0:1", path.read_text())
+        self.assertTrue(page.read_text().endswith(user))
+        self.assertEqual(len(fixture.catalog.list_wiki_revisions(PAGE)), 1)
+
     def test_wiki_user_sections_history_and_schema(self):
         self.catalog.create_wiki_page("topic", title="Topic")
         self.catalog.list_wiki_revisions = lambda page_id: [{"revision": 1}]
@@ -663,7 +689,7 @@ class ReadableSourceNoteTests(unittest.TestCase):
             _readable_extraction(payload),
             [
                 "",
-                "Coverage: 3 of 3 pages resolved (1 text layer, 0 OCR, 1 model-read, 1 blank)",
+                "Coverage: 3 of 3 pages resolved (1 text layer, 0 OCR, 1 model-read, 1 blank); 1 page with unread parts",
                 "", "## Not read", "", "- page 1: images or drawings not read",
                 "", "## Page 1", "", "First page",
                 "", "## Page 2", "", "[Model-read page 2 by m; verify against the original]\nNotes",
@@ -675,6 +701,40 @@ class ReadableSourceNoteTests(unittest.TestCase):
             "warnings": [],
         })
         self.assertEqual(sheet[-3:], ["## Sheet Budget", "", "A1: Salary"])
+        frames = _readable_extraction({
+            "format": "tiff",
+            "segments": [{"text": "Зестон How\n", "locator": {"kind": "image", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["ocr_frame:1; OCR may contain errors", "ocr_text_suspect:1; the OCR text may be garbled"],
+        })
+        self.assertIn("- frame 1: OCR text may be garbled", frames)
+        complete = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "Only page\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": [],
+        })
+        self.assertEqual(complete[1], "Coverage: 1 of 1 pages resolved (1 text layer, 0 OCR, 0 model-read, 0 blank); complete")
+        unresolved = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "First\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["ocr_no_text_page:2; page content unresolved"],
+        })
+        self.assertEqual(unresolved[1], "Coverage: 1 of 2 pages resolved (1 text layer, 0 OCR, 0 model-read, 0 blank)")
+        # One page with three kinds of partial entry, and a compacted range, count once per page.
+        partial = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": f"Page {n}\n", "locator": {"kind": "page", "start": n, "end": n, "container": None}}
+                         for n in range(1, 6)],
+            "warnings": ["figure_not_read:1; images or drawings on this page were not read",
+                         "text_layer_suspect:1; the text layer may be garbled",
+                         "figure_not_read:3-5; images or drawings on this page were not read"],
+        })
+        self.assertTrue(partial[1].endswith("; 4 pages with unread parts"), partial[1])
+        document_level = _readable_extraction({
+            "format": "pdf",
+            "segments": [{"text": "Only\n", "locator": {"kind": "page", "start": 1, "end": 1, "container": None}}],
+            "warnings": ["figure_check_unavailable; pages could not be rendered or checked for images"],
+        })
+        self.assertTrue(document_level[1].endswith("; some content not read"), document_level[1])
 
 
 class IndexProjectionTests(unittest.TestCase):

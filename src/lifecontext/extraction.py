@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 from hashlib import sha256
 from io import BytesIO
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from zipfile import BadZipFile, ZipFile
@@ -70,6 +71,17 @@ class ExtractionLimits:
     furniture_min_pages: int = 3
     furniture_max_area_bp: int = 2500
     suspect_text_bp: int = 500
+    # OCR'd words that alternate Latin and Cyrillic are flagged only in a PDF whose text
+    # layer, so far, is this Latin-only: there Cyrillic models have turned English
+    # headings into look-alikes, while Ukrainian and bilingual scans mix scripts honestly.
+    ocr_script_min_letters: int = 200
+    ocr_script_share_bp: int = 9500
+    # OCR output is flagged when its minority script (Latin or Cyrillic) holds this share
+    # of its letters AND this share of word boundaries switch script. Measured on the
+    # vault: Ukrainian notes with English terms reach ~31% Latin letters but switch
+    # rarely; an English infographic OCR'd with Cyrillic models clears both.
+    ocr_mixed_script_bp: int = 3000
+    ocr_script_switch_bp: int = 3000
     # Blank means at most this many dark pixels AND at most this share of the page;
     # one handwritten word at the OCR resolution already exceeds both.
     blank_max_ink_pixels: int = 64
@@ -254,6 +266,7 @@ PARTIAL_CODES = frozenset(
     {
         "figure_not_read",
         "text_layer_suspect",
+        "ocr_text_suspect",
         "embedded_image_not_read",
         "chart_not_read",
         "figure_check_unavailable",
@@ -435,6 +448,23 @@ def coverage_summary(payload) -> dict:
         # Nothing read is never complete, even when nothing is listed as unread.
         "complete": bool(payload.get("segments")) and not unresolved and not partial,
     }
+
+
+# The file name extensions an import can read, and the format each one is read as.
+SUPPORTED_SUFFIXES = {
+    ".txt": "text",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".xlsx": "xlsx",
+    ".pptx": "pptx",
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+}
 
 
 class _Rejected(Exception):
@@ -670,21 +700,7 @@ def extract_document_with_images(
         if len(data) > limits.max_original_bytes:
             raise _Rejected("limit_exceeded", "original_byte_limit")
         suffix = PurePosixPath(filename).suffix.lower()
-        formats = {
-            ".txt": "text",
-            ".md": "markdown",
-            ".markdown": "markdown",
-            ".pdf": "pdf",
-            ".docx": "docx",
-            ".xlsx": "xlsx",
-            ".pptx": "pptx",
-            ".png": "png",
-            ".jpg": "jpeg",
-            ".jpeg": "jpeg",
-            ".tif": "tiff",
-            ".tiff": "tiff",
-        }
-        format = formats.get(suffix)
+        format = SUPPORTED_SUFFIXES.get(suffix)
         if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
             raise _Rejected(
                 "locked" if suffix in {".docx", ".xlsx", ".pptx"} else "unsupported",
@@ -1141,6 +1157,31 @@ def _suspect_text(text, limits):
     return bad * 10000 >= limits.suspect_text_bp * letters
 
 
+def _dominant_script(latin, cyrillic, limits):
+    """The text layer's script from its letter counts: "latin", or None when unknown or mixed."""
+    if latin + cyrillic < limits.ocr_script_min_letters:
+        return None
+    if latin * 10000 >= limits.ocr_script_share_bp * (latin + cyrillic):
+        return "latin"
+    return None
+
+
+def _mixed_scripts(text, limits):
+    """Latin and Cyrillic common on one OCR'd page and alternating word by word."""
+    latin, cyrillic = len(_LATIN.findall(text)), len(_CYRILLIC.findall(text))
+    if latin + cyrillic < 20:
+        return False
+    if min(latin, cyrillic) * 10000 < limits.ocr_mixed_script_bp * (latin + cyrillic):
+        return False
+    scripts = [
+        "latin" if _LATIN.search(word) else "cyrillic"
+        for word in re.findall(r"[^\W\d_]{2,}", text)
+        if _LATIN.search(word) or _CYRILLIC.search(word)
+    ]
+    switches = sum(1 for left, right in pairwise(scripts) if left != right)
+    return switches * 10000 >= limits.ocr_script_switch_bp * max(1, len(scripts) - 1)
+
+
 @contextmanager
 def _rendered(native_page, limits, scale):
     width, height = native_page.get_size()
@@ -1330,6 +1371,8 @@ def _binary_extract(data, format, limits, root, tesseract, vision_items=0, deadl
     router = _VisionRouter(root, limits, vision_items)
     unavailable = False
     pictures = 0
+    # Latin and Cyrillic letters in the text layer read so far.
+    layer_letters = [0, 0]
 
     def add(text, kind, index, container=None):
         nonlocal characters, encoded
@@ -1420,7 +1463,15 @@ def _binary_extract(data, format, limits, root, tesseract, vision_items=0, deadl
             add(text, kind, index)
             warning = f"ocr_{unit}:{index}; OCR may contain errors"
             warnings.append(warning)
-            router.route(image, warnings, replaces=after, resolves=(warning,), **options)
+            resolves = (warning,)
+            if _suspect_text(text, limits) or (
+                _mixed_scripts(text, limits) and _dominant_script(*layer_letters, limits) == "latin"
+            ):
+                # A model reading replaces the OCR segment, so it settles this too.
+                suspect = f"ocr_text_suspect:{index}; the OCR text may be garbled"
+                warnings.append(suspect)
+                resolves += (suspect,)
+            router.route(image, warnings, replaces=after, resolves=resolves, **options)
         else:
             warning = f"ocr_no_text_{unit}:{index}; {unit} content unresolved"
             warnings.append(warning)
@@ -1678,6 +1729,8 @@ def _binary_extract(data, format, limits, root, tesseract, vision_items=0, deadl
                     raise
                 except Exception:  # noqa: BLE001 -- one malformed content stream; render the page instead
                     text = ""
+                layer_letters[0] += len(_LATIN.findall(text))
+                layer_letters[1] += len(_CYRILLIC.findall(text))
                 try:
                     native_page = (
                         pdfium[index - 1] if pdfium is not None and index <= len(pdfium) else None

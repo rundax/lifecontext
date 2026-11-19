@@ -22,7 +22,7 @@ from lifecontext.categories import CategoryClassification
 from lifecontext.document_bundle import decode_document_bundle
 from lifecontext.paths import LifeContextPaths
 from lifecontext.vault import ManagedVault, VaultError
-from lifecontext.wiki import WikiPatch
+from lifecontext.wiki import WikiPatch, source_page_id
 
 
 class Provider:
@@ -65,7 +65,7 @@ class DocumentBundleApplicationTests(unittest.TestCase):
         for app in self.applications:
             app.close()
 
-    def make_app(self, name):
+    def make_app(self, name, compiler=None):
         home = self.base / name
         home.mkdir(mode=0o700)
         vault = home / "vault"
@@ -76,8 +76,9 @@ class DocumentBundleApplicationTests(unittest.TestCase):
         provider = Provider()
         with patch.dict(os.environ, {"HOME": str(home)}):
             app = JournalApplication(paths=LifeContextPaths.current(), hindsight=provider,
-                                     vault=ManagedVault(vault, journal))
-        app.documents.wiki_hook = None
+                                     vault=ManagedVault(vault, journal), compiler=compiler)
+        if compiler is None:
+            app.documents.wiki_hook = None
         self.applications.append(app)
         return app, provider
 
@@ -311,6 +312,33 @@ class DocumentBundleApplicationTests(unittest.TestCase):
         self.assertEqual(replay.operation_id, restored.operation_id)
         self.assertEqual(self.destination_provider.calls, calls)
 
+    def test_a_restored_document_with_its_page_is_completed_and_one_without_waits_for_a_retry(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        compiler = FakeCompiler({})
+        source, _ = self.make_app("source-wiki", compiler)
+        paged = self.import_document(source, key="paged")
+        self.assertEqual(paged["document"]["outcome"], "completed")
+        source.documents.wiki_hook = None  # the second document gets no page
+        document = Document()
+        document.add_paragraph("Tea is a drink.")
+        output = io.BytesIO()
+        document.save(output)
+        bare = self.import_document(source, key="bare", content=output.getvalue())
+        destination, _ = self.make_app("destination-wiki", FakeCompiler({}))
+        asyncio.run(destination.import_bundle(source.export_bundle(), idempotency_key="restore-wiki"))
+        shown = destination.show_document(paged["document"]["source_id"])
+        # The restored page holds this version: no compile, no retry asked for.
+        self.assertEqual((shown["stages"]["wiki"]["state"], shown["outcome"], shown["problems"]),
+                         ("completed", "completed", []))
+        self.assertEqual(destination.wiki.compiler.queries["window"], [])
+        # Lint still says the restored page is stale until a rebuild.
+        self.assertEqual(destination.catalog.get_wiki_page(source_page_id(shown["source_id"]))["state"], "stale")
+        sid = bare["document"]["source_id"]
+        waiting = destination.show_document(sid)
+        self.assertEqual((waiting["stages"]["wiki"]["state"], waiting["outcome"]), ("pending", "completed_with_errors"))
+        self.assertEqual(waiting["problems"][0]["next_step"], f"Run: lifecontext documents retry {sid}")
+
     def test_journal_only_export_remains_version_one(self):
         asyncio.run(self.source.retain("journal_fixture", 1, b"Journal evidence", provenance={"source": "fixture"}, idempotency_key="journal"))
         raw = self.source.export_bundle()
@@ -348,6 +376,23 @@ class DocumentBundleApplicationTests(unittest.TestCase):
         result = asyncio.run(self.destination.import_bundle(raw, idempotency_key="outage"))
         self.assertEqual(result["item_count"], 1)
         self.assertEqual(self.destination.catalog.list_incomplete_transfers(), [])
+
+    def test_a_restore_holds_its_documents_in_the_service_in_flight_map(self):
+        outcome = self.import_document()
+        sid = outcome["document"]["source_id"]
+        raw = self.source.export_bundle()
+        seen, retain = [], self.destination_provider.retain
+
+        async def watch(source_id, content, **kwargs):
+            # A retry or rebuild of the document at this moment would see the restore running.
+            seen.append(self.destination.documents.in_flight(sid))
+            return await retain(source_id, content, **kwargs)
+
+        self.destination_provider.retain = watch
+        asyncio.run(self.destination.import_bundle(raw, idempotency_key="watched"))
+        self.assertTrue(seen)
+        self.assertTrue(all(seen))
+        self.assertFalse(self.destination.documents.in_flight(sid))
 
     def test_outage_restore_resumes_after_restart(self):
         outcome = self.import_document()

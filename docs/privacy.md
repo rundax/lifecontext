@@ -26,7 +26,8 @@ The request carries your provider key from `~/.lifeweave/.env`. What the
 provider does with it is governed by your agreement with that provider. A
 loopback endpoint (`http://127.0.0.1`, for example a local model server) keeps
 this text on the machine; running fully without a remote model is not yet
-qualified.
+qualified. A model server reached over plain `http` on the local network (a
+private address) receives this text, and the key if one is stored, unencrypted.
 
 ## 2. Page images, only if you turn vision on
 
@@ -58,7 +59,6 @@ from vision for good.
 - LifeContext sets `LITELLM_LOCAL_MODEL_COST_MAP=True` for the service and
   Hindsight, so the litellm library uses its bundled model price list instead of
   fetching one from raw.githubusercontent.com on every start.
-  <!-- verify at release -->
 - The embedded PostgreSQL is bundled in the `pg0` package and unpacked locally;
   it is not downloaded at run time.
 

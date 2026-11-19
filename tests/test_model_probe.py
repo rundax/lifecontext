@@ -164,7 +164,9 @@ class ModelProbeTests(unittest.TestCase):
     def test_the_key_message_and_fix_stay_as_ci_expects(self) -> None:
         result = self.probe(_error(401))
         self.assertEqual(result["message"], "the provider rejected the key")
-        self.assertTrue(result["fix"].startswith("lifecontext llm set --api-key-stdin"))
+        # qualify.yml greps the lines after the message for the script form; the interactive command comes first.
+        self.assertIn("lifecontext llm set --api-key-stdin", result["fix"])
+        self.assertTrue(result["fix"].startswith("lifecontext llm set  (asks for the key"))
 
     def test_a_rate_limit_is_retried_once(self) -> None:
         self.assertEqual(self.probe(_error(429), None)["status"], "pass")

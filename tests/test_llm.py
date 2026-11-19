@@ -42,10 +42,13 @@ def _initialize(**values) -> None:
              key_stream=io.BytesIO((KEY + "\n").encode()), environ={})
 
 
-def _run(*arguments: str, stdin: str | None = None, restart=NOT_RUNNING) -> tuple[int, str, str]:
-    """Run `lifecontext llm ...` in this process; ``restart=None`` makes any attempt to restart a failure."""
+def _run(*arguments: str, stdin: str | None = None, restart=NOT_RUNNING, tty: bool = False) -> tuple[int, str, str]:
+    """Run `lifecontext llm ...` in this process; ``restart=None`` makes any attempt to restart a failure.
+
+    ``tty`` says whether stdin is a terminal.
+    """
     out, err = io.StringIO(), io.StringIO()
-    fake_stdin = SimpleNamespace(buffer=io.BytesIO(stdin.encode())) if stdin is not None else sys.stdin
+    fake_stdin = SimpleNamespace(buffer=io.BytesIO((stdin or "").encode()), isatty=lambda: tty)
     outcome = {"return_value": restart} if restart is not None else {"side_effect": AssertionError("restarted")}
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), patch.object(sys, "stdin", fake_stdin), \
             patch("lifecontext.service.restart_if_running", **outcome):
@@ -84,7 +87,85 @@ class LlmShowTests(unittest.TestCase):
     def test_show_without_setup_fails_cleanly(self) -> None:
         with _home():
             code, out, _ = _run("show", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "config_missing"))
+
+
+class LlmSetNetworkPolicyTests(unittest.TestCase):
+    def test_set_needs_the_flag_for_plain_http_on_another_host_and_saves_it(self) -> None:
+        url = "http://models.lan:8000/v1"
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            args = ("set", "--provider", "openai_compatible", "--model", "local", "--base-url", url)
+            code, out, _ = _run(*args, "--json", restart=None)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "invalid_llm_settings"))
+            self.assertIn("--allow-insecure-http", failure["message"])
+            self.assertEqual(load_settings()["llm"]["provider"], "openai")
+            code, out, err = _run(*args, "--allow-insecure-http", "--json")
+            self.assertEqual(code, 0, err)
+            report = json.loads(out)
+            self.assertTrue(report["allow_insecure_http"])
+            self.assertIn("model_uses_plain_http", report["warnings"])
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], url)
+            code, out, _ = _run("show", "--json", restart=None)
+            self.assertTrue(json.loads(out)["allow_insecure_http"])
+            # The text forms say what was granted, and that the text and a stored key travel unencrypted.
+            code, out, _ = _run("show", restart=None)
+            self.assertIn("- Plain http: accepted for this URL (--allow-insecure-http)", out)
+            self.assertIn("travel unencrypted over http", out)
+            code, out, _ = _run("set", "--model", "local-2")
+            self.assertIn("travel unencrypted over http", out)
+            self.assertEqual(load_settings()["llm"]["allow_insecure_http"], url)
+            # Another http host needs its own grant; the old one does not carry over.
+            code, out, _ = _run("set", "--base-url", "http://other.lan/v1", "--json", restart=None)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "invalid_llm_settings"))
+            code, out, _ = _run("set", "--base-url", "https://api.example.com/v1", "--json")
+            self.assertEqual(code, 0)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+
+    def test_the_flag_on_https_or_a_private_address_saves_nothing_and_says_so(self) -> None:
+        with _home():
+            _initialize(provider="openai_compatible", model="m", base_url="https://api.example.com/v1")
+            code, out, _ = _run("set", "--allow-insecure-http", "--json")
+            report = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertIn("insecure_http_flag_not_needed", report["warnings"])
+            self.assertNotIn("allow_insecure_http", report)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+            code, out, _ = _run("set", "--allow-insecure-http", "--base-url", "http://192.168.1.4:8000/v1")
+            self.assertIn("was not saved: this URL does not need it", out)
+            self.assertNotIn("allow_insecure_http", load_settings()["llm"])
+
+    def test_a_keyless_openai_compatible_server_on_the_network_is_accepted(self) -> None:
+        with _home():
+            run_init(InitOptions(provider="openai_compatible", model="local", base_url="http://192.168.1.20:8000/v1",
+                                 timezone="UTC"), environ={})
+            report = json.loads(_run("show", "--json")[1])
+            self.assertEqual(report["api_key"], "not_required")
+            # No key, but the text still travels over the network unencrypted.
+            self.assertIn("travel unencrypted", _run("show")[1])
+            self.assertIn("not set (optional for this endpoint)", _run("show")[1])
+
+    def test_a_remote_keyless_endpoint_is_asked_for_a_key_and_only_loopback_needs_none(self) -> None:
+        with _home() as home:
+            run_init(InitOptions(provider="openai_compatible", model="m", base_url="https://api.example.com/v1",
+                                 timezone="UTC"), environ={})
+            self.assertEqual(json.loads(_run("show", "--json")[1])["api_key"], "not_required")
+            # Bare `llm set` at a terminal asks (an empty answer changes nothing), it does not say "needs no key".
+            with patch.object(cli, "_ask_secret", return_value="") as asked:
+                code, out, err = _run("set", restart=None, tty=True)
+            self.assertEqual((code, asked.call_count), (1, 1))
+            self.assertNotIn("needs no key", out + err)
+            with patch.object(cli, "_ask_secret", return_value=NEW_KEY):
+                code, out, err = _run("set", tty=True)
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"LIFEWEAVE_LLM_API_KEY={NEW_KEY}", LifeContextPaths(home).credentials_path.read_text())
+        with _home():
+            run_init(InitOptions(provider="openai_compatible", model="m", base_url="http://127.0.0.1:1/v1",
+                                 timezone="UTC"), environ={})
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            self.assertIn("needs no key", json.loads(out)["message"])
 
 
 class LlmSetTests(unittest.TestCase):
@@ -167,6 +248,23 @@ class LlmSetTests(unittest.TestCase):
                     self.assertEqual((code, json.loads(out)["error"]), (1, error))
                     self.assertEqual((paths.config_path.read_bytes(), paths.credentials_path.read_bytes()), before)
 
+    def test_each_refused_setting_says_why(self) -> None:
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            compatible = ("--provider", "openai_compatible", "--model", "m", "--base-url")
+            for arguments, words in (
+                ((*compatible, "http://models.example.invalid:11434/v1"), "or add --allow-insecure-http"),
+                ((*compatible, "https://example.invalid/v1/chat/completions"), "give the API root instead"),
+                (("--provider", "nonsense", "--model", "m"), "use one of: anthropic, "),
+                (("--base-url", "ftp://example.invalid/v1"), "check the provider name, the exact model ID"),
+            ):
+                with self.subTest(arguments=arguments):
+                    code, out, _ = _run("set", *arguments, "--json", restart=None)
+                    failure = json.loads(out)
+                    self.assertEqual((code, failure["error"]), (1, "invalid_llm_settings"))
+                    self.assertIn(words, failure["message"])
+                    self.assertNotIn("models.example.invalid", failure["message"])
+
     def test_a_new_provider_without_a_model_says_to_add_one(self) -> None:
         with _home():
             _initialize(provider="openai", model="gpt-test-model")
@@ -179,10 +277,80 @@ class LlmSetTests(unittest.TestCase):
     def test_set_needs_something_to_change_and_an_existing_setup(self) -> None:
         with _home():
             code, out, _ = _run("set", "--model", "m", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "config_missing"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "config_missing"))
             _initialize(provider="openai", model="gpt-test-model")
             code, out, _ = _run("set", "--json", restart=None)
-            self.assertEqual((code, json.loads(out)), (1, {"error": "nothing_to_change"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "nothing_to_change"))
+            # At a terminal, an empty answer to the key question changes nothing either.
+            with patch.object(cli, "_ask_secret", return_value="") as asked:
+                code, _, err = _run("set", restart=None, tty=True)
+            self.assertEqual((code, asked.call_count), (1, 1))
+            self.assertIn("nothing to change", err.lower())
+            # --json never prompts, even at a terminal.
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "nothing_to_change"))
+
+    def test_set_alone_checks_the_setup_before_asking_for_a_key(self) -> None:
+        with _home():
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "config_missing"))
+        with _home():
+            run_init(InitOptions(provider="openai_compatible", model="local", base_url=LOCAL, timezone="UTC"),
+                     environ={})
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None, tty=True)
+            failure = json.loads(out)
+            self.assertEqual((code, failure["error"]), (1, "nothing_to_change"))
+            self.assertIn("needs no key", failure["message"])
+
+    def test_ctrl_d_or_ctrl_c_at_the_key_prompt_is_nothing_to_change_not_a_traceback(self) -> None:
+        with _home():
+            _initialize(provider="openai", model="gpt-test-model")
+            for interruption in (EOFError, KeyboardInterrupt):
+                with self.subTest(interruption=interruption.__name__):
+                    with patch.object(cli, "_ask_secret", side_effect=interruption):
+                        code, out, err = _run("set", restart=None, tty=True)
+                    self.assertEqual(code, 1)
+                    self.assertIn("nothing to change", err.lower())
+                    self.assertNotIn("Traceback", out + err)
+
+    def test_api_key_stdin_at_a_terminal_asks_hidden_instead_of_reading_echoed_input(self) -> None:
+        with _home() as home:
+            _initialize(provider="openai", model="gpt-test-model")
+            with patch.object(cli, "_ask_secret", return_value=NEW_KEY) as asked:
+                code, out, err = _run("set", "--api-key-stdin", tty=True, stdin="ignored-echoed-key\n")
+            self.assertEqual((code, asked.call_count), (0, 1), err)
+            stored = LifeContextPaths(home).credentials_path.read_text()
+            self.assertIn(f"LIFEWEAVE_LLM_API_KEY={NEW_KEY}", stored)
+            self.assertNotIn("ignored-echoed-key", stored)
+            # Not at a terminal it still reads stdin, and nothing is asked.
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, _, err = _run("set", "--api-key-stdin", stdin="sk-from-a-pipe-1234\n")
+            self.assertEqual(code, 0, err)
+            # With --json and a terminal there is no prompt and no echoed read.
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--api-key-stdin", "--json", restart=None, tty=True)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "api_key_required"))
+
+    def test_set_alone_at_a_terminal_asks_for_the_key_hidden_and_stores_it(self) -> None:
+        with _home() as home:
+            _initialize(provider="openai", model="gpt-test-model")
+            paths = LifeContextPaths(home)
+            config = paths.config_path.read_bytes()
+            with patch.object(cli, "_ask_secret", return_value=f"  {NEW_KEY}  ") as asked:
+                code, out, err = _run("set", tty=True)
+            self.assertEqual(code, 0, err)
+            self.assertIn("hidden", asked.call_args.args[0])
+            self.assertNotIn(NEW_KEY, out + err)
+            self.assertIn(f"LIFEWEAVE_LLM_API_KEY={NEW_KEY}", paths.credentials_path.read_text())
+            self.assertEqual(paths.config_path.read_bytes(), config)
+            self.assertIn("Model settings updated.", out)
+            # Not at a terminal nothing is asked.
+            with patch.object(cli, "_ask_secret", side_effect=AssertionError("asked")):
+                code, out, _ = _run("set", "--json", restart=None)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "nothing_to_change"))
 
     def test_changing_the_provider_warns_when_the_old_key_stays(self) -> None:
         with _home():

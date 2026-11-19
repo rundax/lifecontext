@@ -3,7 +3,8 @@
 This page sets up one personal arrangement end to end. LifeContext runs on one
 always-on computer (the server, which can be a small home machine). You write
 in Obsidian on your phone and laptop; the notes reach the server, LifeContext
-turns them into journal entries and a wiki, and the result comes back to every
+turns them into journal entries that are indexed and searchable (compiling
+them into wiki pages comes in v1.3), and the result comes back to every
 device. Agents on the server use the same data through the CLI, the skill or
 MCP.
 
@@ -14,7 +15,7 @@ MCP.
         | HTTPS, tailnet only              |  | LiveSync headless client
         +--------> tailscale serve --------+  v
                                            vault folder  <--  lifecontext capture
-                                           (Journal/Inbox -> Journal/entries, wiki)
+                                           (Journal/Inbox -> Journal/entries)
                                                 ^
                                                 |  CLI, skill, MCP (agents)
 ```
@@ -80,7 +81,11 @@ changes or deletes the note. The rules:
   sent with a fixed idempotency key, so a run that stops half way is finished
   by the next one without a duplicate. If the service is not running or the API
   fails (a 5xx answer, or the model provider is unreachable), notes wait and are
-  counted under `pending`.
+  counted under `pending`. A note whose indexing failed (the model provider
+  refused or did not answer) is not lost: its entry is already in the vault
+  right after the original is kept, and LifeContext tries again by itself with
+  a growing wait (1 minute up to 6 hours). `lifecontext status` shows how many
+  notes are waiting.
 - **Refusals are reported, not retried.** If the API refuses a note for good
   (for example `source_conflict` after the entry was forgotten or deleted,
   `conflict` because the version moved on, or `body_too_large`), the run counts

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import unicodedata
 from pathlib import PurePosixPath
 from urllib.parse import quote
@@ -41,6 +42,7 @@ _UNREAD = {
     "ocr_unavailable_frame": "needs OCR, which is not installed",
     "figure_not_read": "images or drawings not read",
     "text_layer_suspect": "text layer may be garbled",
+    "ocr_text_suspect": "OCR text may be garbled",
     "embedded_image_not_read": "picture not read",
     "chart_not_read": "chart not read",
     "figure_check_unavailable": "pages could not be checked for images",
@@ -74,14 +76,22 @@ def _segment_heading(locator):
 
 def _readable_extraction(payload):
     """Render the extraction as headed sections with a coverage summary first."""
-    from .extraction import coverage_summary, ledger_items
+    from .extraction import PARTIAL_CODES, coverage_summary, ledger_items
 
     coverage = coverage_summary(payload)
     lines = [""]
     if coverage["unit"]:
+        # Resolved pages can still have unread figures or garbled text; count each page once.
+        partly = {item for warning in payload.get("warnings", ())
+                  for code, items, _ in (ledger_items(warning),) if code in PARTIAL_CODES
+                  for item in items if item.isdigit()}
+        noun = coverage["unit"] + ("" if len(partly) == 1 else "s")
+        state = (f"; {len(partly)} {noun} with unread parts" if partly
+                 else "; some content not read" if coverage["partial"]
+                 else "; complete" if coverage["complete"] else "")
         lines.append(f"Coverage: {coverage['resolved']} of {coverage['total']} {coverage['unit']}s resolved "
                      f"({coverage['text']} text layer, {coverage['ocr']} OCR, {coverage['vision']} model-read, "
-                     f"{coverage['blank']} blank)")
+                     f"{coverage['blank']} blank){state}")
     else:
         lines.append("Coverage: " + ("complete" if coverage["complete"] else "some content was not read"))
     unread = []
@@ -89,9 +99,11 @@ def _readable_extraction(payload):
         code, items, _ = ledger_items(warning)
         if code not in _UNREAD:
             continue
+        # Unit-neutral codes (ocr_text_suspect) take the document's unit.
+        unit = "frame" if code.endswith("_frame") else "page" if code.endswith("_page") else coverage["unit"] or "page"
         for item in items or ["document"]:
             if item.isdigit():
-                item = ("frame " if code.endswith("_frame") else "page ") + item
+                item = f"{unit} {item}"
             unread.append(f"- {item.replace(':', ' ', 1)}: {_UNREAD[code]}")
     if unread:
         lines.extend(["", "## Not read", "", *unread])
@@ -117,6 +129,7 @@ class DocumentProjectionService:
         self.vault = vault
         self.wiki_service = wiki_service
         self._headings = {}
+        self._headings_lock = threading.Lock()
 
     @staticmethod
     def _move_id(artifact_id):
@@ -566,8 +579,9 @@ class DocumentProjectionService:
         if not rows or rows[-1]["extraction_revision"] != extraction_revision or not rows[-1]["artifact_sha256"]:
             return None
         key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
-        if key in self._headings:
-            return self._headings[key]
+        with self._headings_lock:
+            if key in self._headings:
+                return self._headings[key]
         try:
             payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=rows[-1]["artifact_sha256"])
         except (ValueError, OSError, KeyError, TypeError):
@@ -577,9 +591,10 @@ class DocumentProjectionService:
             heading = _segment_heading(segment.get("locator", {}))
             current = current if heading is None else heading
             headings.append(current)
-        if len(self._headings) >= 32:
-            self._headings.pop(next(iter(self._headings)))
-        self._headings[key] = headings
+        with self._headings_lock:
+            if len(self._headings) >= 32:
+                self._headings.pop(next(iter(self._headings)), None)
+            self._headings[key] = headings
         return headings
 
     def _citation_links(self):
@@ -673,7 +688,7 @@ class DocumentProjectionService:
             expected = _hash(existing)
         results = []
         for row in self.catalog.list_wiki_revisions(page_id):
-            historical = self.wiki_service.show(page_id, row["revision"])
+            historical = self.wiki_service.show(page_id, row["revision"], history=True, markdown=True)
             history_id = page_id + "_history"
             self._recover_publication(history_id, row["revision"], layer="wiki")
             history_path = self._wiki_filename(PurePosixPath(path).stem, directory="wiki/history",

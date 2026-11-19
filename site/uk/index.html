@@ -17,7 +17,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="LifeContext">
 <meta property="og:title" content="LifeContext: ваші документи, зведені у вікі. Кожне твердження має джерело.">
-<meta property="og:description" content="Ваші AI-агенти читають договори, листи й скани, і кожне твердження має доказ: дослівну цитату, звірену з джерелом, з посиланням на сторінку й версію. Працює на вашому комп’ютері, файли лишаються у вас.">
+<meta property="og:description" content="Ваші договори, листи й скани зведені у вікі, де кожне твердження є дослівною цитатою, звіреною з джерелом, з посиланням на сторінку й версію. AI-агенти відповідають на його основі. Працює на вашому комп’ютері, файли лишаються у вас.">
 <meta property="og:url" content="https://rundax.github.io/lifecontext/uk/">
 <meta property="og:image" content="https://rundax.github.io/lifecontext/og-uk.png">
 <meta property="og:image:width" content="1200">
@@ -86,7 +86,7 @@
 <section class="hero" aria-labelledby="hero-h">
   <div class="wrap hero-grid">
     <div class="hero-head">
-      <p class="eyebrow">На вашій машині · source-available · v1.2</p>
+      <p class="eyebrow">На вашій машині · source-available · реліз-кандидат 1.2.0rc1</p>
       <h1 id="hero-h">Ваші документи, зведені у вікі. <span class="accent-line">Кожне твердження має джерело.</span></h1>
     </div>
     <div class="hero-copy">
@@ -108,7 +108,7 @@
 
     <figure class="anatomy" aria-labelledby="anatomy-cap">
       <div class="anatomy-card">
-        <div class="card-bar"><span class="path">wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад</span></div>
+        <div class="card-bar"><span class="path">Journal/wiki/Оренда квартири.md</span><span class="badge badge-example">Приклад</span></div>
         <div class="anatomy-body">
           <p class="anatomy-title">Оренда квартири</p>
           <div class="anatomy-claim">
@@ -143,7 +143,7 @@
 
     <div class="demo">
       <article class="note" aria-labelledby="note-title">
-        <div class="card-bar"><span class="path">vault/wiki/Topics/Оренда квартири.md</span><span class="badge badge-example">Приклад · вигаданий</span></div>
+        <div class="card-bar"><span class="path">vault/Journal/wiki/Оренда квартири.md</span><span class="badge badge-example">Приклад · вигаданий</span></div>
         <div class="note-body">
           <h3 id="note-title">Оренда квартири</h3>
           <p class="note-meta">Сторінка теми · 3 джерела · ревізія r4 · зібрано 2026-10-14</p>
@@ -462,6 +462,7 @@
             <pre class="wrap-lines" tabindex="0"><code id="code-sh">curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh</code></pre>
           </div>
           <p>Інсталятор запитає, яку модель використовувати (Anthropic, OpenAI, Google Gemini, OpenRouter, локальний сервер моделей чи інший OpenAI-сумісний endpoint; типової немає), перевірить, що модель відповідає, запустить LifeContext як сервіс користувача й підключить скіл до ваших агентів.</p>
+          <p>Підписка на Claude Code чи ChatGPT не дає ключа API: за використання API постачальник виставляє рахунок окремо.</p>
           <p class="step-label">2 · Відкрийте сховище в Obsidian</p>
           <p>Виберіть «Open folder as vault» і вкажіть <code>~/LifeContext/vault</code> або теку, яку ви вказали інсталятору. Підійде й будь-який редактор Markdown.</p>
           <p class="step-label">3 · Імпортуйте документ і запитайте агента</p>
@@ -469,12 +470,13 @@
             <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-sh-2" aria-label="Копіювати команду імпорту" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
             <pre class="wrap-lines" tabindex="0"><code id="code-sh-2">lifecontext documents import ~/Documents/договір-оренди.pdf</code></pre>
           </div>
-          <p>Індексація і збирання сторінки звертаються до вашої моделі й можуть тривати кілька хвилин. Потім сторінка з’явиться у сховищі, у теці <code>Journal/wiki/</code>. Запитайте Claude Code, Codex чи Gemini CLI: «Що в моєму договорі оренди сказано про заставу?» Агент відповість на основі доказів LifeContext: з цитатою, сторінкою й версією договору, звідки вона взята.</p>
+          <p>Індексація і збирання сторінки звертаються до вашої моделі й можуть тривати кілька хвилин. Потім сторінка з’явиться у сховищі, у теці <code>Journal/wiki/</code>. Запитайте Claude Code, Codex чи Gemini CLI: «Що в моєму договорі оренди сказано про заставу?» Агент відповість на основі доказів LifeContext і вкаже договір та його версію. Цитата й номер сторінки є на вікі-сторінці договору.</p>
         </div>
 
         <div class="panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker">
           <h3 class="panel-title">Docker</h3>
           <p>Образ містить Tesseract з англійською, українською та російською мовами й локальні моделі та працює від непривілейованого користувача. Порт назовні не відкривається: сервіс слухає loopback усередині контейнера, і ви звертаєтеся до нього через <code>docker exec</code>. Ключ лежить у секреті Compose і в образ не потрапляє. Решта налаштувань застосовується під час першого запуску. Вкажіть постачальника й модель, які ви обрали: типових значень немає, і без них контейнер чекає та пише в журнал, якої змінної бракує.</p>
+          <p>Поки 1.2.0rc1 лишається реліз-кандидатом, образ не опубліковано. Склонуйте репозиторій, зберіть образ командою <code>docker compose build</code> (він займає близько 3 ГБ) і запускайте його з compose.yaml, що лежить у корені клону.</p>
           <p class="step-label">compose.yaml</p>
           <div class="code">
             <div class="code-head"><span>compose.yaml</span><button class="copy" type="button" data-copy="code-compose" aria-label="Копіювати compose.yaml" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
@@ -502,7 +504,8 @@ volumes:
           <p class="step-label">Ключ, запуск, перевірка</p>
           <div class="code">
             <div class="code-head"><span>Термінал</span><button class="copy" type="button" data-copy="code-docker" aria-label="Копіювати команди Docker" data-done="Скопійовано" data-manual="Натисніть Ctrl+C (⌘C на Mac)" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span data-label>Копіювати</span></button></div>
-            <pre tabindex="0"><code id="code-docker">mkdir -p secrets
+            <pre tabindex="0"><code id="code-docker">docker compose build      <span class="c"># у клоні репозиторію, поки образ не опубліковано</span>
+mkdir -p secrets
 (umask 077 &amp;&amp; cat &gt; secrets/lifecontext_api_key)   <span class="c"># вставте ключ, Enter, Ctrl-D</span>
 docker compose up -d
 docker compose exec lifecontext lifecontext doctor</code></pre>
@@ -613,6 +616,7 @@ lifecontext doctor</code></pre>
             <tr><th scope="row">Cursor</th><td><span class="yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 5 5L20 7"/></svg>MCP-сервер</span></td><td>Лише читання; запис з <code>--allow-writes</code></td></tr>
           </tbody>
         </table>
+        <p>Claude Desktop і Cursor можуть не дочекатися відповіді, якщо пошук триває довго. Докладніше в розділі <a href="https://github.com/rundax/lifecontext/blob/main/docs/agents.md#slow-calls-and-client-timeouts">про повільні виклики й тайм-аути клієнтів</a> (англійською).</p>
       </div>
     </div>
 
@@ -965,7 +969,7 @@ lifecontext doctor</code></pre>
         </details>
         <details>
           <summary>Які мови він підтримує?</summary>
-          <div class="answer"><p>OCR розпізнає англійську, українську та російську. LifeContext налаштовує мультимовний реранкер для англійських, українських і російських текстів. Цитати лишаються мовою джерела, бо вони дослівні.</p></div>
+          <div class="answer"><p>OCR розпізнає англійську, українську та російську. Для пошуку LifeContext використовує модель ембедингів лише для англійської й мультимовний реранкер, тому пошук українською й російською поки слабший. Це покращиться в одному з наступних випусків. Цитати лишаються мовою джерела, бо вони дослівні.</p></div>
         </details>
         <details>
           <summary>Чи використовують мої дані для навчання моделей?</summary>

@@ -363,6 +363,31 @@ class VisionReaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(suspect, merged.warnings)
         self.assertFalse(coverage_summary(merged.to_dict())["complete"])
 
+    async def test_a_model_reading_replaces_garbled_ocr_and_settles_its_flag(self):
+        from lifecontext.extraction import (
+            ExtractionArtifact,
+            Locator,
+            RoutedImage,
+            TextSegment,
+        )
+
+        ocr = "ocr_page:1; OCR may contain errors"
+        suspect = "ocr_text_suspect:1; the OCR text may be garbled"
+        artifact = ExtractionArtifact(
+            source_id="doc_1", source_version=1, original_checksum="a" * 64, extraction_revision=1,
+            config_identity="b" * 64, status="completed", format="pdf",
+            segments=(TextSegment("Зестон How Ve\n", 0, 14, Locator("page", 1, 1)),), warnings=(ocr, suspect),
+        )
+        image = RoutedImage(item="page:1", mode="page", kind="page", index=1, after=0, data=b"\xff\xd8\xffx",
+                            replaces=0, resolves=(ocr, suspect))
+        reader = self.reader(FakeClient())
+        merged = reader._merge(artifact, [(image, reader_outcome())], extraction_limits())
+        self.assertNotIn(suspect, merged.warnings)
+        self.assertNotIn("Зестон", "".join(segment.text for segment in merged.segments))
+        coverage = coverage_summary(merged.to_dict())
+        self.assertEqual(coverage["partial"], [])
+        self.assertEqual(coverage["vision"], 1)
+
     def test_endpoints_are_explicit_and_unknown_errors_stay_per_item(self):
         import os
 

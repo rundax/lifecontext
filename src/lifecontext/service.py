@@ -517,6 +517,11 @@ def status(system: str, home: Path, *, runner: Runner = subprocess.run,
             "last_maintenance": read_maintenance_record(LifeContextPaths(data_home or home))}
 
 
+# Where the service writes its log, for people.
+_LOGS = {"systemd": "journalctl --user -u lifecontext.service",
+         "launchd": "~/Library/Logs/lifecontext/ (serve.log, maintain.log, capture.log)"}
+
+
 def render(report: Mapping[str, Any]) -> str:
     lines: list[str] = []
     prefix = "Would " if report.get("dry_run") else ""
@@ -528,6 +533,7 @@ def render(report: Mapping[str, Any]) -> str:
         last = report["last_maintenance"]
         lines.append("Last maintenance: " + ("never" if last is None else
                                              f"{last.get('finished_at')} ({'ok' if last.get('ok') else 'failed'})"))
+        lines.append(f"Logs: {_LOGS[report['manager']]}")
         return "\n".join(lines)
     verb = "write" if report["command"] == "install" else "remove"
     for item in report["files"]:
@@ -547,4 +553,6 @@ def render(report: Mapping[str, Any]) -> str:
         lines.append("Not started: it starts at your next login, or now with lifecontext service install.")
     if report["command"] == "install" and report["manager"] == "systemd" and not report.get("dry_run"):
         lines.append("To keep it running after you log out: loginctl enable-linger \"$USER\"")
+    if report["command"] == "install" and not report.get("dry_run"):
+        lines.append(f"Logs: {_LOGS[report['manager']]}")
     return "\n".join(lines)

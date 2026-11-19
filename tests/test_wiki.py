@@ -1,4 +1,5 @@
 """Fake reflection provenance tests; semantic entailment is deliberately not claimed."""
+import contextlib
 import asyncio
 import hashlib
 import json
@@ -13,11 +14,12 @@ from urllib.parse import unquote
 from local_paths import scratch_root
 
 from lifecontext.application import ApplicationError, JournalApplication
-from lifecontext.catalog import LifeContextCatalog
+from lifecontext.catalog import CatalogConflict, LifeContextCatalog
 from lifecontext.custody import SourceManifest
 from lifecontext.derived import DerivedStore
 from lifecontext.paths import LifeContextPaths
 from lifecontext.wiki import (
+    COMPILE_INSTRUCTIONS,
     MAX_PAGE_CLAIMS,
     MAX_PATCH_BYTES,
     MAX_SOURCE_CLAIMS,
@@ -106,6 +108,8 @@ class WikiTests(unittest.TestCase):
                 raise ApplicationError("source_not_found")
             return {"source_id": sid, "source_version": version or manifest.source_version}
         app.documents.show.side_effect = show
+        app.documents.in_flight.return_value = False
+        app.documents.hold.side_effect = lambda *keys: contextlib.nullcontext()
         app.document_projections = Mock()
         app.document_projections.project_wiki.return_value = {"state": "completed"}
         app.document_projections.project_wiki_pages.side_effect = lambda pages: [
@@ -267,10 +271,45 @@ class WikiTests(unittest.TestCase):
         with self.assertRaises(WikiError):
             self.update()
         self.assertEqual(self.catalog.get_wiki_page(PAGE)["current_revision"], 1)
-        self.assertEqual(self.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "failed")
+        stage = self.catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_update_rejected"))
         self.citation["quote"] = "The sky is blue."
         self.update()
         self.assertEqual(self.catalog.get_wiki_page(PAGE)["current_revision"], 2)
+
+    def wiki_stage_code(self):
+        stage = self.catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual(stage["state"], "failed")
+        return stage["error_code"]
+
+    def test_only_a_model_failure_is_a_provider_failure(self):
+        async def down(query, **kwargs):
+            raise ConnectionError("model unreachable")
+
+        self.service.hindsight = SimpleNamespace(reflect=down)
+        with self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_provider_failed")
+        # A conflict or a bug in LifeContext's own code says nothing about the model.
+        self.service.hindsight = SimpleNamespace(reflect=lambda query, **kwargs: None)
+        for error in (CatalogConflict("stage conflict"), KeyError("bug")):
+            with self.subTest(error=error), unittest.mock.patch.object(self.service, "_evidence", side_effect=error):
+                with self.assertRaises(WikiError):
+                    self.update()
+                self.assertEqual(self.wiki_stage_code(), "internal_error")
+
+    def test_a_document_without_evidence_windows_or_with_an_unsplittable_passage_has_its_own_code(self):
+        with unittest.mock.patch.object(self.service, "_evidence_windows", return_value=iter(())), \
+                self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_no_evidence")
+        def too_large(*args, **kwargs):
+            raise WikiError("wiki evidence window limit")
+            yield
+        with unittest.mock.patch.object(self.service, "_evidence_windows", side_effect=too_large), \
+                self.assertRaises(WikiError):
+            self.update()
+        self.assertEqual(self.wiki_stage_code(), "wiki_evidence_limit")
 
     def test_invalid_refs(self):
         for key, value in (("original_sha256", "f"*64), ("extraction_revision", 2), ("passage_end", 2), ("source_id", "missing")):
@@ -489,8 +528,77 @@ class WikiTests(unittest.TestCase):
         patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
         self.assertEqual(len(patch.claims), 40)
         # Every window asks for the own page only; the summary and routing requests carry no evidence.
-        self.assertEqual(keys, [{"target", "example_patch", "evidence"}] * 40 + [{"document", "claims"}, {"document", "claims", "pages", "existing_claims"}])
+        self.assertEqual(keys, [{"target", "max_claims", "example_patch", "evidence"}] * 40 + [{"document", "claims"}, {"document", "claims", "pages", "existing_claims"}])
         self.assertEqual({c.citations[0].passage_start for c in patch.claims}, set(range(40)))
+
+    def windowed(self, texts):
+        """Store one passage per window, and answer each window with its first 20 characters."""
+        segments, offset = [], 0
+        for index, text in enumerate(texts):
+            text = text + " " + "x" * 22_000
+            segments.append({"text": text, "start": offset, "end": offset + len(text),
+                             "locator": {"kind": "lines", "start": index + 1, "end": index + 1,
+                                         "container": None, "schema_version": 1}})
+            offset += len(text)
+        stored = self.derived.write("doc_1", 1, 2, {**self.payload, "extraction_revision": 2, "segments": segments})
+        self.catalog.record_extraction("doc_1", 1, 2, original_sha256=self.digest, extractor="text",
+                                      extractor_version="1", config_sha256="c" * 64,
+                                      artifact_path=str(stored.path.relative_to(self.paths.lifeweave_home)),
+                                      artifact_sha256=stored.sha256, status="completed", passage_count=len(texts))
+        self.catalog.record_provider_chunk("chunk_book", "doc_1", 1, 2, passage_start=0, passage_end=len(texts), content_sha256="b" * 64)
+        self.catalog.update_provider_chunk("chunk_book", expected_revision=1, submission_state="submitted", completion_state="completed")
+
+        async def reflect(query, **kwargs):
+            data = json.loads(query.split("UNTRUSTED_DATA=", 1)[1])
+            if "evidence" not in data:
+                return {"text": "{}"}
+            segment = data["evidence"]["segments"][0]
+            quote = segment["text"][:20]
+            citation = {**self.citation, "extraction_revision": 2, "passage_start": segment["passage_index"],
+                        "passage_end": segment["passage_index"] + 1, "quote": quote}
+            return {"text": json.dumps({**self.value, "claims": [{"text": quote, "citations": [citation]}]})}
+        self.service.hindsight = SimpleNamespace(reflect=reflect)
+
+    def test_front_matter_claims_are_dropped_unless_nothing_else_remains(self):
+        self.windowed(["Copyright © 2021 by Alex", "Profit is oxygen for it", "ISBN 978-1-7374757-0-5"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["Profit is oxygen for"])
+        self.assertIn("never a copyright notice, ISBN or publisher line", COMPILE_INSTRUCTIONS)
+
+    def test_prose_about_publishing_or_copyright_law_stays_on_the_page(self):
+        self.windowed(["The study was published by WHO", "A guide to copyright law"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["The study was publis", "A guide to copyright"])
+
+    def test_a_front_matter_window_with_a_contradiction_keeps_its_claims(self):
+        self.windowed(["Copyright © 2021 by Alex", "Copyright © 2019 by Alex"])
+        inner = self.service.hindsight.reflect
+
+        async def reflect(query, **kwargs):
+            reply = await inner(query, **kwargs)
+            if "evidence" not in json.loads(query.split("UNTRUSTED_DATA=", 1)[1]):
+                return reply
+            value = json.loads(reply["text"])
+            claim = value["claims"][0]
+            value["contradictions"] = [{"left": claim, "right": claim, "left_date": "2021-01-01", "right_date": "2019-01-01"}]
+            return {"text": json.dumps(value)}
+        self.service.hindsight = SimpleNamespace(reflect=reflect)
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertTrue(patch.claims)
+        self.assertTrue(patch.contradictions)
+
+    def test_a_document_of_only_front_matter_keeps_its_first_claim(self):
+        self.windowed(["Copyright © 2021 by Alex", "All rights reserved here"])
+        self.update()
+        revision = self.catalog.get_wiki_revision(PAGE, 1)
+        patch = self.service.store.read(PAGE, 1, revision["artifact_sha256"])
+        self.assertEqual([c.text for c in patch.claims], ["Copyright © 2021 by "])
 
     def book(self, passages, size=22_000):
         segments, offset = [], 0
@@ -634,7 +742,7 @@ class WikiTests(unittest.TestCase):
         self.assertEqual(self.catalog.get_wiki_page("topic_old")["current_revision"], 2)
         self.assertEqual(self.current().links, ("topic_old", *(f"topic_new_{n}" for n in range(5))))
 
-    def test_count_overflow_is_a_full_page_and_titles_are_ours(self):
+    def test_each_window_keeps_its_share_of_the_page_and_titles_are_ours(self):
         self.book(60)
         calls = []
 
@@ -652,7 +760,8 @@ class WikiTests(unittest.TestCase):
 
         self.service.hindsight = SimpleNamespace(reflect=reflect)
         self.update()
-        self.assertLess(len(calls), MAX_SOURCE_CLAIMS)
+        # Each of the 48 sampled windows keeps its quota of one claim; the page never overflows.
+        self.assertEqual(len(calls), MAX_SOURCE_CLAIMS)
         page = self.catalog.get_wiki_page(PAGE)
         patch = self.service.store.read(PAGE, 1, self.catalog.get_wiki_revision(PAGE, 1)["artifact_sha256"])
         self.assertEqual(page["title"], "Original")
@@ -805,7 +914,7 @@ class WikiTests(unittest.TestCase):
                          [{"n": 1, "text": "The sky is blue."}])
         managed = self.service.show(PAGE)["managed"]
         label = "> Model summary, generated from the numbered claims below; verify before relying on it."
-        self.assertIn(label + "\n>\n> The page says the sky is blue. [1]\n\n1. The sky is blue. [doc_1 v1/e1 passages 0:1]", managed)
+        self.assertIn(label + "\n>\n> The page says the sky is blue. [1]\n\n1. The sky is blue. [Original, line 1]", managed)
         self.assertEqual(self.service.status()["summary_model_generated"], True)
         self.assertFalse(self.service.status()["semantic_support_verified"])
         self.assertNotIn("summary_missing", self.lint_codes())
@@ -897,12 +1006,14 @@ class WikiTests(unittest.TestCase):
                       "claims": [{"text": "© 2021 Видавництво «Знання».", "citations": [citation]},
                                  {"text": "Небо синє.", "citations": [citation]}]}
         asyncio.run(self.service.update_for_document("doc_2", 1))
+        # The copyright line never reaches the page, so the index cannot pick it either.
+        self.assertEqual([claim.text for claim in self.current(second).claims], ["Небо синє."])
         index = self.current("index")
         self.assertEqual([claim.text for claim in index.claims], ["Небо синє."])
         self.assertEqual(index.summary, ())
         managed = self.service.show("index")["managed"]
-        self.assertIn(f"1. Original ({second}) — Небо синє. [doc_2 v1/e1 passages 0:1]", managed)
-        self.summary = [{"text": "Книга про колір неба.", "claims": [2]}, {"text": "Друге речення.", "claims": [1]}]
+        self.assertIn(f"1. Original ({second}) — Небо синє. [Original, line 1]", managed)
+        self.summary = [{"text": "Книга про колір неба.", "claims": [1]}, {"text": "Друге речення.", "claims": [1]}]
         self.value["expected_revision"] = 1
         asyncio.run(self.service.update_for_document("doc_2", 1))
         index = self.current("index")
@@ -1245,7 +1356,10 @@ class WikiTests(unittest.TestCase):
                          {"topic_sky", *(f"topic_t{n:02}" for n in range(15))})
         self.assertEqual(set(shown), set(data["existing_claims"]))
 
+    @unittest.mock.patch("lifecontext.wiki.WINDOW_CLAIM_BYTES", 30)
     def test_fake_compiler_pipeline_in_english_and_ukrainian(self):
+        # A window is asked for one claim per 30 bytes here, so each short document is
+        # asked for as many claims as it has sentences.
         from wiki_fake_compiler import FakeCompiler
 
         from lifecontext.document_projection import DocumentProjectionService

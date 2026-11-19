@@ -42,6 +42,108 @@ def _entry(path: Path, *, directory: bool) -> dict[str, Any]:
     return {"path": str(path), "exists": True, "mode": f"{mode:04o}", "private": private}
 
 
+def _vault_refusals(root: Path, journal: Path, *, limit: int = 20, max_entries: int = 200_000) -> dict[str, Any]:
+    """Read-only scan of Journal's managed folders and the lock file for paths a vault write would refuse.
+
+    Lists symlinks, special files, entries owned by another user and folders that
+    group or others can write, as vault-relative paths. Entries are examined with
+    ``os.fwalk`` and ``stat`` on the folder's descriptor, never followed or opened;
+    a folder on another device is not entered but listed under ``skipped``, and the
+    scan stops after ``max_entries`` entries.
+    """
+    from lifecontext.vault import LOCK_FILENAME, MANAGED_DIRECTORIES
+
+    uid = os.geteuid()
+    try:
+        prefix = journal.relative_to(root).as_posix()
+    except ValueError:
+        prefix = journal.name
+    try:
+        journal_device = os.lstat(journal).st_dev
+    except OSError:
+        return {"paths": [], "count": 0, "truncated": False, "skipped": []}
+    paths: list[str] = []
+    skipped: list[str] = []
+    count = scanned = 0
+    truncated = False
+
+    def refuse(relative: str) -> None:
+        nonlocal count
+        count += 1
+        if len(paths) < limit:
+            paths.append(relative)
+
+    def refused(info: os.stat_result, *, lock: bool = False) -> bool:
+        directory = stat.S_ISDIR(info.st_mode)
+        mode = stat.S_IMODE(info.st_mode)
+        if lock:
+            return info.st_uid != uid or not stat.S_ISREG(info.st_mode) or (mode != 0o600 and info.st_nlink > 1)
+        return (
+            info.st_uid != uid
+            or not (directory or stat.S_ISREG(info.st_mode))
+            or (directory and bool(mode & 0o022))
+        )
+
+    tops = [(root / LOCK_FILENAME, LOCK_FILENAME), (journal / "README.md", f"{prefix}/README.md")]
+    tops += [(journal / name, f"{prefix}/{name}") for name in MANAGED_DIRECTORIES]
+    for top, top_relative in tops:
+        if scanned >= max_entries:
+            truncated = True
+            break
+        scanned += 1
+        try:
+            info = os.lstat(top)
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode) and info.st_dev != journal_device:
+            if len(skipped) < limit:
+                skipped.append(top_relative)
+            continue
+        if refused(info, lock=top_relative == LOCK_FILENAME):
+            refuse(top_relative)
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        walk = os.fwalk(top, follow_symlinks=False)
+        try:
+            try:
+                for dirpath, dirnames, filenames, dirfd in walk:
+                    sub = os.path.relpath(dirpath, top)
+                    base = top_relative if sub == "." else f"{top_relative}/{sub}"
+                    dirnames.sort()
+                    filenames.sort()
+                    subfolders = set(dirnames)
+                    descend = []
+                    for name in (*dirnames, *filenames):
+                        if scanned >= max_entries:
+                            truncated = True
+                            break
+                        scanned += 1
+                        try:
+                            entry = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if stat.S_ISDIR(entry.st_mode):
+                            if entry.st_dev != journal_device:
+                                if len(skipped) < limit:
+                                    skipped.append(f"{base}/{name}")
+                                continue
+                            if name in subfolders:
+                                descend.append(name)
+                        if refused(entry):
+                            refuse(f"{base}/{name}")
+                    if truncated:
+                        break
+                    dirnames[:] = descend
+            except OSError:
+                # The folder went away or became unreadable after the lstat: skip it.
+                continue
+        finally:
+            walk.close()
+        if truncated:
+            break
+    return {"paths": paths, "count": count, "truncated": truncated or count > len(paths), "skipped": skipped}
+
+
 def _tesseract(run: Callable[..., Any]) -> dict[str, Any]:
     path = shutil.which("tesseract")
     if path is None:
@@ -64,7 +166,27 @@ def _operation_counts(catalog: Path) -> dict[str, int] | None:
     try:
         connection = sqlite3.connect(f"{catalog.as_uri()}?mode=ro", uri=True, timeout=5)
         try:
-            rows = connection.execute("SELECT state, COUNT(*) FROM operations GROUP BY state").fetchall()
+            try:
+                # A failed document import, retry or rebuild is not counted once a later one
+                # completed for each of its sources at the same or a newer version. Other kinds
+                # (a category decision, a review) never hide it. rowid is the order.
+                rows = connection.execute(
+                    """SELECT state, COUNT(*) FROM operations o
+                       WHERE NOT (state IN ('retryable_failed', 'permanent_failed')
+                         AND operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')
+                         AND EXISTS (SELECT 1 FROM json_each(o.result_json, '$.sources'))
+                         AND NOT EXISTS (
+                           SELECT 1 FROM json_each(o.result_json, '$.sources') failed
+                           WHERE NOT EXISTS (
+                             SELECT 1 FROM operations n, json_each(n.result_json, '$.sources') done
+                             WHERE n.state = 'completed' AND n.rowid > o.rowid
+                               AND n.operation_kind IN ('document_import', 'document_retry', 'wiki_rebuild')
+                               AND json_extract(done.value, '$.source_id') = json_extract(failed.value, '$.source_id')
+                               AND json_extract(done.value, '$.source_version') >= json_extract(failed.value, '$.source_version'))))
+                       GROUP BY state"""
+                ).fetchall()
+            except sqlite3.OperationalError:  # an old or partial catalog, or unreadable result JSON
+                rows = connection.execute("SELECT state, COUNT(*) FROM operations GROUP BY state").fetchall()
         finally:
             connection.close()
     except sqlite3.Error:
@@ -154,6 +276,10 @@ def _service_report(fetch: Callable[[str], dict]) -> dict[str, Any]:
     reconciliation = status.get("reconciliation")
     if isinstance(reconciliation, dict):
         report["reconciliation_facts"] = reconciliation.get("fact_count")
+    pending = status.get("indexing_pending")
+    if isinstance(pending, dict):
+        # The count only: entry names come from journal content; ``lifecontext status`` lists them.
+        report["indexing_pending"] = pending.get("count")
     try:
         lint = fetch("/v1/wiki/lint")
         report["lint"] = {**dict(lint.get("counts") or {}), "omitted": lint.get("omitted")}
@@ -254,7 +380,7 @@ def run_doctor(
         read_daemon_start_record,
     )
     from lifecontext.hindsight import model_probe as run_model_probe
-    from lifecontext.initialize import rejects_forced_tool
+    from lifecontext.initialize import rejects_forced_tool, uses_plain_http
     from lifecontext.vault import default_journal_paths
 
     fetch = fetch or http_fetcher(port)
@@ -288,6 +414,8 @@ def run_doctor(
         problems.append("credentials_missing")
     if rejects_forced_tool(config.get("llm") or {}):
         warnings.append("model_rejects_forced_tool_use")
+    if uses_plain_http(config.get("llm") or {}):
+        warnings.append("model_uses_plain_http")
     probe = None
     if model_probe:
         probe = probe_failure("invalid_config") if settings is None else run_model_probe(settings)
@@ -303,6 +431,9 @@ def run_doctor(
         problems.append("vault_missing")
     elif not all(item["private"] for item in vault_entries.values()):
         problems.append("vault_unsafe")
+    refusals = _vault_refusals(root, journal) if all(item["private"] for item in vault_entries.values()) else None
+    if refusals and refusals["count"]:
+        warnings.append("vault_files_refused")
 
     vision = _vision_report(settings, credentials) if settings is not None else {"configured": None, "status": "unknown"}
     if vision["status"] == "blocked":
@@ -340,6 +471,7 @@ def run_doctor(
         "paths": {"home": home, "config": _entry(paths.config_path, directory=False),
                   "credentials": _entry(paths.credentials_path, directory=False), **{
                       f"vault_{name}": value for name, value in vault_entries.items()}},
+        "vault_refusals": refusals,
         "config": config, "credentials": credentials, "vision": vision,
         "service": service, "engine": engine,
         "operations": _operation_counts(paths.catalog_path) if home["private"] else None,
@@ -385,7 +517,17 @@ def render(report: Mapping[str, Any]) -> str:
         f"Service on port {report['command']['port']}: {service['state']}"
         + (f", ready: {'yes' if service.get('ready') else 'no'}" if service["state"] == "running" else ""),
     ]
+    refused = report.get("vault_refusals") or {}
+    if refused.get("count"):
+        more = refused["count"] - len(refused["paths"])
+        lines.append("Vault paths LifeContext would refuse to write through: " + ", ".join(refused["paths"])
+                     + (f" and {more} more" if more > 0 else ""))
+    if refused.get("skipped"):
+        lines.append("Vault folders not scanned (another device): " + ", ".join(refused["skipped"]))
     lines.append(_render_engine(report.get("engine") or {}))
+    if service.get("indexing_pending"):
+        lines.append(f"Journal entries waiting for indexing: {service['indexing_pending']} "
+                     "(`lifecontext status` lists them)")
     if "lint" in service:
         lint = service["lint"]
         lines.append(f"Wiki lint: {lint.get('error')} errors, {lint.get('warning')} warnings, {lint.get('info')} info")

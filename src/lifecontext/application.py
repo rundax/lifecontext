@@ -72,8 +72,14 @@ _READINESS_CAPABILITIES = (
     "attributed_reflect",
 )
 _RETRYABLE_OPERATION_ERRORS = {"provider_unavailable", "retain_failed"}
+# A refused journal retain or curation waits as long as it has already been failing, from 1 minute
+# to 6 hours, before the provider is asked again; capture repeats a pending note every 30 s.
+_MIN_RETRY_DELAY_SECONDS = 60
+_MAX_RETRY_DELAY_SECONDS = 21600
+_MAX_STARTUP_RESUBMITS = 5
 _CURATION_CONFIRMATION_TTL_SECONDS = 600
 _MAX_LISTED_REVIEWS = 50
+_MAX_LISTED_UNINDEXED = 20
 _MAX_REPORT_DOCUMENTS = 4096
 
 
@@ -99,6 +105,8 @@ class DurableResult(dict[str, Any]):
 
 class JournalApplication:
     """Coordinate the V1-owned stores without merging their authority."""
+
+    _startup_resubmits = 0
 
     def __init__(
         self,
@@ -151,11 +159,15 @@ class JournalApplication:
         self.documents = DocumentService(
             self.catalog, self.custody, self.derived, self.hindsight,
             wiki_hook=self._update_document_wiki,
+            wiki_summary_hook=self.wiki.summary_missing,
+            wiki_summary_retry_hook=self.wiki.write_missing_summary,
+            wiki_window_hook=self.wiki.window_report,
             projection_hook=lambda document: self.document_projections.project_document_with_wiki(document["source_id"], document["source_version"]),
             completion_hook=self._retire_superseded_document_versions,
             tesseract_path=shutil.which("tesseract"),
             vision=vision,
             vision_cache=VisionCache(self.paths.lifeweave_home),
+            journal_prefix=self.vault.journal_path.relative_to(self.vault.vault_root).as_posix(),
         )
         self._transfer_lock = asyncio.Lock()
         self._closed = False
@@ -166,6 +178,11 @@ class JournalApplication:
         *, source_id: str | None = None, source_version: int | None = None,
         vision: bool = True,
     ) -> dict[str, Any]:
+        # limits.max_file_bytes is the one effective limit; a larger file is too large, not invalid.
+        if isinstance(original_bytes, bytes) and len(original_bytes) > min(
+            self.limits.max_file_bytes, self.documents.limits.max_original_bytes, self.custody.max_bytes
+        ):
+            raise ApplicationError("body_too_large")
         try:
             outcome = await self.documents.import_document(
                 original_bytes, filename, declared_mime, provenance, idempotency_key,
@@ -197,11 +214,20 @@ class JournalApplication:
             raise ApplicationError("source_not_found") from None
 
     async def retry_document(self, operation_id: str, rerun_extraction: bool = False,
-                             vision: bool | None = None) -> dict[str, Any]:
+                             vision: bool | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        """Retry by operation ID or by source ID (its current version's latest operation)."""
         try:
-            outcome = await self.documents.retry(operation_id, rerun_extraction, vision)
+            if not re.fullmatch(r"op_[0-9a-f]{32}", operation_id) and any(
+                item["tombstone_type"] == "deleted" for item in self.catalog.list_tombstones(operation_id)
+            ):
+                # Like show_document: a deleted document is not found.
+                raise ApplicationError("source_not_found")
+            outcome = await self.documents.retry(operation_id, rerun_extraction, vision,
+                                                 idempotency_key=idempotency_key)
             document = outcome.get("document")
-            if document and document["stages"]["indexing"]["state"] == "completed":
+            # A retry that found a run in progress ran nothing; that run classifies the document.
+            if (document and document["stages"]["indexing"]["state"] == "completed"
+                    and not self.documents.in_flight(document["source_id"])):
                 await self._classify_document(document)
                 outcome["document"] = self.documents.show(document["source_id"], document["source_version"])
             return outcome
@@ -539,13 +565,24 @@ class JournalApplication:
         if source_id is None and version is not None:
             raise ApplicationError("invalid_request")
         request = {"source_id": source_id, "version": version}
-        operation = self._begin_operation(
-            idempotency_key, self._request_digest("POST /v1/wiki/rebuild", request),
-            "wiki_rebuild",
-        )
+        digest = self._request_digest("POST /v1/wiki/rebuild", request)
+        if source_id is not None and self.documents.in_flight(source_id):
+            try:
+                prior = self.catalog.lookup_operation(idempotency_key, digest, "wiki_rebuild")
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("internal_error") from None
+            if prior is None:
+                # An import, retry, reindex or rebuild of it runs and writes the page. Nothing
+                # is stored, so the same request with the same key works once that is done.
+                raise ApplicationError("conflict")
+        operation = self._begin_operation(idempotency_key, digest, "wiki_rebuild")
         # Do not repeat an uncertain publication after a timeout or process crash.
         if operation["state"] != "pending":
-            return DurableResult(self.operation_status(operation["operation_id"]), operation["operation_id"])
+            return DurableResult({**self.operation_status(operation["operation_id"]), "skipped": []},
+                                 operation["operation_id"])
+        skipped: list[str] = []
         try:
             if source_id is not None:
                 document = self.show_document(source_id, version)
@@ -577,13 +614,25 @@ class JournalApplication:
                                           "source_version": targets[0]["source_version"] if source_id else None}}
             operation = self.catalog.set_operation_intent(operation["operation_id"], result)
             operation = self._start_admitted_operation(operation)
-            for target in targets:
-                revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
-                result["item_count"] += len(revisions)
-                self.catalog.save_operation_result(operation["operation_id"], result)
-                for projection in self.document_projections.project_wiki_pages(sorted({row["page_id"] for row in revisions})):
-                    if projection["state"] != "completed":
+            for target in list(targets):
+                if self.documents.in_flight(target["source_id"]):
+                    if source_id is not None:
                         raise ApplicationError("conflict")
+                    # An import, retry or reindex of it runs and writes the page itself. It
+                    # leaves the operation's sources, so doctor does not count it as rebuilt.
+                    skipped.append(target["source_id"])
+                    result["sources"].remove(target)
+                    self.catalog.save_operation_result(operation["operation_id"], result)
+                    continue
+                # Held while it runs: a retry started meanwhile returns the running state instead
+                # of a second run. An import with a new key (a new version too) still runs beside it.
+                with self.documents.hold(target["source_id"]):
+                    revisions = await self.wiki.update_for_document(target["source_id"], target["source_version"])
+                    result["item_count"] += len(revisions)
+                    self.catalog.save_operation_result(operation["operation_id"], result)
+                    for projection in self.document_projections.project_wiki_pages(sorted({row["page_id"] for row in revisions})):
+                        if projection["state"] != "completed":
+                            raise ApplicationError("conflict")
             self._transition_operation(operation["operation_id"], "running", "completed", result=result)
         except Exception as exc:  # noqa: BLE001 -- durable boundary redacts dependency failures
             code = exc.code if isinstance(exc, ApplicationError) else (
@@ -593,14 +642,25 @@ class JournalApplication:
             self._fail_operation(operation["operation_id"], code, result=current["result"])
             if operation["state"] != "running":
                 raise ApplicationError(code) from None
-        return DurableResult(self.operation_status(operation["operation_id"]), operation["operation_id"])
+        # Only the first answer names the skipped documents; the operation does not keep them.
+        return DurableResult({**self.operation_status(operation["operation_id"]), "skipped": skipped},
+                             operation["operation_id"])
 
     async def recover_startup(self, *, limit: int = 100) -> dict[str, int]:
         """Resume bounded local work and reconcile interrupted external effects."""
+        # The first compile, perhaps one this recovery resumes, then finds the provider layer loaded.
+        warm = getattr(self.compiler, "warm", None)
+        if callable(warm):
+            try:
+                warm()
+            except Exception as exc:  # noqa: BLE001 -- a preload that cannot start never stops the service
+                logging.getLogger(__name__).warning("Model client preload not started: %s", type(exc).__name__)
         try:
             operations = self.catalog.list_recoverable_operations(limit=limit)
         except CatalogError:
             raise ApplicationError("internal_error") from None
+        # Each provider call can take minutes and the API listens only after recovery.
+        self._startup_resubmits = _MAX_STARTUP_RESUBMITS
         report = {
             "examined": 0,
             "resumed": 0,
@@ -704,7 +764,8 @@ class JournalApplication:
             expected_hash = source.get("sha256")
             expected_size = result.get("size_bytes")
         try:
-            if self.catalog.list_tombstones(source_id):
+            # A deleted or forgotten source is never sent to the provider again.
+            if self.catalog.source_withdrawn(source_id, source_version):
                 self._record_recovery_failure(operation, "source_conflict")
                 return False
         except CatalogError:
@@ -757,7 +818,64 @@ class JournalApplication:
                 result=self._manifest_result(submitted),
             )
             report["completed"] += 1
+            self._try_project(source_id, source_version)
             return completed["state"] == "completed"
+        reconciled = False
+        try:
+            provider_state = self.catalog.get_provider_state(source_id, source_version)
+        except CatalogError:
+            return False
+        if (
+            current["state"] == "running"
+            or provider_state is None
+            or provider_state["submission_state"] != "failed"
+        ):
+            # Interrupted during the provider call: done if the provider holds this exact version,
+            # else recorded as refused so it is offered again below.
+            if await self._reconcile_provider_metadata(current, manifest, report):
+                return True
+            reconciled = True
+            current = self.catalog.get_operation(current["operation_id"])
+            if current is None:
+                return False
+        if current["state"] == "retryable_failed":
+            # The provider refused the original from custody; offer it once more.
+            try:
+                provider_state = self.catalog.get_provider_state(source_id, source_version)
+                resubmit = (
+                    provider_state is not None
+                    and provider_state["submission_state"] == "failed"
+                    and not self._newer_version_exists(source_id, source_version)
+                    and not self._retry_waiting(current)
+                    and self._take_startup_resubmit()
+                )
+            except (ApplicationError, CatalogError):
+                return False
+            if resubmit:
+                current = self._start_admitted_operation(current)
+                report["resumed"] += 1
+                try:
+                    submitted = await self._submit_retained_manifest(
+                        manifest, evidence.original_bytes
+                    )
+                    self._try_project(source_id, source_version)
+                except Exception as exc:  # noqa: BLE001 -- any failure fails the operation
+                    self._startup_resubmits = 0  # the provider still refuses: the rest wait too
+                    code = self._retain_error_code(exc)
+                    self._fail_operation(
+                        current["operation_id"], code, result=current["result"]
+                    )
+                    return False
+                completed = self._transition_operation(
+                    current["operation_id"],
+                    "running",
+                    "completed",
+                    result=self._manifest_result(submitted),
+                )
+                report["completed"] += 1
+                return completed["state"] == "completed"
+        if reconciled:
+            return False
         return await self._reconcile_provider_metadata(current, manifest, report)
 
     async def _reconcile_provider_metadata(
@@ -766,18 +884,15 @@ class JournalApplication:
         manifest: SourceManifest,
         report: dict[str, int],
     ) -> bool:
-        try:
-            document = await self.hindsight.get_document(manifest.source_id)
-        except Exception:
+        held = await self._provider_holds(manifest)
+        if held is None:
             self._record_recovery_failure(operation, "provider_unavailable")
             return False
-        metadata = document.get("document_metadata")
-        if (
-            document.get("id") != manifest.source_id
-            or not isinstance(metadata, Mapping)
-            or metadata.get("source_version") != str(manifest.source_version)
-            or metadata.get("sha256") != manifest.sha256
-        ):
+        if held != "exact":
+            if held == "older":
+                # Sending this version replaces nothing newer: record it as refused, so it is offered again.
+                with contextlib.suppress(CatalogError):
+                    self._record_provider_failure(manifest)
             self._record_recovery_failure(operation, "conflict")
             return False
         if operation["state"] == "pending":
@@ -804,6 +919,7 @@ class JournalApplication:
             result=self._manifest_result(manifest),
         )
         report["completed"] += 1
+        self._try_project(manifest.source_id, manifest.source_version)
         return completed["state"] == "completed"
 
     async def _recover_curation_operation(
@@ -839,6 +955,13 @@ class JournalApplication:
             or history["prepared_operation_id"] != intent.get("prepared_operation_id")
         ):
             return False
+        if action in {"correct", "reindex"}:
+            # A deleted or forgotten source is never sent to the provider again.
+            try:
+                if self.catalog.source_withdrawn(source_id, source_version):
+                    return False
+            except CatalogError:
+                return False
 
         if was_pending:
             operation = self._start_admitted_operation(operation)
@@ -991,15 +1114,43 @@ class JournalApplication:
             ):
                 return False
             target_manifest = target.manifest
-            if not await self._provider_has_exact_manifest(target_manifest):
+            held = await self._provider_holds(target_manifest)
+            if held is None:
                 return False
+            if held == "other":
+                self._record_recovery_failure(operation, "conflict")
+                return False
+            if held == "older":
+                # The provider refused the correction, or the call was interrupted: offer it once more.
+                try:
+                    if (
+                        self.catalog.get_provider_state(source_id, target_version) is None
+                        or self._newer_version_exists(source_id, target_version)
+                        or self._retry_waiting(operation)
+                        or not self._take_startup_resubmit()
+                    ):
+                        return False
+                    self._record_provider_failure(target_manifest)
+                except (ApplicationError, CatalogError):
+                    return False
+                if state == "retryable_failed":
+                    operation = self._start_admitted_operation(operation)
+                report["resumed"] += 1
+                try:
+                    await self._submit_curation_source(target_manifest, target.original_bytes)
+                except Exception as exc:  # noqa: BLE001 -- any failure fails the operation
+                    self._startup_resubmits = 0  # the provider still refuses: the rest wait too
+                    self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
+                    return False
             try:
-                self.project(source_id, target_version)
+                self._try_project(source_id, target_version)
                 if history is None:
                     self.catalog.record_curation_history(
                         operation["operation_id"], source_id, target_version, action
                     )
-            except Exception:
+            except Exception as exc:
+                # Never leave a recovered correction running: it ends completed or failed.
+                self._fail_operation(operation["operation_id"], self._curation_error_code(exc))
                 return False
             return self._complete_recovered_curation(operation, target_manifest, report)
 
@@ -1014,24 +1165,31 @@ class JournalApplication:
                     return False
                 return self._complete_recovered_curation(operation, manifest, report)
             if history is not None and history["source_version"] == source_version:
-                if await self._provider_has_exact_manifest(manifest):
+                if await self._provider_holds(manifest) == "exact":
                     return self._complete_recovered_curation(operation, manifest, report)
             return False
 
         return False
 
-    async def _provider_has_exact_manifest(self, manifest: SourceManifest) -> bool:
+    async def _provider_holds(self, manifest: SourceManifest) -> str | None:
+        """What the provider holds for this source: "exact" (this version), "older" (nothing or an
+        older version), "other" (a newer or different one); None when it could not be asked."""
         try:
             document = await self.hindsight.get_document(manifest.source_id)
         except Exception:
-            return False
+            return None
         metadata = document.get("document_metadata")
-        return (
-            document.get("id") == manifest.source_id
-            and isinstance(metadata, Mapping)
-            and metadata.get("source_version") == str(manifest.source_version)
+        if document.get("id") != manifest.source_id or not isinstance(metadata, Mapping):
+            return "older"
+        if (
+            metadata.get("source_version") == str(manifest.source_version)
             and metadata.get("sha256") == manifest.sha256
-        )
+        ):
+            return "exact"
+        held_version = metadata.get("source_version")
+        if isinstance(held_version, str) and held_version.isdecimal() and int(held_version) < manifest.source_version:
+            return "older"
+        return "other"
 
     def _complete_recovered_curation(
         self,
@@ -1277,9 +1435,17 @@ class JournalApplication:
                 return False
             try:
                 self.vault.safe_write_text(path, content)
-            except VaultError:
-                self._mark_projection_conflict(projection, None)
-                return False
+            except VaultError as exc:
+                if exc.code in {"conflict", "file_exists", "unmanaged_file", "sync_conflict"}:
+                    self._mark_projection_conflict(projection, None)
+                else:
+                    # The vault failed, not an edit: reconcile writes the entry once it is fixed.
+                    self.catalog.set_projection_state(
+                        source_id, source_version, state="failed", projection_path=path,
+                        desired_hash=desired_hash, last_projected_hash=last_hash,
+                    )
+                # Raised, so a projection retried after a failed write reports the vault's reason.
+                raise
 
         self.catalog.set_projection_state(
             source_id,
@@ -1366,6 +1532,22 @@ class JournalApplication:
             and metadata.get("source_version") == manifest.source_version
             and metadata.get("source_checksum") == manifest.sha256
         )
+
+    def _take_startup_resubmit(self) -> bool:
+        """Spend one of this start's journal resubmissions; the rest wait for the next start or a retry."""
+        if self._startup_resubmits <= 0:
+            return False
+        self._startup_resubmits -= 1
+        return True
+
+    def _newer_version_exists(self, source_id: str, source_version: int) -> bool:
+        try:
+            return any(
+                manifest.source_version > source_version
+                for manifest in self.catalog.list_source_manifests(source_id)
+            )
+        except CatalogError:
+            raise ApplicationError("internal_error") from None
 
     def _record_recovery_failure(self, operation: dict[str, Any], code: str) -> None:
         state = operation["state"]
@@ -1760,6 +1942,8 @@ class JournalApplication:
                 tesseract_path=self.documents.tesseract_path,
                 max_chunk_bytes=self.documents.max_chunk_bytes,
             )
+            # One in-flight map, so a retry or rebuild meanwhile sees the restore's runs.
+            restored_documents._inflight = self.documents._inflight
             metadata = {(row["source_id"], row["source_version"]): row for row in snapshot.metadata}
             for source_id, record in latest.items():
                 if source_id in document_sources:
@@ -1772,6 +1956,7 @@ class JournalApplication:
                     )
                     if outcome["state"] != "completed":
                         raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
+                    self._restored_page_done(source_id, record.source_version)
                 else:
                     provider = self.catalog.get_provider_state(source_id, record.source_version)
                     if not (provider is not None and provider["submission_state"] == "submitted"
@@ -1794,6 +1979,22 @@ class JournalApplication:
             raise ApplicationError("invalid_request") from None
         except (CatalogError, CustodyError, VaultError, ValueError, TypeError):
             raise ApplicationError("transfer_unavailable") from None
+
+    def _restored_page_done(self, source_id: str, version: int) -> None:
+        """A bundle carries no stage rows: a restored page that cites this version completes
+        its wiki stage (lint lists the page as stale until a rebuild). Without one the stage
+        stays pending and a retry compiles the page."""
+        page = self.catalog.get_wiki_page(source_page_id(source_id))
+        if not page or not page["current_revision"]:
+            return
+        revision = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"])
+        stage = self.catalog.get_document_stage(source_id, version, "wiki")
+        if stage["state"] != "pending" or not any(
+                (item["source_id"], item["source_version"]) == (source_id, version) for item in revision["dependencies"]):
+            return
+        for state in ("running", "completed"):
+            stage = self.catalog.transition_document_stage(source_id, version, "wiki", expected_state=stage["state"],
+                                                           expected_revision=stage["revision"], state=state)
 
     def _preflight_bundle_import(self, records: tuple[BundleRecord, ...], *, document_sources: set[str] | None = None) -> None:
         for record in records:
@@ -1994,12 +2195,16 @@ class JournalApplication:
                 self._retained_result(operation["result"], source_id, source_version),
                 operation["operation_id"],
             )
-        if operation["state"] in {"retryable_failed", "permanent_failed"}:
+        if operation["state"] == "permanent_failed":
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if operation["state"] == "running":
             raise ApplicationError("provider_unavailable")
+        # A retryable failure with the same key and request runs again from custody.
+        retrying = operation["state"] == "retryable_failed"
         try:
-            if self.catalog.list_tombstones(source_id):
+            if self.catalog.list_tombstones(source_id) or (
+                retrying and self.catalog.source_withdrawn(source_id, source_version)
+            ):
                 self._fail_operation(
                     operation["operation_id"],
                     "source_conflict",
@@ -2024,14 +2229,23 @@ class JournalApplication:
                 "size_bytes": len(original_bytes),
             },
         }
-        try:
-            operation = self.catalog.set_operation_intent(
-                operation["operation_id"], intent_result
-            )
-        except OperationConflict:
-            raise ApplicationError("conflict") from None
-        except CatalogError:
-            raise ApplicationError("invalid_request") from None
+        if retrying:
+            if operation["result"].get("recovery_intent") != intent_result["recovery_intent"]:
+                raise ApplicationError(operation["error_code"] or "retain_failed")
+            if self._newer_version_exists(source_id, source_version):
+                # The engine keeps one document per source; never index an older version over it.
+                raise ApplicationError("source_conflict")
+            if self._retry_waiting(operation):
+                raise ApplicationError(operation["error_code"] or "retain_failed")
+        else:
+            try:
+                operation = self.catalog.set_operation_intent(
+                    operation["operation_id"], intent_result
+                )
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("invalid_request") from None
         try:
             try:
                 manifest = self.custody.write_version(
@@ -2041,9 +2255,13 @@ class JournalApplication:
                     provenance=normalized_provenance,
                 )
             except CustodyConflict:
-                if not _allow_existing:
+                if not (_allow_existing or retrying):
                     raise
-                existing = self.custody.resolve_exact(source_id, source_version)
+                try:
+                    existing = self.custody.resolve_exact(source_id, source_version)
+                except CustodyError:
+                    # A damaged custody copy is never sent; a retry cannot repair it.
+                    raise ApplicationError("evidence_unavailable") from None
                 if (
                     existing.original_bytes != original_bytes
                     or existing.manifest.to_dict()["provenance"] != normalized_provenance
@@ -2057,10 +2275,11 @@ class JournalApplication:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
             raise ApplicationError(code) from None
+        self._try_project(source_id, source_version)
         operation = self._start_admitted_operation(operation)
         try:
             manifest = await self._submit_retained_manifest(manifest, original_bytes)
-            self.project(source_id, source_version)
+            self._try_project(source_id, source_version)
         except Exception as exc:
             code = self._retain_error_code(exc)
             self._fail_operation(operation["operation_id"], code, result=operation["result"])
@@ -2169,10 +2388,25 @@ class JournalApplication:
                 digest_request["prepared_operation_id"] = request["prepared_operation_id"]
 
         request_digest = self._request_digest(f"POST /v1/curation/{action}", digest_request)
+        if action == "reindex" and self.documents.in_flight(source_id):
+            try:
+                prior = self.catalog.lookup_operation(idempotency_key, request_digest, "curation")
+            except OperationConflict:
+                raise ApplicationError("conflict") from None
+            except CatalogError:
+                raise ApplicationError("internal_error") from None
+            if prior is None or prior["state"] != "completed":
+                # An import, retry or rebuild of the document runs. Refused before anything is
+                # stored, so startup recovery never runs it and the same request and key work later.
+                raise ApplicationError("conflict")
         operation = self._begin_operation(idempotency_key, request_digest, "curation")
         if operation["state"] == "completed":
             return self._curation_response(operation)
-        if operation["state"] in {"retryable_failed", "permanent_failed"}:
+        # A correction or reindex only resubmits custody, so after a retryable failure the same request runs again.
+        retrying = operation["state"] == "retryable_failed" and action in {"correct", "reindex"}
+        if operation["state"] in {"retryable_failed", "permanent_failed"} and not retrying:
+            raise ApplicationError(operation["error_code"] or "retain_failed")
+        if retrying and self._retry_waiting(operation):
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if operation["state"] == "running":
             # An earlier process may have crossed an external write boundary.
@@ -2181,7 +2415,7 @@ class JournalApplication:
             intent_manifest = self.catalog.get_manifest(source_id, bound_version)
         except CatalogError:
             raise ApplicationError("internal_error") from None
-        if intent_manifest is not None:
+        if intent_manifest is not None and not retrying:
             recovery_intent: dict[str, Any] = {
                 "kind": "curation",
                 "action": action,
@@ -2209,12 +2443,15 @@ class JournalApplication:
             latest = self.catalog.get_current_manifest(source_id)
             if latest is None:
                 raise ApplicationError("source_not_found")
-            if latest.source_version != bound_version:
+            if latest.source_version != bound_version and not (
+                # A refused correction registered its target already; any newer version wins.
+                retrying and action == "correct" and latest.source_version == bound_version + 1
+            ):
                 raise ApplicationError("conflict")
             evidence = self.custody.resolve_exact(source_id, bound_version)
             if (
-                evidence.manifest.sha256 != latest.sha256
-                or evidence.manifest.size_bytes != latest.size_bytes
+                evidence.manifest.sha256 != intent_manifest["sha256"]
+                or evidence.manifest.size_bytes != intent_manifest["size_bytes"]
             ):
                 raise ApplicationError("evidence_unavailable")
 
@@ -2241,9 +2478,10 @@ class JournalApplication:
                         raise ApplicationError("conflict") from None
                     manifest = existing.manifest
                 self.catalog.register_manifest(manifest)
+                self._try_project(source_id, target_version)
                 submission_content = content_bytes
                 await self._submit_curation_source(manifest, submission_content)
-                self.project(source_id, target_version)
+                self._try_project(source_id, target_version)
                 self.catalog.record_curation_history(
                     operation["operation_id"], source_id, target_version, action
                 )
@@ -2339,13 +2577,17 @@ class JournalApplication:
 
     async def _reindex_document(self, manifest: SourceManifest, key: str) -> dict[str, Any]:
         sid, version = manifest.source_id, manifest.source_version
+        if self.documents.in_flight(sid):
+            # Before any operation or stale mark: the same request runs once that run is done.
+            raise ApplicationError("conflict")
         digest = self._request_digest("document-reindex", {"source_id": sid, "source_version": version, "key": key})
         existing = self.catalog.lookup_operation("document-reindex:" + key, digest, "document_retry")
         if existing is not None:
             outcome = await self.documents.recover(existing)
             if outcome["state"] != "completed":
                 raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
-            await self._retire_document_chunks(sid, version, before_revision=existing["result"]["recovery_intent"]["extraction_revision"])
+            with self.documents.hold(sid):
+                await self._retire_document_chunks(sid, version, before_revision=existing["result"]["recovery_intent"]["extraction_revision"])
             return outcome
         extractions = self.catalog.list_extractions(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
@@ -2359,8 +2601,10 @@ class JournalApplication:
         outcome = await self.documents.recover(operation)
         if outcome["state"] != "completed":
             raise ApplicationError(outcome.get("error_code") or "provider_unavailable")
-        # Old retrieval mappings must not remain authoritative after a new extraction.
-        await self._retire_document_chunks(sid, version, before_revision=revision)
+        # Old retrieval mappings must not remain authoritative after a new extraction. The run
+        # held the source in the in-flight map; the retirement holds it too.
+        with self.documents.hold(sid):
+            await self._retire_document_chunks(sid, version, before_revision=revision)
         return outcome
 
     async def _retire_document_chunks(self, source_id: str, version: int, *, before_revision: int | None = None) -> None:
@@ -2395,6 +2639,10 @@ class JournalApplication:
             self.wiki.mark_dependent_stale(source_id, manifest.source_version)
             await self._retire_document_chunks(source_id, manifest.source_version)
             self.catalog.set_provider_state(source_id, manifest.source_version, recall_visibility="not_visible")
+        # Kept wiki windows go once the versions can no longer be recalled: a compile that ends
+        # earlier would write them again, one that ends later finds the version withdrawn.
+        # A delete removes them again with the extractions.
+        self.derived.remove_wiki_windows(source_id)
         # Without a model: shared pages drop the source's claims and the index is
         # rebuilt; renderings already hide forgotten text.
         try:
@@ -2884,6 +3132,9 @@ class JournalApplication:
             capabilities = {name: False for name in _READINESS_CAPABILITIES}
         hindsight_ready = all(capabilities[name] for name in _READINESS_CAPABILITIES)
 
+        # The private root and Journal decide readiness; a refused file below them
+        # blocks only writes to that path, and status names it (never the API error body).
+        refused_path = None
         try:
             self.vault.verify_permissions()
         except VaultError as exc:
@@ -2893,21 +3144,30 @@ class JournalApplication:
                 if exc.code in {"unsafe_path", "unsafe_permissions"}
                 else "vault_unavailable"
             )
+            refused_path = exc.path if vault_error != "vault_unavailable" else None
         except Exception:
             vault_ready = False
             vault_error = "vault_unavailable"
         else:
             vault_ready = True
             vault_error = None
+            refusal = getattr(self.vault, "last_refusal", None)
+            if isinstance(refusal, dict):
+                refused_path = refusal.get("path")
+        if not isinstance(refused_path, str):
+            refused_path = None
 
         try:
             facts = self.catalog.list_reconciliation_facts()
+            unindexed = self.catalog.list_unindexed_journal_paths()
         except CatalogError:
             catalog_ready = False
             fact_counts: dict[str, int] = {}
+            unindexed = []
         except Exception:
             catalog_ready = False
             fact_counts = {}
+            unindexed = []
         else:
             catalog_ready = True
             fact_counts = {
@@ -2916,6 +3176,7 @@ class JournalApplication:
             }
 
         dependencies_ready = hindsight_ready and vault_ready and catalog_ready
+        journal_prefix = self.vault.journal_path.relative_to(self.vault.vault_root).as_posix()
         return {
             "ready": dependencies_ready,
             "max_file_bytes": self.limits.max_file_bytes,
@@ -2928,6 +3189,7 @@ class JournalApplication:
                     "ready": vault_ready,
                     "permissions": vault_ready,
                     "error": vault_error,
+                    "refused_path": refused_path,
                 },
                 "catalog": {"ready": catalog_ready},
             },
@@ -2935,7 +3197,33 @@ class JournalApplication:
                 "fact_count": sum(fact_counts.values()),
                 "facts": fact_counts,
             },
+            # Journal entries already in the vault whose indexing is pending or failed.
+            "indexing_pending": {
+                "count": len(unindexed),
+                "entries": [
+                    f"{journal_prefix}/{path}" for path in unindexed if path is not None
+                ][:_MAX_LISTED_UNINDEXED],
+            },
         }
+
+    def list_operations(self, *, state: str | None = None, outcome: str | None = None,
+                        limit: int = 100) -> list[dict[str, Any]]:
+        """Newest operations first, optionally in one state or with one document outcome."""
+        try:
+            # An outcome is computed, so it is matched among the newest 1000 operations.
+            rows = self.catalog.list_operations(state=state, limit=1000 if outcome else limit)
+        except CatalogError:
+            raise ApplicationError("invalid_request") from None
+        try:
+            # From the rows already read: one stage query for every document operation.
+            outcomes = self.documents.operation_outcomes(rows)
+        except CatalogError:
+            raise ApplicationError("operation_status_unavailable") from None
+        items = [{**self._operation_status(row, outcomes.get(row["operation_id"])), "operation_kind": row["operation_kind"],
+                  "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+        if outcome:
+            items = [item for item in items if item.get("outcome") == outcome][:limit]
+        return items
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         """Expose durable state with only the API's bounded summary fields."""
@@ -2945,6 +3233,14 @@ class JournalApplication:
             raise ApplicationError("operation_status_unavailable") from None
         if operation is None:
             raise ApplicationError("operation_status_unavailable")
+        # A document import or retry also says whether its wiki page and vault note came out.
+        outcome = None
+        if operation["operation_kind"] in {"document_import", "document_retry"}:
+            outcome = self.documents.operation_outcome(operation)
+        return self._operation_status(operation, outcome)
+
+    @staticmethod
+    def _operation_status(operation: Mapping[str, Any], outcome: str | None) -> dict[str, Any]:
         result = operation["result"]
         summary: dict[str, Any] = {}
         if "sources" in result:
@@ -2957,11 +3253,14 @@ class JournalApplication:
             summary["item_count"] = 1
         if operation["error_code"] is not None:
             summary["error_code"] = operation["error_code"]
-        return {
+        status = {
             "operation_id": operation["operation_id"],
             "state": operation["state"],
             "summary": summary,
         }
+        if outcome is not None:
+            status["outcome"] = outcome
+        return status
 
     @staticmethod
     def _request_digest(action: str, request: Mapping[str, Any]) -> str:
@@ -3018,7 +3317,15 @@ class JournalApplication:
                 "running",
                 result=operation["result"],
             )
-        if state in {"retryable_failed", "permanent_failed"}:
+        if state == "retryable_failed":
+            # The same request after a retryable failure runs again, from custody.
+            return self._transition_operation(
+                operation["operation_id"],
+                "retryable_failed",
+                "running",
+                result={key: value for key, value in operation["result"].items() if key != "error_code"},
+            )
+        if state == "permanent_failed":
             raise ApplicationError(operation["error_code"] or "retain_failed")
         if state == "running":
             # A prior process may have crossed an external boundary already.
@@ -3057,6 +3364,23 @@ class JournalApplication:
             result=stored_result,
             error_code=code,
         )
+
+    @staticmethod
+    def _retry_waiting(operation: Mapping[str, Any]) -> bool:
+        """True while a provider refusal's delay has not passed, from the catalog's own timestamps:
+        the next try waits as long as the operation had been failing at its last refusal (created_at
+        to updated_at), at least 1 minute and at most 6 hours, so the delay roughly doubles."""
+        if operation["error_code"] not in _RETRYABLE_OPERATION_ERRORS:
+            return False
+        try:
+            created = datetime.fromisoformat(operation["created_at"]).replace(tzinfo=UTC).timestamp()
+            updated = datetime.fromisoformat(operation["updated_at"]).replace(tzinfo=UTC).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return False
+        delay = min(max(updated - created, _MIN_RETRY_DELAY_SECONDS), _MAX_RETRY_DELAY_SECONDS)
+        wait = updated + delay - datetime.now(UTC).timestamp()
+        # A wait longer than the longest delay means the wall clock went back: the retry is due.
+        return 0 < wait <= _MAX_RETRY_DELAY_SECONDS
 
     @staticmethod
     def _retain_error_code(error: Exception) -> str:
@@ -3311,6 +3635,15 @@ class JournalApplication:
         """Render and project one exact local source version through ManagedVault."""
         with self.vault.writer_transaction():
             return self._project_journal_locked(source_id, source_version)
+
+    def _try_project(self, source_id: str, source_version: int) -> None:
+        """Project an entry beside indexing, which a projection failure never fails: an edit stays a
+        conflict, a vault error leaves the entry failed, both recorded for status, doctor and reconcile."""
+        try:
+            self.project(source_id, source_version)
+        except (ApplicationError, VaultError, CatalogError, CustodyError, RelationshipError) as exc:
+            _LOG.warning("journal entry %s v%s not projected: %s", source_id, source_version,
+                         getattr(exc, "code", type(exc).__name__))
 
     def _retained_date(self, source_id: str) -> str | None:
         """Return the local calendar day the catalog first registered a source."""

@@ -179,6 +179,8 @@ class WikiLintTests(WikiFixture):
         # A failed or pending wiki stage already explains the missing page.
         self.assertEqual(self.found(self.lint([self.document(wiki="failed", projection="pending", error_code="reflect_failed")])),
                          [("stage_failed", "error", None, "doc_1", "wiki: failed (reflect_failed)")])
+        hint = self.lint([self.document(wiki="failed", projection="pending", error_code="reflect_failed")])["findings"][0]["hint"]
+        self.assertIn("lifecontext documents retry doc_1 --json", hint)
 
     def test_orphan_shared_pages_and_links_to_missing_pages(self):
         self.publish("topic_sky", "Sky")
@@ -219,6 +221,10 @@ class WikiLintTests(WikiFixture):
         self.assertEqual([item[2] for item in found], [PAGE, "topic_big"])
         self.assertRegex(found[0][4], rf"^116/128 claims, \d+/{MAX_PATCH_BYTES} bytes$")
         self.assertRegex(found[1][4], rf"^20/128 claims, 4[3-7]\d\d\d/{MAX_PATCH_BYTES} bytes$")
+
+    def test_the_index_fills_its_page_by_design(self):
+        self.publish("index", "Index", [f"The sky is blue. {index}" for index in range(116)])
+        self.assertEqual(self.found(self.lint(), "page_near_limit"), [])
 
     def test_coverage_gaps(self):
         self.publish(PAGE, "Original")
@@ -311,6 +317,7 @@ class WikiReviewQueueTests(WikiFixture):
         app = JournalApplication.__new__(JournalApplication)
         app.catalog = self.catalog
         app.wiki = self.service
+        app.compiler = None
         return app
 
     def review(self):

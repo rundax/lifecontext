@@ -209,6 +209,7 @@ class ServiceTests(unittest.TestCase):
             ])
             self.assertTrue((home / "config" / "systemd" / "user" / SERVICE_UNIT).is_file())
             self.assertIn("Not started", render(report))
+            self.assertIn("Logs: journalctl --user -u lifecontext.service", render(report))
             mac = _Manager()
             install("Darwin", home, executable=EXECUTABLE, port=8765, maintenance=True, dry_run=False,
                     start=False, runner=mac, uid=501)
@@ -283,6 +284,9 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(report["units"][SERVICE_UNIT], {"installed": False, "active": "active", "enabled": "enabled"})
             self.assertTrue(report["last_maintenance"]["ok"])
             self.assertIn("Last maintenance: 2026-10-17T05:00:03Z (ok)", render(report))
+            self.assertIn("Logs: journalctl --user -u lifecontext.service", render(report))
+            mac = status("Darwin", home, runner=_Manager(), uid=501)
+            self.assertIn("Logs: ~/Library/Logs/lifecontext/", render(mac))
 
 
     def test_capture_units_run_every_thirty_seconds_without_merging_runs(self) -> None:

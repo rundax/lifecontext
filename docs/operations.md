@@ -34,7 +34,7 @@ type the exact model ID your provider uses; the provider's model list has them.
 The other provider IDs in [Required LLM configuration](#required-llm-configuration)
 are available through `--provider` and `LIFECONTEXT_PROVIDER`.
 
-With Anthropic, `claude-sonnet-5` works and `claude-haiku-5-5` costs less.
+With Anthropic, `claude-sonnet-5` is expected to work (not yet qualified end to end) and `claude-haiku-5-5` costs less.
 `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` and
 `claude-mythos-5-1` do not work yet: LifeContext's retain step uses strict
 structured output, which on Anthropic is a forced tool call, and these models
@@ -112,8 +112,10 @@ to `~/LifeContext/vault` and the time zone to the system's (from `TZ`,
   with `vault_path_has_symlink`; `init --force` stores the real path. A vault
   check or a key that fails leaves `config.yaml` as it was.
 - Exit codes: 0 when set up (also when only the key is missing), 1 with
-  `{"error": CODE}` under `--json`, 2 for a usage error.
-- A loopback `openai_compatible` endpoint needs no key (see [API key](#api-key)).
+  `{"error": CODE, "message": ..., "next_step": ..., "retryable": ...,
+  "request_id": null}` under `--json` (see [Failure codes](#failure-codes)),
+  2 for a usage error.
+- An `openai_compatible` endpoint needs no key (see [API key](#api-key)).
 - `--non-interactive` without a provider or a model stops with
   `provider_required` or `model_required`; four Claude models are refused for
   the native Anthropic adapter ([Choosing the model](#choosing-the-model)).
@@ -141,7 +143,9 @@ path to put in MCP client configs); the paths and modes of `~/.lifeweave`,
 `config.yaml`, `.env`, the vault root and `Journal`; a config summary (provider,
 model, base URL, time zone, which limits are customised) and whether the keys are
 present, never their values; the service on `--port` (`/healthz`, then
-`/v1/status` and the wiki lint counts with the local token); unfinished and
+`/v1/status` and the wiki lint counts with the local token), including how many
+journal entries are waiting for indexing (the count only: `lifecontext status`
+lists them); unfinished and
 failed operation counts from a read-only catalog connection; Tesseract, its
 version and installed languages (`eng`, `rus`, `ukr` are expected); the vision
 configuration (it never sends the probe image: use `preflight --vision-probe`);
@@ -152,7 +156,19 @@ and holds the current token, whether the daemon on the profile's port is this
 HOME's, another account's or HOME's, or not running, and, for this HOME's,
 whether it refuses a request without the token; whether Postgres runs and
 listens on its socket only or on TCP); and free disk space. It prints no
-journal, document or wiki content, and no key, token or password.
+journal, document or wiki content, and no key, token or password. It does
+name vault-relative paths: `vault_refusals` lists (up to 20) the folders and
+files below `Journal`, and the `.journal.lock` file, that a vault write would
+refuse (a symlink, a special file, an entry owned by another user, a folder
+that group or others can write). Those paths are often document titles. The
+scan is read-only, does not enter a folder on another device than `Journal`
+(it lists those under `skipped`), and stops after 200,000 entries (`truncated`). `status` names the last refused path as
+`dependencies.vault.refused_path` until it is acceptable again, and its plain
+output prints it on a `Refused vault path:` line. The MCP `status` tool never
+passes the path (it can name a journal note): it says only that a path was
+refused (`path_refused`) and that `lifecontext status` in a terminal names it. A command that fails with
+`unsafe_path` or `unsafe_permissions` names that path in its plain message too
+(read from `status`; never in the API error body or under `--json`).
 
 It exits 1 only for broken prerequisites, listed in `problems`:
 `python_unsupported`, `hindsight_packages`, `home_missing`, `home_unsafe`,
@@ -169,7 +185,10 @@ why). `warnings` do not change the exit code: `service_not_running`,
 `service_not_ready`, `tesseract_missing`, `tesseract_languages_missing`,
 `models_not_cached` (normal before the first start), `disk_low` (under 2 GB),
 `model_rejects_forced_tool_use` (`config.yaml` names one of the Claude models
-that do not work yet) and, with `--model-probe`, `model_reflect_check_failed`.
+that do not work yet), `vault_files_refused` (`vault_refusals` lists paths a
+write would refuse; other files in the vault are never reported),
+`model_uses_plain_http` (the model server is reached over plain HTTP on a host
+other than this machine) and, with `--model-probe`, `model_reflect_check_failed`.
 
 ## Required LLM configuration
 
@@ -183,6 +202,7 @@ llm:
   model: <exact model ID>
   base_url: <provider API base URL>
   reasoning_effort: high  # optional: low, medium, high, or xhigh
+  allow_insecure_http: <the same URL as base_url>  # optional: see the URL rules below
 ```
 
 `provider` and `model` are required. `base_url` is required for
@@ -223,9 +243,26 @@ provider-specific key lookup. It rejects unknown provider IDs, unknown fields in
 `hindsight.llm_provider`/`llm_model`/`llm_base_url` fields, invalid URLs, and
 credentials in YAML.
 
-Remote URLs must use HTTPS. HTTP is allowed only for loopback (`localhost`,
-`127.0.0.0/8`, or `::1`). URLs cannot contain credentials, query strings, or
-fragments. Never put a key in `base_url`.
+Remote URLs must use HTTPS. Plain HTTP is accepted without a flag only for
+loopback (`localhost`, `127.0.0.0/8`, `::1`), for IP addresses written out in
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale and
+carrier-grade NAT) or `fc00::/7`, and, inside the Docker image only (it sets
+`LIFECONTEXT_IN_CONTAINER=1`), for the name `host.docker.internal`. A name is
+never looked up, so any other name (`models.lan`), and `host.docker.internal`
+outside the image, is refused over HTTP, and so are `169.254.0.0/16`,
+`fe80::/10`, `0.0.0.0` and `::`. This applies to the `llm` block only: `vision`
+accepts plain HTTP for loopback only. Any other HTTP host needs a grant:
+`allow_insecure_http` holds the exact URL it was given for, which `lifecontext
+init --allow-insecure-http` and `lifecontext llm set --allow-insecure-http`
+write, and it counts only while `base_url` is still exactly that string. Edit
+`base_url` by hand and the grant stops applying, so the service refuses to start
+until you grant the new URL; a `true` from an earlier draft names no URL and
+grants nothing. The flag saves nothing for a URL that needs none (HTTPS, loopback,
+a private address). Over HTTP the text of your documents and notes, and the key
+if one is stored, travel unencrypted on the network: init and `llm set` print that,
+`llm show` lists the grant, and `doctor` reports the warning
+`model_uses_plain_http` for any non-loopback HTTP endpoint. URLs cannot contain
+credentials, query strings, or fragments. Never put a key in `base_url`.
 
 ## API key
 
@@ -239,9 +276,8 @@ LIFEWEAVE_LLM_API_KEY=<your provider API key>
 `.env` holds at most two keys: `LIFEWEAVE_LLM_API_KEY` for the `llm` provider
 and, optionally, `LIFEWEAVE_VISION_API_KEY` for the vision model (see below).
 LifeContext requires a non-empty LLM key for every provider except
-`openai_compatible` with a loopback `base_url` (`localhost`, `127.0.0.0/8` or
-`::1`): a local Ollama, llama.cpp or vLLM server needs none, `.env` may then be
-absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
+`openai_compatible`: an Ollama, llama.cpp or vLLM server usually needs none,
+`.env` may then be absent, and Hindsight gets the placeholder key `local`. A key in `.env` is still
 used when present. It does not read provider-specific variables
 (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `HINDSIGHT_LLM_API_KEY`), Hermes
 credentials, or ambient shell variables. The key file must be owned by the
@@ -321,7 +357,9 @@ No block means vision is off; it never inherits from `llm`, because sending page
 images is a separate decision. When it is on, a local router sends only the
 items that need it (pages without a usable text layer, figures on text pages,
 embedded pictures) as JPEGs of at most 2000 px to that endpoint. Everything else
-stays on the machine. `base_url` follows the same rules as for `llm`; `gemini`
+stays on the machine. `base_url` follows the same rules as for `llm`, except that plain HTTP is
+accepted for loopback only (no private-network addresses, no
+`host.docker.internal`, no `--allow-insecure-http`); `gemini`
 and `anthropic` may also set one for a compatible gateway.
 
 The key is `LIFEWEAVE_VISION_API_KEY` in `~/.lifeweave/.env`. Without it, the LLM
@@ -340,14 +378,14 @@ in its text, tagged `vision:<model>` in its locator and recorded as
 `vision_page:N` (or `_figure`, `_frame`, `_picture`) in the warnings, and model
 text is indexed in its own chunks. Readings are cached per source under
 `~/.lifeweave/vision-cache/` and deleted with the source. If the endpoint is
-unreachable, the import fails retryably; `documents retry OPERATION_ID` resumes
+unreachable, the import fails retryably; `documents retry SOURCE_ID` resumes
 the same extraction revision from the cache. Changing the model never rewrites
-existing documents; `documents retry OPERATION_ID --rerun-extraction` re-reads
+existing documents; `documents retry SOURCE_ID --rerun-extraction` re-reads
 them, and only the routed pages call the new model.
 
 An item the model refuses, or answers twice with unusable JSON, stays unresolved
 (`vision_refused:...`, `vision_failed:...`) and the document completes without it.
-A plain retry does not ask again. `documents retry OPERATION_ID
+A plain retry does not ask again. `documents retry SOURCE_ID
 --rerun-extraction` makes a new extraction revision with its own re-index: it
 asks again for `vision_failed` items, while a refusal stays cached and is not
 asked again until the vision provider or model changes.
@@ -364,6 +402,95 @@ on Linux and `~/Library/Logs/lifecontext/` on macOS (see
 including its later versions; the choice is recorded in its extraction ledger
 and honoured by recovery and every rerun. `documents retry ... --rerun-extraction
 --vision` lifts it.
+
+### A failed or partial import, and retrying it
+
+An operation can be `completed` while the document's wiki page or vault note did
+not come out. The document and operation responses therefore carry an `outcome`
+beside the unchanged catalog `state`: `completed` (every stage is done),
+`completed_with_errors` (the import finished but the wiki or vault stage failed),
+`running` (the service is still running a configured wiki or vault stage), or the
+operation's own state (`pending`, `retryable_failed`, `permanent_failed`,
+`cancelled`). A wiki or vault stage that is pending or running with nothing
+running it, for example a vault note a category rename, merge or reassignment
+put back to pending, makes the outcome `completed_with_errors`; it is listed in
+`problems` with its state (`pending` or `running`) as the `code` and
+`lifecontext documents retry SOURCE_ID` as the `next_step`. A document also lists
+`problems` (each with `stage`, `code`, `reason` and the `next_step` to run), its
+`last_operation_id`, and, once the page's note is in the vault, `wiki_page_id` and
+`vault_path` (from the vault root, starting with the configured Journal folder,
+for example `Journal/wiki/Lease.md`). `lifecontext operations get OPERATION_ID --json`
+and `GET /v1/operations` show the same `outcome` for document imports and retries;
+`GET /v1/operations?state=retryable_failed` or `?outcome=completed_with_errors`
+(among the newest 1000 operations) finds what a retry can pick up;
+`lifecontext operations list` asks the same (`--state STATE`, `--outcome OUTCOME`,
+`--limit N` up to 1000, default 100) and prints a table of operation ID, kind,
+state, outcome, source ID and last update, or the API's answer unchanged with
+`--json`. `lifecontext doctor` counts a failed import, retry or rebuild until a
+later one completes for each of its documents at the same or a newer version.
+
+`documents import` and `documents retry` exit with status 4 when the answer's
+`outcome` is not `completed` (`completed_with_errors`, `running`, or a failed
+operation state); the `--json` output is the same as with status 0. Plain output
+then lists each failed stage under `Problems:` and ends with a `Next:` line built
+from their `next_step`, usually `lifecontext documents retry SOURCE_ID`. Status 1
+stays a command that failed, and 3 is `wiki lint --fail-on`.
+
+Before uploading, `documents import` refuses a file whose name does not end in
+one of the extensions the extraction reads (`.docx`, `.jpeg`, `.jpg`,
+`.markdown`, `.md`, `.pdf`, `.png`, `.pptx`, `.tif`, `.tiff`, `.txt`, `.xlsx`)
+with `unsupported_format`, and a file above the service's `max_file_bytes` from
+`lifecontext status` with `body_too_large`; each message names the formats or the
+limit. When status cannot be read, the upload goes ahead and the service applies
+its own limit.
+
+`lifecontext documents retry SOURCE_ID` is the one command to run; the
+operation ID of any of the document's operations works too. It runs again every
+stage of the current version that is not completed: indexing, then the wiki page
+and the vault note, so an indexing failure that is fixed also puts the page in the
+vault. A completed stage is not repeated, and no retry, by source ID or by any of
+its operation IDs, rebuilds the page or vault note of a version a newer one
+replaced. If the last extraction could not read the file, the retry reads it
+again; `--rerun-extraction` (with `--vision` or `--no-vision`) does it on demand.
+A retry of a document that is still being processed by the running service (an
+import, retry, reindex or `wiki rebuild` of it) does not start a second run: it
+returns the operation's current state. A reindex or `wiki rebuild --source-id`
+of such a document is refused with `conflict` before anything is stored under
+its key; send the same request with the same key once it finishes. A `wiki
+rebuild` of every document leaves such documents out, lists their source IDs
+in `skipped` (in its first answer only) and keeps them out of the operation's
+`summary.sources`. A deleted document is not found, and a forgotten one is not
+retried.
+
+Idempotency: without `--idempotency-key`, each retry is a new attempt, so a
+failed wiki stage can be retried as often as needed, and the key a repeated
+`--rerun-extraction` uses is fixed per revision, so it never creates two. With
+`--idempotency-key KEY`, the key is binding: repeating the same key and request
+returns the same retry (and resumes it if it did not finish) instead of running
+it again, and the same key with a different request is refused as a conflict. Use
+a fresh key for every deliberate new attempt.
+
+A wiki stage that failed keeps its reason as the stage's error code:
+`wiki_provider_failed` (the model call failed), `wiki_update_rejected` (the page
+failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
+`wiki_evidence_limit` (one passage is too large for a model request),
+`wiki_no_evidence` (the document has no text to summarise) and `wiki_forget_pending`
+(a forget of the document was running; it gets no page unless that forget fails).
+`wiki_evidence_limit` and `wiki_no_evidence` come back the same way on every retry, so
+their `next_step` suggests none. Any other failure
+inside LifeContext reports `internal_error`. A wiki stage that completed without
+some of its evidence windows (the model failed on them; see
+[Document OCR and standalone wiki refresh](#document-ocr-and-standalone-wiki-refresh)) is listed in `problems` as
+`wiki_windows_skipped`; `documents retry SOURCE_ID` compiles the page again and
+asks the model only for those windows. A wiki stage that completed but whose
+page has no model summary is listed in `problems` as `wiki_summary_missing`;
+`documents retry SOURCE_ID` asks the model for the summary alone and publishes
+the same claims with it, without reading the evidence again. A page keeps room
+for the largest summary; one written by an earlier release that is too full for
+one is not listed (`wiki lint` names it, and `wiki rebuild` compiles it again
+with room). After a bundle restore, a document whose page came in the bundle has
+a completed wiki stage, and the page is stale until `lifecontext maintain
+--rebuild-stale N` or `wiki rebuild`; a document without one waits for a retry.
 
 ## Startup checks
 
@@ -499,18 +626,182 @@ unsupported capabilities, profile setup, daemon readiness, or retain failures.
 Reports never include config lines, profile contents, credential values, or
 raw provider exceptions.
 
-Engine access adds: `unsafe_engine_token` (the token file is not a private
-regular file of 64 hex digits; delete it and start again), `daemon_port_foreign`,
-`daemon_port_unavailable` (no free port near this HOME's), `daemon_stop_failed`
-(an old daemon of this HOME did not stop), `engine_auth_disabled`,
-`engine_auth_rejected`, and for Postgres `postgres_setup_failed`,
-`postgres_binaries_missing`, `postgres_start_failed`, `postgres_stop_failed`,
-`postgres_control_failed`, `postgres_state_unknown`, `postgres_instance_invalid`,
-`postgres_instance_unsafe`, `postgres_socket_dir_unsafe`,
-`postgres_socket_path_too_long`, `postgres_socket_path_unsupported` (a quote,
-comma or backslash in the HOME path) and `postgres_instance_missing` (a data
-directory without pg0's `instance.json`, which pg0 deletes when one of its own
-starts fails; restore the file from a backup).
+Under `--json` a failure is one object: `error` (the stable code), `message`
+(one sentence), `next_step` (what to do, worded for the owner when the repair is
+theirs), `retryable` and `request_id` (the service's request ID, or `null` when
+the service did not answer). The plain message is the same sentence followed by a
+`Next:` line. A call that gets no answer reports `api_unavailable`: a refused
+connection says the service is not reachable; a timeout says it may still be
+working, and it is `retryable` only for a read, because a write or a `recall`
+that timed out may still finish.
+
+The list below is generated from the table in `src/lifecontext/cli_output.py`
+(`python -m lifecontext.cli_output --write docs/operations.md` rewrites it; a
+test fails when the two differ).
+
+<!-- failure-codes:begin -->
+
+### The API's codes
+
+- `invalid_request`: The request was refused: an argument or the input is not valid. Next: check the arguments with `lifecontext COMMAND --help`.
+- `unauthorized`: The API token was refused or cannot be read. Next: run the command as the same user, with the same HOME, as the service.
+- `body_too_large`: The input or the answer is larger than the configured limit. Next: send a smaller input; for recall and reflect lower --max-results or --max-tokens.
+- `response_too_large`: The service's answer is larger than this command accepts. Next: ask for less: lower --limit, --max-results or --max-tokens.
+- `host_not_allowed`: The service accepts requests only for 127.0.0.1. Next: connect to 127.0.0.1 directly, not through a proxy or another host name.
+- `origin_not_allowed`: The service refuses requests from a web page. Next: call it from the CLI or an agent, not from a browser.
+- `source_not_found`: No source or page has that ID. Next: `lifecontext documents list` and `lifecontext wiki list` show the IDs; a document's wiki page is `source_` followed by its ID.
+- `source_conflict`: That source ID and version already hold different content. Next: use the next version number, or look at the stored one with `lifecontext documents show ID`.
+- `evidence_unavailable`: The stored original of that source cannot be read or no longer matches its checksum. Next: run `lifecontext reconcile`; if it still fails, `lifecontext doctor` says what is wrong.
+- `invalid_source_text`: The input must be UTF-8 text. Next: convert it to UTF-8, or import the file with `lifecontext documents import`.
+- `invalid_provider_response`: The model answered, but not in the expected form. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `provider_unavailable`: The model did not answer. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `retain_failed`: The memory engine did not store the text. Next: re-run with the same --idempotency-key; `lifecontext doctor` checks the service, the engine and the model.
+- `recall_failed`: The memory engine could not search. Next: re-run in a minute; `lifecontext doctor` checks the service, the engine and the model.
+- `reflect_failed`: The memory engine could not write an answer. Next: re-run in a minute, or use `lifecontext recall`; `lifecontext doctor` checks the service, the engine and the model.
+- `unattributed_evidence`: The answer could not be tied to a stored source, so it was withheld. Next: rephrase the question, or read the passages with `lifecontext recall`.
+- `result_limit_exceeded`: More results were asked for than the configured maximum. Next: lower --max-results.
+- `operation_status_unavailable`: The state of that operation cannot be read now. Next: check the operation ID and try again; `lifecontext doctor` checks the service, the engine and the model.
+- `curation_unavailable`: That change to the source cannot be made now. Next: look at the current version with `lifecontext documents show ID`, then re-run.
+- `transfer_unavailable`: The export or import bundle cannot be processed. Next: check the bundle file; `lifecontext doctor` checks the service, the engine and the model.
+- `conflict`: It changed first: the revision or version you gave is no longer the current one. Next: read the current revision with the matching list or show command and re-run with it.
+- `relationship_unavailable`: That relationship cannot be read or decided now. Next: see the current edges with `lifecontext relationships list`, then re-run.
+- `unsafe_path`: The service refused a path outside the vault or through a symbolic link. Next: `lifecontext doctor` names the path to fix.
+- `unsafe_permissions`: Files or folders of LifeContext are open to other users. Next: `lifecontext doctor` names them; make folders 0700 and files 0600.
+- `vault_unavailable`: The vault cannot be read or written. Next: check that the vault folder exists and belongs to you; `lifecontext doctor` checks the service, the engine and the model.
+- `catalog_busy`: The catalog is busy with another change. Next: wait a few seconds and re-run.
+- `internal_error`: The service failed unexpectedly. Next: re-run once; if it fails again, run `lifecontext doctor` and look for the request ID in the service log.
+
+### A document's wiki stage (its `error_code` and the `code` of a `problems` entry)
+
+- `wiki_provider_failed`: The model did not answer while the document's wiki page was compiled. Next: check the model with `lifecontext doctor --model-probe`, then run `lifecontext documents retry SOURCE_ID`.
+- `wiki_update_rejected`: The compiled wiki page failed its checks and was not saved. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_interrupted`: An earlier wiki run for the document stopped part-way. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_forget_pending`: A forget of the document was still running, so its wiki page was not compiled. Next: wait for the forget (`lifecontext operations list`); a forgotten document gets no page, and if the forget failed, run `lifecontext documents retry SOURCE_ID`.
+- `wiki_windows_skipped`: The wiki page was published without the parts of the document the model failed on. Next: run `lifecontext documents retry SOURCE_ID`; it asks only for those parts.
+- `wiki_evidence_limit`: One passage of the document is too large for a single model request, so a retry fails the same way. Next: import a version with shorter passages.
+- `wiki_no_evidence`: The document has no readable text to compile a wiki page from, so a retry fails the same way. Next: check what was read with `lifecontext documents show SOURCE_ID`.
+
+### The CLI's own codes
+
+- `api_unavailable`: The LifeContext service is not reachable at 127.0.0.1:PORT. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
+- `api_error`: The service answered with an error this command does not know. Next: update the CLI and restart the service so both run the same version.
+- `invalid_api_response`: The service's answer is not what this command expects. Next: update the CLI and restart the service so both run the same version.
+- `token_unavailable`: No LifeContext API token for this user: the service writes it when it starts, under the same HOME. Next: if LifeContext runs as the installed service, check it with `lifecontext service status`: it may still be starting, or recovering after a restart; otherwise start it with `lifecontext serve --port PORT`.
+- `input_unavailable`: Unable to read the selected source input. Next: give an existing regular file, or - for standard input.
+- `unsupported_format`: LifeContext does not import files of that type; the message names the ones it does. Next: save the file in one of those formats and import that copy.
+- `vault_missing`: The vault's Journal folder does not exist. Next: create it with mode 0700, or set `vault` in ~/.lifeweave/config.yaml.
+- `destination_exists`: The output file already exists; LifeContext never overwrites one. Next: choose a new file name.
+- `output_unavailable`: The output file cannot be written. Next: check that its folder exists and that you can write to it.
+- `invalid_config`: The config file ~/.lifeweave/config.yaml cannot be read. Next: `lifecontext doctor` says what is wrong.
+- `server_start_failed`: The service could not start. Next: `lifecontext preflight` and `lifecontext doctor` say why.
+- `nothing_to_change`: Nothing to change. Next: give --provider, --model, --base-url or --api-key-stdin; `lifecontext llm show` shows the current model.
+
+### The MCP server's own codes
+
+- `busy`: A previous MCP tool call is still finishing. Next: report it instead of retrying.
+- `path_not_allowed`: The file is outside the import directories the owner allowed, or in a protected place (the LifeContext home, the vault, a hidden directory in the home directory, or a system directory). Next: ask the owner to import it.
+
+### Local commands (`init`, `llm`, `service`, `skills`, `capture`, `backup`, `restore`, `hindsight stop`)
+
+- `setup_failed`: The setup files could not be written. Next: check that ~/.lifeweave belongs to you and is writable, then re-run.
+- `backup_failed`: The backup could not be written. Next: check the destination folder, then re-run.
+- `restore_failed`: The restore could not read or write its files. Next: check the archive and the LifeContext home, then re-run.
+- `hindsight_failed`: The memory engine could not be stopped. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `provider_required`: No model provider was chosen. Next: give --provider, or run `lifecontext init` in a terminal to choose one.
+- `model_required`: No model was chosen. Next: give --model with the exact ID your provider lists.
+- `model_unsupported`: That model does not work with LifeContext yet. Next: choose another model with --model.
+- `invalid_llm_settings`: The model settings are not valid. Next: check --provider, --model and --base-url, or `lifecontext llm show`.
+- `invalid_api_key`: The API key is not valid: one line of printable ASCII, without quotes. Next: give it again at the hidden prompt or on stdin with --api-key-stdin.
+- `api_key_required`: A model API key is required and none was given. Next: give it at the hidden prompt, on stdin with --api-key-stdin, or in the file named by LIFECONTEXT_API_KEY_FILE.
+- `api_key_file_unreadable`: The file named by LIFECONTEXT_API_KEY_FILE cannot be read. Next: check that it exists, holds one line and is readable by you.
+- `invalid_timezone`: That time zone is not known. Next: give an IANA name such as Europe/Kyiv.
+- `invalid_vault`: That vault location is not allowed. Next: choose a folder that is not `/`, not inside ~/.lifeweave and not a parent of it.
+- `vault_path_has_symlink`: The vault path in config.yaml goes through a symbolic link. Next: run `lifecontext init --force` to store the real path.
+- `unsafe_vault`: The vault folder is not a real folder of yours. Next: choose a folder you own, or fix its owner and type.
+- `unsafe_home`: The LifeContext home is not private to you, or HOME is not an absolute path. Next: check that HOME is an absolute path and ~/.lifeweave belongs to you with mode 0700, then re-run.
+- `unsafe_credentials`: The credentials file is open to other users or not a regular file. Next: make it a regular file with mode 0600, or delete it and run `lifecontext init` again.
+- `invalid_credentials`: The credentials file is malformed. Next: delete it and run `lifecontext init` again to enter the key.
+- `config_incomplete`: The config file has no model section. Next: run `lifecontext init --force` with --provider and --model.
+- `config_missing`: There is no config file with model settings yet. Next: run `lifecontext init` first.
+- `executable_not_found`: The `lifecontext` program to run as a service was not found. Next: install LifeContext so `lifecontext` is on PATH, then re-run.
+- `unsupported_platform`: Services are supported on Linux (systemd) and macOS (launchd) only. Next: run the API in a terminal with `lifecontext serve`.
+- `unit_write_failed`: The service files could not be written. Next: check that the user service folder is writable, then re-run.
+- `unit_remove_failed`: The service files could not be removed. Next: remove them by hand from the user service folder.
+- `systemctl_unavailable`: The `systemctl` program was not found. Next: use a systemd session, or run the API with `lifecontext serve`.
+- `systemctl_failed`: The `systemctl` program refused the command. Next: run `systemctl --user status lifecontext` to see why.
+- `launchctl_unavailable`: The `launchctl` program was not found. Next: run the API in a terminal with `lifecontext serve`.
+- `launchctl_failed`: The `launchctl` program refused the command. Next: run `launchctl list` to see the state of the LifeContext jobs.
+- `skill_missing`: The agent skill files are missing from this installation. Next: reinstall LifeContext, then re-run.
+- `link_failed`: The skill could not be linked into the agent's folder. Next: check that the folder exists and is writable, then re-run.
+- `unlink_failed`: The skill link could not be removed. Next: remove the link by hand.
+- `capture_requires_inbox`: The capture folder must be named Inbox. Next: leave out --inbox to use Journal/Inbox of the vault, or give a folder named Inbox.
+- `capture_unavailable`: The inbox folder cannot be read. Next: check that it exists and that you can read it.
+- `unsafe_state`: The capture state in ~/.lifeweave/capture is not private to you or is damaged. Next: check that the folder is yours with mode 0700, or remove its state.json, then re-run.
+- `file_exists`: A file is already at that place in the vault. Next: choose a new name.
+- `file_too_large`: The file is larger than the vault accepts. Next: use a smaller file.
+- `invalid_file`: The vault file is not valid. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `not_found`: No such file in the vault. Next: check the name and run it again.
+- `read_only_path`: That vault path is read-only for LifeContext. Next: choose another path.
+- `unmanaged_file`: The vault file is not one LifeContext manages. Next: leave it as it is, or move it out of the way.
+- `sync_conflict`: The vault holds a sync conflict copy of a LifeContext file. Next: settle the conflict in your sync tool, then run `lifecontext reconcile`.
+- `export_durability`: The vault copy could not be made durable on disk. Next: check the free space and that the disk is writable, then re-run.
+- `locking_unavailable`: File locking is not available on this system. Next: run LifeContext on Linux or macOS.
+- `lock_timeout`: Another LifeContext process holds the vault lock. Next: wait a moment and re-run.
+- `nothing_to_back_up`: There is no LifeContext data to back up. Next: run `lifecontext init` first.
+- `service_running`: The service is running. Next: stop it, or add --stop-service where the command allows it, then re-run.
+- `hindsight_running`: The memory engine is still running. Next: run `lifecontext hindsight stop`, then re-run.
+- `backup_write_failed`: The archive could not be written. Next: check the free space and the destination, then re-run.
+- `catalog_unreadable`: The catalog database is damaged or unreadable. Next: `lifecontext doctor` checks the service, the engine and the model.
+- `destination_inside_backup`: The archive would be written inside the data it backs up. Next: choose a destination outside the LifeContext home and the vault.
+- `source_changed`: A file changed while it was being backed up. Next: re-run the backup.
+- `archive_invalid`: The archive is not a LifeContext backup. Next: check that you gave the right file.
+- `archive_unreadable`: The archive cannot be read. Next: check the path and that you can read it.
+- `archive_incomplete`: The archive lacks files its manifest lists. Next: make a new backup.
+- `archive_changed`: The archive changed while it was being read. Next: copy it to a stable place, then re-run.
+- `archive_checksum_mismatch`: The archive does not match its checksum. Next: copy it again or use another backup.
+- `archive_config_invalid`: The config file in the archive is not valid. Next: use another backup.
+- `archive_instance_invalid`: The memory engine's instance file in the archive is not valid. Next: use another backup.
+- `home_not_empty`: This HOME already holds LifeContext data; a restore never overwrites it. Next: restore into a fresh HOME.
+- `vault_not_empty`: The vault folder to restore into is not empty. Next: restore into an empty or new folder.
+- `vault_outside_home`: The vault to restore is outside this HOME. Next: give `--vault DIR` with a folder inside your home directory.
+- `vault_location_refused`: The vault location is not one a restore writes to. Next: give `--vault DIR` with a folder inside ~/LifeContext.
+- `schema_unsupported`: The archive was made by a newer LifeContext. Next: update LifeContext, then re-run.
+
+### The memory engine
+
+- `missing_package`: A package of the memory engine is not installed. Next: reinstall LifeContext.
+- `unsupported_version`: The memory engine is not the version LifeContext pins. Next: reinstall LifeContext so the packages match.
+- `missing_capability`: The memory engine lacks a capability LifeContext needs. Next: reinstall LifeContext so the packages match.
+- `missing_credentials`: The model API key is missing. Next: run `lifecontext init` and give the key.
+- `document_generation_failed`: The model could not write the document. Next: check the model with `lifecontext doctor --model-probe`, then re-run the command.
+- `daemon_unavailable`: The memory engine is not answering or not healthy. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `daemon_port_foreign`: Another program holds the port this HOME's memory engine needs. Next: stop that program, then run `lifecontext doctor`.
+- `daemon_port_unavailable`: No free port was found near this HOME's engine port. Next: free a port near it, then run `lifecontext doctor`.
+- `daemon_stop_failed`: An old memory engine daemon of this HOME did not stop. Next: stop that process by hand, then run `lifecontext doctor`.
+- `engine_auth_disabled`: The memory engine runs without its API token. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `engine_auth_rejected`: The memory engine refused LifeContext's API token. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `engine_token_missing`: The memory engine's token file is missing. Next: start the service once so it writes the token.
+- `unsafe_engine_token`: The engine token file is not a private regular file of 64 hex digits. Next: delete it and start again.
+- `unsafe_profile_paths`: The memory engine's profile folders are not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `unsafe_profile_file`: The memory engine's profile file is not a private regular file of yours. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `unsafe_profile_lock`: The profile lock file is not a private regular file of yours. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `profile_lock_unavailable`: The profile lock cannot be taken. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `profile_lock_timeout`: Another LifeContext process holds the profile lock. Next: wait a moment and re-run.
+- `profile_setup_failed`: The memory engine's profile could not be set up. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_setup_failed`: The Postgres of the memory engine could not be set up. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_binaries_missing`: The Postgres programs of the memory engine are missing. Next: reinstall LifeContext.
+- `postgres_start_failed`: The Postgres of the memory engine did not start. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_stop_failed`: The Postgres of the memory engine did not stop. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_control_failed`: The Postgres control program failed. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_state_unknown`: The state of the memory engine's Postgres cannot be told. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_instance_invalid`: The Postgres instance file of the memory engine is not valid. Next: restore it from a backup.
+- `postgres_instance_unsafe`: The Postgres instance files are not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_socket_dir_unsafe`: The Postgres socket folder is not private to you. Next: `lifecontext preflight` and `lifecontext doctor` say what to fix.
+- `postgres_socket_path_too_long`: The Postgres socket path is too long for this HOME. Next: use a shorter HOME path.
+- `postgres_socket_path_unsupported`: The HOME path has a quote, comma or backslash, which the Postgres socket path cannot hold. Next: use a HOME path without them.
+- `postgres_instance_missing`: The Postgres data folder has no `instance.json`; pg0 deletes it when one of its own starts fails. Next: restore the file from a backup.
+
+<!-- failure-codes:end -->
 
 ## Running the service
 
@@ -819,14 +1110,31 @@ succeeds. The complete inventory must fit `--limit` (default 200, maximum 4096);
 a larger inventory fails closed before writes. Increase the limit explicitly
 when needed.
 
-A failed retain keeps exact custody and a durable failed operation. Inspect
-`operations get <operation-id> --json`; repeating the same idempotency key
-replays its recorded result without a duplicate submission. For a known
-provider failure, use `curate reindex <source-id> --expected-version <N>` with
-an explicit new idempotency key after repairing the route. For projection
+A failed retain keeps exact custody and a durable failed operation, and its
+journal entry is already in the vault. Inspect
+`operations get <operation-id> --json`. Repeating the same idempotency key
+replays a completed or permanently failed result without a new submission.
+After a retryable provider failure (`retain_failed` or `provider_unavailable`),
+the same key with the same input runs a journal retain, correction or reindex
+again from custody, but only after a delay: as long as the operation had been
+failing at its last refusal, at least 1 minute and at most 6 hours, so it
+roughly doubles each time. A retry before then gets the same retryable error
+and the provider is not called;
+`lifecontext capture` repeats pending notes this way. Each start also
+resubmits up to five refused journal notes from custody and stops at the first
+one the provider refuses again. A deleted or forgotten note is never
+resubmitted. `lifecontext status --json` reports `indexing_pending`: how many
+current journal entries are not indexed yet (pending or failed) and up to 20 of
+their vault-relative paths (plain `lifecontext status` prints both on one
+`Journal entries waiting for indexing:` line); `doctor` and the MCP `status` tool show only the
+count. For a known provider
+failure you can also run `curate reindex <source-id> --expected-version <N>`
+with an explicit new idempotency key after repairing the route. For projection
 failure, use reconciliation after resolving permissions or reviewing the edit;
-never edit the catalog or overwrite conflicting Markdown. Restart recovery
-uses exact provider evidence and managed hashes; unknown outcomes remain
+never edit the catalog or overwrite conflicting Markdown. An entry edited
+before its indexing finished keeps the edit and is reported as a projection
+conflict. Restart recovery uses exact provider evidence and managed hashes;
+outcomes it cannot check, because the provider cannot be asked, remain
 unresolved rather than being blindly resubmitted.
 
 ## Journal and wiki file names
@@ -874,7 +1182,14 @@ a cited source changed; rebuild pending`. Each contradiction is a `> [!note]
 Contradiction (left date / right date)` callout with both quotes and their
 citations. A citation links to the projected source note of that document
 version, at the `Page N`/section heading above the cited passage when the note
-has one; `Related` pages link to their projected files and show a plain title
+has one, and is labelled `Title, p. 3` (slide or sheet where that is the unit,
+`v2` only when the document has several versions, a short source ID such as
+`(doc_1a2b)` when two documents on the page share a title; Word citations carry the
+title alone). `wiki show --json` returns the same labels in its `managed` text and a
+`citations` list with each citation's source ID, version, extraction revision and
+passages, so an agent can still identify the source; a document page shows under
+its title how many of the document's pages the claims come from and which were
+not read; `Related` pages link to their projected files and show a plain title
 until the target is projected. A state change or a newly projected link target
 re-renders the file on the next projection or `reconcile` without a new wiki
 revision; user sections keep their bytes, and the front matter's
@@ -898,8 +1213,12 @@ tesseract tesseract-data-eng tesseract-data-rus tesseract-data-ukr`). The Python
 image and PDF rendering support. Check `tesseract --version` and
 `tesseract --list-langs`; the current extraction command uses Tesseract's
 installed English/Russian/Ukrainian language data (`tesseract-ocr-rus` and
-`tesseract-ocr-ukr` provide the latter two). Restart `lifecontext serve` after
-installation because executable availability is discovered at startup.
+`tesseract-ocr-ukr` provide the latter two). OCR text with Latin and Cyrillic
+look-alikes inside words, or with words that alternate scripts in a PDF whose
+text layer up to that page is almost all Latin, is kept but flagged
+`ocr_text_suspect`. Restart
+`lifecontext serve` after installation because executable availability is
+discovered at startup.
 Native PDF text is preferred; blank-text PDF pages and images use local OCR.
 
 Use `lifecontext wiki rebuild --source-id SOURCE_ID --version VERSION
@@ -935,6 +1254,13 @@ first indexed memory units. Wait for terminal remote completion before
 recovering the existing operation. Other stalled Hindsight calls may also
 wait up to 1800 seconds.
 
+Reads (every `GET`: `status`, `documents list`, `wiki show` and the like) time out
+after 30 seconds; the calls above keep their own, longer timeouts. The service
+extracts the text of an import (OCR on a scanned PDF can take minutes) before it
+answers any other request, so a read sent during an import can time out even though
+nothing is wrong: the CLI then says the service may be busy with an import and to
+try again in a few minutes.
+
 Managed wiki responses may be a single JSON object/envelope or one standalone
 JSON Markdown fence. Prose wrappers, duplicate keys, invalid schemas, and
 unsupported citations remain rejected. Each document compiles into its own page
@@ -943,8 +1269,49 @@ that page's claims instead of adding to them. A page holds at most 48 claims fro
 one document (8 on shared topic and entity pages) under the 48 KB artifact
 ceiling: a longer document's evidence windows are sampled evenly from its first
 to its last page, and a page that fills up early stops asking the model rather
-than failing. Each evidence window requests one short claim for the document's
-own page; windows never create other pages. After the summary below, one
+than failing. Each evidence window requests up to one short claim per 3 KB of
+its text (1 to 8, never more than its share of the 48) for the document's own
+page; windows never create other pages. Each claim is checked on its own: a window
+keeps its valid claims when others fail their quote check, the dropped ones are
+logged as counts and an error code (never the text), and only a window with no valid
+claim is rejected and asked again once. A quote is found in its cited passages byte
+for byte, else once both are normalised (Unicode NFKC, any run of whitespace as one
+space, every quotation mark as `'` or `"`, every dash as `-`, no soft hyphens or
+other format characters, no hyphen breaking a word across lines), else, for a quote
+of 20 to 400 normalised characters, as the one span of those passages whose
+character trigrams are at least 85% alike (Dice) with its characters in the same
+order (85% by `difflib`) and no other span within 5 points of it. The near search
+covers passages of up to 60,000 characters. One answer may spend at most 400,000 units
+on matching: each cited passage normalised costs its length once, each quote and
+claim its length, and a near search twice its passage plus 40 units per quote
+character and the quote's length squared over 2,048 (its refinement and order check);
+a quote left over once that is spent is dropped as not found. The page stores
+the exact text of that span as the quote and the matching part of it as the claim,
+so a published claim and quote are always literal text of the extraction, and a
+paraphrase or reordered sentence is still rejected. For each dropped claim only its
+kind and reason (`quote_not_found`, `claim_not_in_quote` or `invalid_citation`) are
+kept, never the model's text, in `wiki-windows.json` next to the version's
+extractions under `~/.lifeweave/derived/`; a forget (once the version can no longer
+be recalled) or a delete removes the file, and `documents show` gives only their
+number (`wiki_dropped_claims`). The same file keeps each checked window, keyed by the
+version's checksum and extraction revision, a hash of the window's evidence, the
+claims asked for, the model and the compile instructions, and is saved after each
+window, so a stopped compile keeps the windows it paid for: a retry or `wiki
+rebuild` checks the kept claims again without the model and asks only for windows
+that are missing, whose claims no longer check out, or that failed at the provider
+(without a model name, as with Hindsight reflect, nothing is reused). A window that
+still fails at the provider after its retries is skipped and the page publishes from
+the others, with the wiki stage `completed` and `wiki_windows_skipped` in `problems`
+until a retry fills it; after two windows in a row fail at the provider, the rest
+are skipped without asking. A window whose answer is rejected again after its
+correction is kept as rejected, not listed in `problems`, and not asked again for the
+same key. It is asked again when the page has no valid window at all (the stage then
+fails with the first window's code, and a retry asks every window again), when the
+model or the compile instructions change, or after `lifecontext documents retry
+SOURCE_ID --rerun-extraction`, which makes a new extraction revision. A compile stops,
+as a failed one, as soon as a forget or delete of the document starts: no further
+window request is sent, and an answer already on its way is not kept. A malformed or tampered
+`wiki-windows.json` counts as none. After the summary below, one
 routing request places the own page's checked claims on shared pages: the model
 sees the claims by number, a catalog of up to 300 existing `topic_`/`entity_`
 pages (12 KB, pages that already cite the document first, then by words shared
@@ -1037,15 +1404,25 @@ against the quotes (`wiki status` reports `summary_model_generated: true` next t
 document; the page publishes without one and `wiki lint` reports
 `summary_missing`. The `index` page is built without a model after each compile:
 one entry per document page, in title order, linked to that page, for as many
-pages as fit in 32 links and 48 KB. An entry shows the page's first summary
+pages as fit in 128 links and 48 KB, then "And N more: `lifecontext documents
+list`". An entry shows the page's first summary
 sentence (labelled) or, without a summary, its first current claim that is not
 copyright, ISBN or publisher imprint boilerplate. An index problem never fails a document,
 and an index whose managed text was edited by hand is left alone until resolved. The HTTP service compiles wiki patches and category suggestions directly
 with the pinned LLM provider using the same validated model, URL, reasoning
 effort, and private credential file. Compilation supplies bounded evidence
 and no tools; Hindsight recall/reflect remains available for retrieval. Each
-compile call has a 180-second deadline, no automatic transport retry, and
-closes its provider client. A response rejected by schema/citation validation
-may be regenerated once for that window after rechecking the source; a second
-rejection stops publication. OpenAI chat-compatible compilation requests
+compile call has a 180-second deadline and closes its provider client. An evidence
+window request that timed out is asked again once; one that was rate limited (429),
+timed out at the server (408), hit a server error (5xx), or could not connect (a
+connect timeout included) or lost its connection is asked again up to three times, after 2, 4 and 8 seconds or the provider's
+`Retry-After` up to 120 seconds (a longer `Retry-After` ends the retries); one
+compile asks again at most six times in all, and an auth error, bad request or
+unusable answer is not asked again. Before every attempt the document must still be
+there. The summary and routing requests, and category suggestions, are not asked
+again. The service starts importing the provider client in a background thread when
+it starts, so the first compile starts sooner; a compile that starts while the
+import is still running waits for it. A response
+rejected by schema/citation validation may be regenerated once for that window after
+rechecking the source; a second rejection skips that window. OpenAI chat-compatible compilation requests
 JSON-object mode, which the selected endpoint must support. Schema and literal-citation validation still gate publication.

@@ -20,6 +20,7 @@ from lifecontext.wiki import (
     ERASED,
     USER_END,
     USER_START,
+    WikiError,
     WikiPatch,
     WikiRevisionStore,
     WikiService,
@@ -34,6 +35,11 @@ SECRETS = ("Coffee is a stimulant.", "stimulant", "Copywriting", "persuasive", "
 
 class ForgetWithdrawsWikiTextTests(unittest.TestCase):
     def setUp(self):
+        # The fake model gives a claim per sentence; a window is asked for as many here,
+        # not for one per 3 KB, so short documents keep several claims.
+        patcher = patch("lifecontext.wiki.WINDOW_CLAIM_BYTES", 30)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         home = Path(temporary.name) / "home"
@@ -111,6 +117,58 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
             self.assertNotIn(finding["code"], {"contradiction_pending", "page_stale"}, finding)
             self.assertNotIn(withdrawn, json.dumps(finding))
             self.assertNotEqual(finding["page_id"], "topic_copywriting", finding)
+
+    def test_a_forget_or_delete_removes_the_kept_wiki_windows_and_dropped_claims(self):
+        self.compiler.model = "fake-model"
+        derived = self.app.paths.lifeweave_home / "derived"
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        deleted = self.import_text("Other notes.txt", "Coffee is a sedative.", "y")
+        kept = self.import_text("Kept notes.txt", "Copywriting is a craft.", "z")
+        for source_id in (forgotten, deleted, kept):
+            self.assertTrue((derived / source_id / "v1" / "wiki-windows.json").is_file(), source_id)
+        self.curate("forget", forgotten)
+        # A forget keeps the extraction and removes the windows; a delete removes both.
+        self.assertFalse((derived / forgotten / "v1" / "wiki-windows.json").exists())
+        self.assertTrue((derived / forgotten / "v1" / "r1.json").is_file())
+        self.curate("delete", deleted)
+        self.assertFalse((derived / deleted).exists())
+        self.assertTrue((derived / kept / "v1" / "wiki-windows.json").is_file())
+
+    def test_windows_kept_by_a_compile_that_ends_during_the_forget_are_removed(self):
+        self.compiler.model = "fake-model"
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        record = self.app.derived.read_wiki_windows(forgotten, 1)
+        path = self.app.paths.lifeweave_home / "derived" / forgotten / "v1" / "wiki-windows.json"
+        retire = self.app._retire_document_chunks
+
+        async def retire_while_a_compile_ends(source_id, version, **kwargs):
+            await retire(source_id, version, **kwargs)
+            # A compile that started before the forget writes its windows now.
+            self.app.derived.write_wiki_windows(source_id, version, record)
+
+        with patch.object(self.app, "_retire_document_chunks", side_effect=retire_while_a_compile_ends):
+            self.curate("forget", forgotten)
+        self.assertFalse(path.exists())
+
+    def test_a_compile_during_a_forget_that_has_started_sends_nothing(self):
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        asked = len(self.compiler.queries["window"])
+        retire, outcomes = self.app._retire_document_chunks, []
+
+        async def compile_while_the_forget_waits(source_id, version, **kwargs):
+            # The forget is confirmed but the version is still recallable while Hindsight answers.
+            self.assertFalse(self.app.catalog.source_withdrawn(source_id, version))
+            try:
+                await self.app.wiki.update_for_document(source_id, version)
+                outcomes.append("compiled")
+            except WikiError:
+                outcomes.append("stopped")
+            await retire(source_id, version, **kwargs)
+
+        with patch.object(self.app, "_retire_document_chunks", side_effect=compile_while_the_forget_waits):
+            self.curate("forget", forgotten)
+        self.assertEqual(outcomes, ["stopped"])
+        self.assertEqual(len(self.compiler.queries["window"]), asked)
 
     def test_a_forgotten_document_takes_no_new_version(self):
         withdrawn = self.import_text("Secret notes.txt", "Coffee is a stimulant.", "x")

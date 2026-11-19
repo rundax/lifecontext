@@ -1105,6 +1105,102 @@ class BinaryExtractionTests(unittest.TestCase):
             self.assertEqual(_ocr_languages("/test/tesseract"), "eng+rus")
         _ocr_languages.cache_clear()
 
+    def test_dominant_script_and_mixed_script_ocr(self):
+        from lifecontext.extraction import _dominant_script, _mixed_scripts
+
+        limits = ExtractionLimits()
+        self.assertEqual(_dominant_script(980, 20, limits), "latin")
+        self.assertIsNone(_dominant_script(20, 980, limits))
+        self.assertIsNone(_dominant_script(600, 400, limits))
+        self.assertIsNone(_dominant_script(9, 0, limits))
+        # Real OCR of an English infographic read with Cyrillic models enabled.
+        garbled = "Зестон 1: How Ve Cer eee | Secon IL’ Улан\nЗєстірну У: Exrancine wes sit тром"
+        self.assertTrue(_mixed_scripts(garbled, limits))
+        # A Ukrainian note with English terms: plenty of Latin, but in runs.
+        self.assertFalse(_mixed_scripts(
+            "Сьогодні насичений робочий день. Release notes for LifeContext and GitHub issues, "
+            "потім Hindsight recall тести і зустріч з командою щодо планів на тиждень",
+            limits,
+        ))
+        self.assertFalse(_mixed_scripts("Plain English text that is long enough to count.", limits))
+        self.assertFalse(_mixed_scripts("Свідоцтво про народження, видане міським відділом реєстрації", limits))
+
+    def ocr_pdf(self):
+        from pypdf import PdfReader, PdfWriter
+
+        writer = PdfWriter()
+        writer.add_page(PdfReader(BytesIO(self.pdf())).pages[0])
+        writer.add_page(PdfReader(BytesIO(self.pdf(drawing=True))).pages[0])
+        stream = BytesIO()
+        writer.write(stream)
+        return stream.getvalue()
+
+    def ocr_result(self, text, document=None, limits=None):
+        import tempfile
+        from pathlib import Path
+
+        from lifecontext.extraction import _binary_extract
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "lifecontext.extraction._ocr_image", return_value=text
+        ) as ocr:
+            result = _binary_extract(document or self.ocr_pdf(), "pdf", limits or ExtractionLimits(ocr_script_min_letters=5),
+                                     Path(directory), "/mock/tesseract")
+        self.assertEqual(ocr.call_count, 1)
+        return result
+
+    def test_garbled_ocr_in_an_english_pdf_is_flagged_and_kept(self):
+        from lifecontext.extraction import coverage_summary
+
+        garbled = "Зестон 1: How Ve Cer eee | Secon IL’ Улан Зєстірну У: Exrancine"
+        result = self.ocr_result(garbled)
+        self.assertEqual(result["segments"][-1]["text"], garbled + "\n")
+        self.assertEqual(
+            result["warnings"],
+            ["ocr_page:2; OCR may contain errors", "ocr_text_suspect:2; the OCR text may be garbled"],
+        )
+        coverage = coverage_summary(result)
+        self.assertEqual(coverage["partial"], ["ocr_text_suspect:2"])
+        self.assertFalse(coverage["complete"])
+
+    def test_ukrainian_and_bilingual_scans_are_not_flagged(self):
+        # A scanned Ukrainian certificate after an English cover page.
+        cyrillic = "Свідоцтво про народження, видане міським відділом реєстрації"
+        self.assertEqual(self.ocr_result(cyrillic)["warnings"], ["ocr_page:2; OCR may contain errors"])
+        # A bilingual form switches script every word; without an English text layer
+        # (a scan-only PDF) that is honest, not garble.
+        form = "ПРІЗВИЩЕ / SURNAME ШЕВЧЕНКО / SHEVCHENKO ІМ'Я / GIVEN NAMES ТАРАС / TARAS"
+        result = self.ocr_result(form, document=self.pdf(drawing=True))
+        self.assertEqual(result["warnings"], ["ocr_page:1; OCR may contain errors"])
+        # Too little text layer to judge: words that alternate scripts are not flagged.
+        garbled = "Зестон 1: How Ve Cer eee | Secon IL’ Улан Зєстірну У: Exrancine"
+        result = self.ocr_result(garbled, limits=ExtractionLimits())
+        self.assertEqual(result["warnings"], ["ocr_page:2; OCR may contain errors"])
+
+    def test_look_alike_letters_inside_words_flag_any_ocr_frame(self):
+        import tempfile
+        from pathlib import Path
+
+        from PIL import Image
+
+        from lifecontext.extraction import _binary_extract
+
+        image = Image.new("RGB", (64, 64), "white")
+        for x in range(10, 50):
+            image.putpixel((x, 30), (0, 0, 0))
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        # Latin words with Cyrillic е, о, а inside them.
+        garbled = "Sеction Оne: Hоw Wе Gоt Hеre, Pricing and Vаlue"
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "lifecontext.extraction._ocr_image", return_value=garbled
+        ):
+            result = _binary_extract(buffer.getvalue(), "png", ExtractionLimits(), Path(directory), "/mock/tesseract")
+        self.assertEqual(
+            result["warnings"],
+            ["ocr_frame:1; OCR may contain errors", "ocr_text_suspect:1; the OCR text may be garbled"],
+        )
+
     def test_pdfium_real_render_with_mock_ocr_and_pixel_limit(self):
         import tempfile
         from pathlib import Path

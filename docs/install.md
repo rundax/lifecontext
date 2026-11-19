@@ -16,11 +16,15 @@ leaves your machine is in [privacy.md](privacy.md).
 
 ## install.sh
 
+> 1.2.0rc1 is a pre-release; the final 1.2.0 is pending. The commands on this
+> page install the release candidate.
+
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh | sh
 ```
 
-It installs the latest release. To install a commit from a checkout instead,
+It installs the release the script belongs to, here 1.2.0rc1. If it prints a
+`curl:` error, nothing was installed. To install a commit from a checkout instead,
 build a wheel from the tree and pass it with the lock for your platform
 (`linux-x86_64`, `linux-aarch64` or `macos-arm64`):
 
@@ -68,10 +72,14 @@ To pass options through `curl | sh`, use `sh -s --`, for example
    Face cache (about 0.6 GB), unless the cache already has them, so the
    service's first start makes no Hugging Face calls.
 6. Installs Tesseract with English, Russian and Ukrainian through Homebrew on
-   macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux) when `sudo`
-   works without a password prompt; it never asks for a password. Otherwise it
-   prints the exact command and goes on; scans and images stay unread (listed as unresolved) and
-   `doctor` reports OCR as missing until you run it.
+   macOS, or through `apt-get`, `dnf` or `pacman` (Arch Linux). When `sudo`
+   works without a password it uses it. In a terminal, if it does not, the
+   installer asks "Install Tesseract with sudo now?" first and then lets `sudo`
+   ask for your password on that terminal; it forgets the `sudo` password
+   (`sudo -k`) as soon as the install ends. With `--non-interactive` it never
+   asks. If `sudo` is not used it prints the exact command and goes on; scans
+   and images stay unread (listed as unresolved) and `doctor` reports OCR as
+   missing until you run it.
 7. Sets up `~/.lifeweave` and the vault. In a terminal (this works under
    `curl | sh` too) it asks which model to use, with no choice made for you:
 
@@ -88,14 +96,22 @@ To pass options through `curl | sh`, use `sh -s --`, for example
 
    Then the model ID (with Anthropic it suggests `claude-sonnet-5`; for the
    others, type the ID from your provider's model list), the base URL for
-   choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`),
-   the API key with a hidden prompt (a server on this machine needs none), the
+   choices 5 and 6 (choice 5 suggests Ollama's `http://127.0.0.1:11434/v1`; the
+   installer checks the URL against LifeContext's own rules as you type it and asks
+   again if it is refused, and for plain HTTP on a host that is not on this machine or
+   a private network it asks whether to send the key and your text unencrypted anyway),
+   the API key with a hidden prompt (an OpenAI-compatible server may need none; if
+   the model check then says the server rejected the key, a terminal run asks for
+   one and checks again), the
    vault folder, and whether to turn notes you put in `Journal/Inbox` into
-   journal entries automatically. The key reaches `lifecontext init` through a
+   journal entries automatically (the default is No; to turn it on later run
+   `lifecontext service install --maintenance --capture`). The key reaches `lifecontext init` through a
    private temporary file, never as an argument. Without a terminal it takes
    the [variables below](#unattended-install). Existing settings in
    `~/.lifeweave` are kept; change them later with
-   [`lifecontext llm set`](#change-the-model-or-endpoint-later).
+   [`lifecontext llm set`](#change-the-model-or-endpoint-later). When you run
+   the installer again in a terminal and no key is stored yet, it asks for the
+   key again with the same hidden prompt.
 8. Checks the model with `lifecontext preflight --model-probe`: a short
    check, at most 60 seconds, also on a re-run that keeps the existing
    settings; it is skipped while the setup is not complete. If it fails, it
@@ -128,6 +144,7 @@ you configure it ([operations](operations.md)). It never prints your key.
 | `--non-interactive` | Never prompt; set up from the variables below only |
 | `--no-service` | Do not install the systemd user service or launchd agent |
 | `--no-skills` | Do not link the agent skill |
+| `--agent-instructions` | Also add the short "check LifeContext first" note to `~/.claude/CLAUDE.md` and Codex `AGENTS.md` ([what it says](agents.md#a-short-note-so-the-agent-checks-lifecontext-first)); a terminal run asks instead, default no. A block you added earlier and did not edit is refreshed on a rerun without asking, also with `--non-interactive` |
 | `--skip-model-probe` | Do not call the model at the end of the setup (also `LIFECONTEXT_SKIP_MODEL_PROBE=1`) |
 | `--no-backup` | Do not back up before upgrading an existing installation |
 | `--allow-root` | Allow running as root (not recommended) |
@@ -152,11 +169,12 @@ guesses a provider or a model: both must be set, or it stops with
 | `LIFECONTEXT_VAULT` | Vault folder (default `~/LifeContext/vault`) |
 | `LIFECONTEXT_TIMEZONE` | IANA time zone (default: the system's) |
 | `LIFECONTEXT_API_KEY_FILE` | A file whose single line is the provider key |
-| `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default here |
+| `LIFECONTEXT_ALLOW_INSECURE_HTTP` | `1` to accept a plain-http `LIFECONTEXT_BASE_URL` on a host that is not on this machine or a private network (`init --allow-insecure-http`); [details](#a-model-server-on-the-host) |
+| `LIFECONTEXT_CAPTURE` | `1` to turn notes in `Journal/Inbox` into journal entries (`service install --capture`); off by default, also at the terminal question |
 | `LIFECONTEXT_SKIP_MODEL_PROBE` | `1` to skip the model check |
 
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh |
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh |
   LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 \
   LIFECONTEXT_API_KEY_FILE=~/anthropic-key.txt sh -s -- --non-interactive
 ```
@@ -171,14 +189,17 @@ variables the script installs everything and links the skill, but skips
 
 ```bash
 lifecontext llm show                       # provider, model, base URL, whether a key is stored
+lifecontext llm set                        # at a terminal: asks for the key (hidden), changes nothing else
 lifecontext llm set --model MODEL          # change only what you name
-lifecontext llm set --api-key-stdin < ~/new-key.txt
+lifecontext llm set --api-key-stdin < ~/new-key.txt   # in scripts: the key on stdin
 lifecontext preflight --model-probe        # a short check of the result
 ```
 
 `llm show` never prints the key. `llm set` validates like `init`, keeps every
-other setting, replaces the key only when you give one (on stdin, or from the
-file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
+other setting, replaces the key only when you give one (with the hidden prompt
+that plain `lifecontext llm set` opens at a terminal; on stdin in scripts, and
+at a terminal `--api-key-stdin` also uses the hidden prompt, so the key is never
+echoed; or from the file named by `LIFECONTEXT_API_KEY_FILE`), and restarts the user service when it
 runs; without a usable service manager it prints the command to run. Changing
 the provider needs `--model` as well, and `openai_compatible` needs
 `--base-url`; [operations.md](operations.md#choosing-the-model) has every
@@ -208,7 +229,10 @@ sh install.sh --uninstall
 ```
 
 It removes the service units (`lifecontext service uninstall`), the skill
-links that point at LifeContext (`lifecontext skills remove`), the link
+links that point at LifeContext and the unedited "check LifeContext first" block
+in the instruction files (`lifecontext skills remove --instructions`; a block you
+edited stays, with a warning; when the installed command is broken, only the
+links are removed and the instruction files are left as they are), the link
 `~/.local/bin/lifecontext` and `~/.local/share/lifecontext` (uv, Python, the
 virtual environment). It keeps `~/.lifeweave` (settings, the key in `.env`,
 custody archive, catalog), the vault, `~/LifeContext/backups`, `~/.hindsight`,
@@ -226,8 +250,10 @@ starts with `HF_HUB_OFFLINE=1` and downloads no models. It runs as the unprivile
 is published; you reach it with `docker exec` or the
 [`lifecontext-docker`](#agents-and-the-lifecontext-docker-wrapper) wrapper.
 
-The image is `ghcr.io/rundax/lifecontext:1.2.0`. To build it from a checkout
-instead, run `docker compose build` (or `docker build -t lifecontext .`).
+The image is not published yet: build it from a checkout with `docker compose
+build` (or `docker build -t lifecontext .`). It is about 3 GB, and the build
+takes about 3 minutes on GitHub-hosted runners. Once 1.2.0 is published, the
+image will be `ghcr.io/rundax/lifecontext:1.2.0`.
 
 ### Start with Docker Compose
 
@@ -236,6 +262,7 @@ with named volumes, the key as a secret, a health check on `/healthz`,
 `restart: unless-stopped`, a 4 GB memory limit and no Linux capabilities.
 
 ```bash
+docker compose build                               # until the image is published
 mkdir -p secrets
 (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Enter, Ctrl-D
 sudo chown 1000 secrets/lifecontext_api_key        # Linux, if your uid is not 1000
@@ -260,7 +287,7 @@ which one is missing and waits. Set both and run `docker compose up -d` again,
 or run `docker exec -it lifecontext lifecontext init --vault /data/vault`.
 Without a stored key (unless the endpoint needs none) it also waits, on every
 start, and logs how to add one: put it in the secret file, or run
-`docker exec -it lifecontext lifecontext llm set --api-key-stdin`.
+`docker exec -it lifecontext lifecontext llm set` (it asks for the key with a hidden prompt).
 
 | Variable (shell or `.env`) | Meaning |
 |---|---|
@@ -276,6 +303,47 @@ Without Compose, pass the same: a read-only key file at
 `LIFECONTEXT_*` variables, and volumes for `/data/home` and `/data/vault`. The
 variable `LIFECONTEXT_API_KEY` also works but is less private: anyone who can
 run `docker inspect` sees it.
+
+### A model server on the host
+
+Inside the container `127.0.0.1` is the container itself, so a model server
+(Ollama, vLLM, LM Studio) running on the host is reached through the name
+`host.docker.internal`, which LifeContext accepts over plain HTTP without a flag
+inside the image (the image sets `LIFECONTEXT_IN_CONTAINER=1`; outside the image
+the name needs `--allow-insecure-http` like any other):
+
+```bash
+LIFECONTEXT_PROVIDER=openai_compatible
+LIFECONTEXT_MODEL=llama3.3
+LIFECONTEXT_BASE_URL=http://host.docker.internal:11434/v1
+```
+
+Docker Desktop (macOS, Windows) defines that name. On Linux add it yourself,
+with `--add-host=host.docker.internal:host-gateway` on `docker run`, or in
+`compose.yaml` under the service:
+
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+The server must listen on an address the container can reach, not only on the
+host's loopback. Docker Desktop (macOS, Windows) needs no change on the server
+side. On Linux, `host-gateway` is the host's address on the `docker0` bridge
+(`172.17.0.1` by default; check with `ip addr show docker0`), so bind the server
+there and not on every interface: for Ollama set `OLLAMA_HOST=172.17.0.1`
+(`0.0.0.0` would also open the port to your network, and plain HTTP is not
+encrypted). A model
+server on another machine is reached by its private IP address (for example
+`http://192.168.1.20:11434/v1`), also without a flag. A name such as
+`models.lan`, or any public address, is refused over HTTP unless you run
+`lifecontext init --force --allow-insecure-http` (with `docker exec`); it saves
+`allow_insecure_http: "<that URL>"` in `config.yaml`; the grant covers exactly
+that URL, so after you edit `base_url` by hand you grant it again. Whenever the
+URL is HTTP off this machine, `init` and `llm set` say that your text, and the
+key if one is stored, travel unencrypted; the container's start log says it too
+and `lifecontext doctor` reports `model_uses_plain_http`. With install.sh, the same flag is `LIFECONTEXT_ALLOW_INSECURE_HTTP=1`
+for an unattended install, and a yes to the question the installer asks at a terminal.
 
 ### Volumes
 
@@ -377,3 +445,6 @@ cosign verify ghcr.io/rundax/lifecontext:1.2.0 \
   --certificate-identity https://github.com/rundax/lifecontext/.github/workflows/release.yml@refs/tags/v1.2.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+For 1.2.0rc1, use `refs/tags/v1.2.0rc1`; its image is not public, so skip the
+image check.

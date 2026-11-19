@@ -1,5 +1,180 @@
 # Unreleased
 
+- **An opt-in note so agents check LifeContext first.** `lifecontext skills
+  install --instructions` adds a short marked block to `~/.claude/CLAUDE.md` and
+  Codex's `AGENTS.md` (`$CODEX_HOME`, default `~/.codex`); `check` and `remove`
+  take the same flag. A block you edited is never touched, `--dry-run` shows the
+  plan, and nothing is written without the flag. The installer asks once at a
+  terminal (default no) and takes `--agent-instructions` for unattended runs.
+
+- **A failed import says so.** A document or operation answer now has an
+  `outcome` (`completed`, `completed_with_errors`, or the failure state) and a
+  `problems` list (stage, code, reason, next step), plus `last_operation_id`
+  and, once the page exists, `wiki_page_id` and `vault_path`. A wiki stage that
+  fails names its cause (`wiki_provider_failed`, `wiki_update_rejected`,
+  `wiki_evidence_limit`, `wiki_no_evidence`, `wiki_interrupted`) instead of
+  `reflect_failed`. `documents retry SOURCE_ID` takes the document's source ID,
+  runs again every stage that did not finish, and brings the wiki page into
+  the vault after an indexing failure; only one retry per document runs at a
+  time. `doctor` stops counting a failed import once a later import, retry or
+  rebuild of the same document completed. The API's upload cap follows
+  `limits.max_file_bytes` (never above 32 MiB) and `/v1/status` reports it.
+  Recall citations carry the document's title and file name. While a document is
+  being imported, retried, reindexed or rebuilt, a reindex or `wiki rebuild
+  --source-id` of it is refused with `conflict` before anything is stored (the
+  same request and key work once it is done), a rebuild of every document
+  skips it and names it in the new `skipped` field, and a retry returns the
+  running state. After a bundle restore, a document whose wiki page came in
+  the bundle is `completed` rather than waiting for a retry.
+- **The terminal shows what happened to an import.** `documents import` and
+  `documents retry` exit with status 4 when the outcome is not `completed`
+  (the `--json` output is unchanged), list each failed stage and end with a
+  `Next:` line, usually `lifecontext documents retry SOURCE_ID`. `documents
+  show` and the import result show the stages, the wiki page and its vault
+  path. `lifecontext operations list` (`--state`, `--outcome`, `--limit`) finds
+  failed or incomplete operations again. Before uploading, `documents import`
+  refuses a file with an extension the extraction cannot read
+  (`unsupported_format`, with the list of formats) or above the service's file
+  limit (`body_too_large`, naming the limit). `recall` prints each hit with its
+  document's title. A page whose model summary failed is listed in `problems`
+  as `wiki_summary_missing`, and a retry asks for the summary alone, on the
+  same claims; a document's page now keeps room for the largest summary. Plain `status`
+  shows a refused vault path and how many journal entries wait for indexing,
+  and a refused write names the path.
+- **A wiki page worth opening.** A long document now gets several claims
+  instead of one or two: each evidence window may yield up to 8, in proportion
+  to its size, and every claim's quote is checked on its own, so one bad quote
+  drops that claim and not the document. Citations read `Title, p. 3` (with
+  `v2` only for a document that has more than one version, and the short source
+  ID when two documents share a title) instead of `doc_<id> v1/e2 passages
+  3:4`; `wiki show` through the API lists each citation's source. A line under
+  the title says how many sections the claims come from and which pages were
+  not read. The `index` page links as many documents as fit (up to 128 links and
+  48 KB), then says "And N more" and points to `lifecontext documents list`;
+  it used to stop at 32.
+- **One bad model answer no longer discards the wiki page.** An evidence
+  window request that times out is asked again once; one that is rate limited
+  (429), times out at the server (408), hits a server error (5xx), cannot
+  connect or loses its connection is asked again up to three times, after 2, 4 and 8 seconds or the
+  provider's `Retry-After` (up to 2 minutes; a longer wait ends the retries).
+  One compile asks again at most six times, the document must still be there
+  before every attempt, and an auth error, bad request or unusable answer, the
+  summary and routing requests, and category suggestions are not asked again.
+  An evidence window that still fails at the provider is skipped and the page
+  publishes from the others: the wiki stage is `completed` and `problems` lists
+  `wiki_windows_skipped`; `documents retry SOURCE_ID` asks the model only for
+  the skipped windows. After two windows in a row fail at the provider, the rest
+  are skipped without asking. A window whose answer is rejected again after its
+  correction is not asked again until the page has no valid window, the model
+  or instructions change, or `documents retry --rerun-extraction` runs; when no
+  window validates, the stage fails with the same codes as before. A compile
+  stops as soon as a forget or delete of its document starts; a forget that is
+  still running leaves the stage failed with `wiki_forget_pending` (exported in
+  bundles as `reflect_failed`, which 1.2.0rc1 reads). Each checked window is kept
+  as soon as it is paid for,
+  so a retry or `wiki rebuild` asks again only for windows that are missing,
+  whose claims no longer check out, or after the model or the instructions
+  changed. A quote now matches its passage once both are normalised (Unicode
+  NFKC, whitespace, quotation marks, dashes, soft hyphens, words hyphenated
+  across lines) or, for a quote of 20 to 400 characters, when one passage
+  span is nearly the same text in the same order; the page stores the exact
+  text of the document either way, and a paraphrase is still rejected. The
+  kind and reason of each claim that fails its checks are kept beside the
+  extraction (never its text), removed on forget and delete, and counted in
+  `documents show` (`wiki_dropped_claims`). The service starts importing the
+  model client in the background when it starts, so the first compile starts
+  sooner; a compile that starts during the import waits for it.
+- **A stray file can no longer freeze the vault.** A `.DS_Store` or an image
+  in `Journal/wiki/` used to make every vault write fail with
+  `unsafe_permissions`. LifeContext now checks only the path it reads or
+  writes: each folder below `Journal` must be a real folder you own that group
+  and others cannot write, and an existing target must be a regular file you
+  own. The vault root and `Journal` stay `0700`. A refused path is named in
+  `status` (`dependencies.vault.refused_path`) and in `doctor`, which also scans
+  the tree read-only and lists what a write would refuse
+  (`vault_refusals`).
+- **A note that failed once is indexed on the next try.** A journal entry is
+  written to the vault right after the original is kept, so it is there even
+  while indexing waits. If the model provider refuses or does not answer, the
+  same request (same idempotency key) runs again from the kept original after a
+  growing wait, 1 minute up to 6 hours, and `capture` repeats it. Each start also
+  resubmits up to five refused notes, never a deleted or forgotten one. Once the
+  provider has indexed a note it counts as done even if the vault write then
+  fails (`reconcile` repairs the file). `status` reports how many journal
+  entries are waiting for indexing (`indexing_pending`); `doctor` and the MCP
+  `status` tool give the count only, and MCP `status` says that a vault path was
+  refused without naming it.
+- **Errors say what to do.** One table gives every error code a plain sentence
+  and a next command, used in the terminal, in `--json` errors (`error`,
+  `message`, `next_step`, `retryable`, `request_id`; success output is
+  unchanged) and in the "Failure codes" section of
+  [docs/operations.md](docs/operations.md), which is generated from it. A
+  refused connection is told apart from a timeout; with the user service
+  installed the hint is `lifecontext service status`, and a timeout says the
+  service may still be working. Ctrl-C prints one line and exits 130. Reads
+  time out after 30 seconds; `recall`, `reflect`, imports and retries keep
+  their longer limits.
+- **Installer dead ends.** `lifecontext llm set` with no flags in a terminal asks
+  for the key with a hidden prompt, as `init --api-key-stdin` now does at a
+  terminal; error hints now point to `lifecontext llm set`. A
+  re-run of the installer that finds no key asks for it, and offers to enter
+  one when the model check says the server rejected it. The installer checks a
+  model server URL at its prompt with LifeContext's own rules and asks again;
+  each refusal has its own sentence. A model server on a private network
+  (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`) works over plain
+  `http` without a flag; any other `http` host needs `--allow-insecure-http`,
+  and the key and your text then travel unencrypted, which init, `llm set` and
+  `doctor` say. A remote `openai_compatible` endpoint with no key asks for one.
+  In a terminal the installer asks "Install Tesseract with sudo now?" and drops
+  the sudo ticket afterwards. While it waits for the API it shows the elapsed
+  time and the log location, and prints the last log lines on a timeout; a
+  missing release says "release vX not found" instead of a bare 404. The summary
+  names the agents that got the skill, gives the PATH hint for your shell and
+  says to start a new agent session. The question about turning notes in
+  `Journal/Inbox` into journal entries now defaults to No.
+- **The agent skill answers questions.** Its description leads with answering
+  questions from your documents and notes (leases, contracts, letters, scans,
+  PDFs, journal) with cited quotes, and the body opens with three recipes:
+  answer a question, add a file, add a note. A test checks that every command
+  and flag the skill names exists.
+- **Documentation tells the truth about the release.** The README, install
+  guide, security policy and site say 1.2.0rc1 is a pre-release and give its
+  install command, say the Docker image is built locally until it is published
+  (with the `chown` line for Linux and the bind-mount note for opening the
+  vault in Obsidian), say `claude-sonnet-5` is expected to work but not yet
+  qualified end to end, warn that Claude Desktop and Cursor may time out on slow
+  recalls, and say a Claude Code or ChatGPT subscription is not an API key. The
+  sync guide says notes become indexed, searchable journal entries, not wiki
+  pages.
+- **Upgrading and downgrading.**
+  - Every page under `wiki/history/` and every wiki page and index in the vault
+    is rewritten once with the new citation labels. The text between your own
+    markers is kept, and no review is raised for it.
+  - 1.2.0rc1 rejects an index revision that links more than 32 pages, so an
+    index written by this version with more links does not load after a
+    downgrade.
+  - Under `Journal`, a folder that group or others can write (`0775`, for
+    example from a `umask 0002` in Obsidian) is refused for writes, and
+    `doctor` lists it; remove the group write bit (`chmod g-w`).
+  - The model server grant for plain `http` is stored in `config.yaml` as
+    `allow_insecure_http` holding the exact URL it was given for, and counts only
+    while `base_url` is still that string.
+    1.2.0rc1 does not know the setting and refuses a config that has it, so remove
+    the line before going back. `vision` stays loopback-only for plain `http`.
+  - The retry wait needs no new stored fields: it is worked out from each
+    operation's own timestamps, so 1.2.0rc1 still reads the rows.
+  - Exported bundles write the older `reflect_failed` code for the new wiki
+    failure codes, so an older release can read them.
+  - Kept wiki windows (with their checked claims, quoted from the document) and
+    the reasons of dropped claims live in `wiki-windows.json` next to a
+    version's extractions under `~/.lifeweave/derived/`. 1.2.0rc1 ignores the
+    file and still removes it when a document is deleted, but not when one is
+    forgotten; the extraction it sits beside stays after a forget anyway, but
+    delete the file by hand after forgetting a document under 1.2.0rc1 if its
+    quotes must go too. 1.2.0rc1 does not list
+    `wiki_windows_skipped` and does not re-run a page that skipped windows;
+    `wiki rebuild --source-id` compiles it again.
+
 - **Breaking: no default model.** `lifecontext init` and `install.sh` no
   longer default to a provider or model. With a terminal both show a provider
   menu (Anthropic, OpenAI, Google Gemini, OpenRouter, a local model server,
@@ -297,6 +472,22 @@
   cover vision reading and its capability probe.
 - Very long extraction ledgers are compacted into page lists and ranges so a
   large illustrated document stays within the catalog's 1000-entry bound.
+- Garbled OCR text is flagged (`ocr_text_suspect:N`): Latin and Cyrillic
+  look-alikes inside words, or words that alternate scripts in a PDF whose
+  text layer up to that page is almost all Latin, as English headings and
+  figure labels do when read with Cyrillic language data. The text is kept,
+  listed under "Not read" in the source note, and settled by a vision
+  reading. Ukrainian scans and scan-only bilingual forms are not flagged; a
+  bilingual form after English text pages can be. Extraction revisions made
+  after this change have a new `config_identity`.
+- The source note's coverage line ends with "; N pages with unread parts"
+  (each page counted once) or "; complete".
+- A document's own wiki page no longer quotes copyright notices, ISBNs or
+  "all rights reserved" lines; a document that is all front matter keeps one.
+- `documents import` without `--mime`, and API clients that send
+  `application/octet-stream`, get the stored type guessed from the filename, so
+  a PDF is recorded as `application/pdf`. Earlier import keys and bundle
+  restores of documents stored as octet-stream are unaffected.
 
 - Name every journal entry `YYYY-MM-DD - Title`. The date now also comes from
   a date line among the entry's opening lines

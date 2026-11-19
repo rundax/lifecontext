@@ -506,7 +506,7 @@ class CaptureCommandTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertEqual(json.loads(out)["inbox"], str(vault / "Journal" / "Inbox"))
                 code, out, _ = self.run_command(home, "--once", "--inbox", str(vault), "--json")
-            self.assertEqual((code, json.loads(out)), (1, {"error": "capture_requires_inbox"}))
+            self.assertEqual((code, json.loads(out)["error"]), (1, "capture_requires_inbox"))
 
 
 if __name__ == "__main__":

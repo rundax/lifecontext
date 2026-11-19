@@ -54,11 +54,14 @@ from lifecontext.api.models import (
     CategoryProposeRequest, CategoryDecisionRequest, CategoryApproveRequest,
     CategoryRedirectRequest, CategoryRenameRequest, CategoryAliasRequest,
     CategoryMergeRequest, CategoryReassignRequest, WikiPageRecord, WikiListResponse,
-    WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
+    WikiCitationRecord, WikiRevisionRecord, WikiHistoryResponse, WikiShowResponse, WikiStatusResponse, WikiRebuildRequest,
+    WikiRebuildResponse,
     WikiLintResponse, WikiReviewListResponse, WikiReviewMutationResponse, WikiReviewRecord,
-    WikiReviewResolveRequest, BriefResponse,
+    WikiReviewResolveRequest, BriefResponse, OperationListResponse, OperationStatusResponse,
 )
+from lifecontext.api.models import _OUTCOMES
 from lifecontext.categories import CategoryClassification
+from lifecontext.catalog import CatalogError
 from lifecontext.api.app import DOCUMENT_MAX_BYTES
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -149,8 +152,13 @@ async def health() -> HealthResponse:
 
 @router.get("/v1/status", response_model=StatusResponse)
 async def status(request: Request) -> dict[str, Any]:
-    """Return redacted dependency readiness, separate from process liveness."""
-    return _application(request).readiness()
+    """Return dependency readiness, separate from process liveness.
+
+    No secrets or content; it names the vault-relative path of a refused file.
+    """
+    value = _application(request).readiness()
+    # An upload stops at the 32 MiB ceiling whatever the configured limit.
+    return {**value, "max_file_bytes": min(DOCUMENT_MAX_BYTES, value["max_file_bytes"])}
 
 
 @router.post("/v1/projections/reconcile")
@@ -233,6 +241,17 @@ async def retain(
     return value
 
 
+def _labelled(application, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Add a document's title and file name to a citation; journal sources have neither."""
+    try:
+        metadata = application.catalog.get_document_metadata(evidence["source_id"], evidence["source_version"])
+    except (AttributeError, CatalogError, KeyError, TypeError):
+        return evidence
+    if not metadata:
+        return evidence
+    return {**evidence, "title": metadata["title"], "filename": metadata["filename"]}
+
+
 @router.post("/v1/recall", response_model=RecallResponse)
 async def recall(payload: RecallRequest, request: Request) -> RecallResponse:
     application = _application(request)
@@ -255,7 +274,7 @@ async def recall(payload: RecallRequest, request: Request) -> RecallResponse:
                     {
                         "text": item["text"],
                         "type": item.get("type"),
-                        "evidence": item["evidence"],
+                        "evidence": _labelled(application, item["evidence"]),
                     }
                     for item in value["results"]
                 ],
@@ -281,6 +300,8 @@ async def reflect(payload: ReflectRequest, request: Request) -> ReflectResponse:
         budget=payload.budget,
     )
     try:
+        if isinstance(value, dict) and isinstance(value.get("evidence"), list):
+            value = {**value, "evidence": [_labelled(application, item) for item in value["evidence"]]}
         return ReflectResponse.model_validate(value)
     except ValidationError:
         raise ApplicationError("invalid_provider_response") from None
@@ -630,7 +651,8 @@ async def show_wiki(page_id: SourceId, request: Request, revision: Annotated[int
     result = _application(request).show_wiki(page_id, revision=revision)
     return WikiShowResponse(page=_public_record(WikiPageRecord, result["page"]),
                             revision=_public_record(WikiRevisionRecord, result["revision"]) if result["revision"] else None,
-                            managed=result["managed"])
+                            managed=result["managed"],
+                            citations=[_public_record(WikiCitationRecord, item) for item in result.get("citations", ())])
 
 
 @router.get("/v1/wiki/{page_id}/history", response_model=WikiHistoryResponse)
@@ -638,13 +660,14 @@ async def wiki_history(page_id: SourceId, request: Request):
     return WikiHistoryResponse(revisions=[_public_record(WikiRevisionRecord, row) for row in _application(request).wiki_history(page_id)])
 
 
-@router.post("/v1/wiki/rebuild", response_model=OperationResponse)
+@router.post("/v1/wiki/rebuild", response_model=WikiRebuildResponse)
 async def rebuild_wiki(payload: WikiRebuildRequest, request: Request, response: Response,
                        idempotency_key_header: Annotated[str, Header(alias="Idempotency-Key")]):
     app = _application(request)
     result = await app.rebuild_wiki(**payload.model_dump(), idempotency_key=_required_idempotency_key(request, idempotency_key_header))
     response.headers["X-Lifeweave-Operation-ID"] = result.operation_id
-    return OperationResponse.model_validate(app.operation_status(result.operation_id))
+    return WikiRebuildResponse.model_validate({**app.operation_status(result.operation_id),
+                                               "skipped": result.get("skipped", [])})
 
 
 def _brief(value: dict[str, Any]) -> BriefResponse:
@@ -679,6 +702,13 @@ def _document(value: dict[str, Any]) -> DocumentResponse:
             "download_url": f"/v1/documents/{value['source_id']}/original?version={value['source_version']}",
             "extraction_warnings": value.get("extractions", [{}])[-1].get("warnings", []) if value.get("extractions") else [],
             "coverage": value.get("coverage"),
+            "outcome": value.get("outcome"),
+            "problems": value.get("problems", []),
+            "last_operation_id": value.get("last_operation_id"),
+            "extraction_reason": value["extractions"][-1].get("reason") if value.get("extractions") else None,
+            "wiki_page_id": value.get("wiki_page_id"),
+            "vault_path": value.get("vault_path"),
+            "wiki_dropped_claims": value.get("wiki_dropped_claims"),
         })
     except (KeyError, TypeError, ValidationError):
         raise ApplicationError("invalid_provider_response") from None
@@ -687,10 +717,12 @@ def _document(value: dict[str, Any]) -> DocumentResponse:
 def _document_operation(application, result: dict[str, Any]) -> DocumentOperationResponse:
     envelope = application.operation_status(result["operation_id"])
     value = DocumentOperationResponse.model_validate(envelope)
+    value.outcome = value.state
     if result.get("document") is not None:
         value.document = _document(result["document"])
         if value.state == "completed" and value.document.stages.indexing.state != "completed":
             value.state = "running"
+        value.outcome = application.documents.outcome(result["document"], value.state)
     return value
 
 
@@ -739,17 +771,22 @@ async def import_document(
     except (ValueError, UnicodeError, ValidationError):
         raise PublicAPIError(422, "invalid_request") from None
     application = _application(request)
+    # The configured file limit applies, never above the 32 MiB upload ceiling.
+    limit = min(DOCUMENT_MAX_BYTES, application.limits.max_file_bytes)
     # TemporaryFile is private and unlinked; disconnect/cancellation closes it.
     with tempfile.TemporaryFile(mode="w+b") as staged:
         size = 0
         try:
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > DOCUMENT_MAX_BYTES:
-                    raise PublicAPIError(413, "body_too_large")
-                staged.write(chunk)
+                # Past the limit the rest is read and dropped (the guard stops it at the
+                # 32 MiB ceiling), so the client reads the 413 instead of a reset connection.
+                if size <= limit:
+                    staged.write(chunk)
         except ClientDisconnect:
             raise PublicAPIError(400, "invalid_request") from None
+        if size > limit:
+            raise PublicAPIError(413, "body_too_large")
         if not size:
             raise PublicAPIError(422, "invalid_request")
         staged.seek(0)
@@ -774,12 +811,18 @@ async def show_document(source_id: SourceId, request: Request, version: Annotate
 
 
 @router.post("/v1/documents/operations/{operation_id}/retry", response_model=DocumentOperationResponse)
-async def retry_document(operation_id: str, payload: DocumentRetryRequest, request: Request, response: Response):
+async def retry_document(
+    operation_id: Annotated[str, Path(min_length=1, max_length=128)], payload: DocumentRetryRequest,
+    request: Request, response: Response,
+    idempotency_key_header: Annotated[str | None, Header(alias="Idempotency-Key", min_length=1, max_length=255)] = None,
+):
+    """Retry by operation ID or by source ID; a repeated Idempotency-Key replays the same retry."""
     application = _application(request)
     if payload.vision is not None and not payload.rerun_extraction:
         raise PublicAPIError(422, "invalid_request")
+    key = None if idempotency_key_header is None else _required_idempotency_key(request, idempotency_key_header)
     result = await application.retry_document(
-        operation_id, rerun_extraction=payload.rerun_extraction, vision=payload.vision
+        operation_id, rerun_extraction=payload.rerun_extraction, vision=payload.vision, idempotency_key=key
     )
     value = _document_operation(application, result)
     response.headers["X-Lifeweave-Operation-ID"] = value.operation_id
@@ -807,13 +850,32 @@ async def download_document(source_id: SourceId, request: Request, version: Anno
     })
 
 
-@router.get("/v1/operations/{operation_id}", response_model=OperationResponse)
+@router.get("/v1/operations", response_model=OperationListResponse)
+async def list_operations(
+    request: Request,
+    state: Literal["pending", "running", "retryable_failed", "permanent_failed", "completed", "cancelled"] | None = None,
+    outcome: _OUTCOMES | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> OperationListResponse:
+    """Newest operations first; ``state=retryable_failed`` lists what a retry can pick up.
+
+    ``outcome=completed_with_errors`` finds imports that finished without their wiki page,
+    among the newest 1000 operations.
+    """
+    rows = _application(request).list_operations(state=state, outcome=outcome, limit=limit)
+    try:
+        return OperationListResponse.model_validate({"operations": rows})
+    except ValidationError:
+        raise ApplicationError("invalid_provider_response") from None
+
+
+@router.get("/v1/operations/{operation_id}", response_model=OperationStatusResponse)
 async def operation_status(
     operation_id: Annotated[str, Path(min_length=1, max_length=128)],
     request: Request,
-) -> OperationResponse:
+) -> OperationStatusResponse:
     value = _application(request).operation_status(operation_id)
     try:
-        return OperationResponse.model_validate(value)
+        return OperationStatusResponse.model_validate(value)
     except ValidationError:
         raise ApplicationError("invalid_provider_response") from None

@@ -88,13 +88,16 @@ class FakeAPI:
                 status, raw, headers = api.routes.get(
                     (self.command, path), (200, json.dumps(default).encode(), extra)
                 )
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(raw)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client gave up waiting
 
             do_GET = _answer
             do_POST = _answer
@@ -244,7 +247,9 @@ class MCPServerTests(unittest.TestCase):
                                                 "no_vision": True},
                            allow_writes=True, import_dirs=[str(self.inbox)])
         self.assertFalse(result.is_error, result.content)
-        [request] = self.api.requests
+        # The file limit is read first, so a file above it is refused before the upload.
+        status, request = self.api.requests
+        self.assertEqual((status["method"], status["target"]), ("GET", "/v1/status"))
         self.assertEqual((request["method"], request["target"]), ("POST", "/v1/documents"))
         self.assertEqual(request["body"], b"%PDF-1.4 fixture")
         self.assertEqual(request["headers"]["idempotency-key"], "import-lease")
@@ -291,6 +296,7 @@ class MCPServerTests(unittest.TestCase):
         (outside / "secret.txt").write_text("private", encoding="utf-8")
         (self.inbox / "linked").symlink_to(outside, target_is_directory=True)
         (self.inbox / "real.md").write_text("# Real\n", encoding="utf-8")
+        (self.inbox / "minutes.odt").write_bytes(b"PK\x03\x04")
         (self.inbox / "alias.md").symlink_to(self.inbox / "real.md")
         os.mkfifo(self.inbox / "pipe")
         (self.inbox / "folder").mkdir()
@@ -311,6 +317,8 @@ class MCPServerTests(unittest.TestCase):
             (self.inbox, self.inbox / "pipe", "input_unavailable"),
             (self.inbox, self.inbox / "folder", "input_unavailable"),
             (self.inbox, self.inbox / "missing.md", "input_unavailable"),
+            # Refused before anything is sent, with the formats it does import.
+            (self.inbox, self.inbox / "minutes.odt", "unsupported_format"),
             (self.inbox, Path("real.md"), "invalid_request"),
             (self.inbox, Path("-"), "invalid_request"),
             # Even when the owner allows everything, protected places stay closed.
@@ -328,6 +336,8 @@ class MCPServerTests(unittest.TestCase):
                 text = self.error_text(result)
                 self.assertTrue(text.startswith(f"Error executing tool documents_import: {code}:"), text)
                 self.assertNotIn("private", text)
+                if code == "unsupported_format":
+                    self.assertIn("LifeContext does not import .odt files. It imports .docx, .jpeg, ", text)
         self.assertEqual(self.api.requests, [])
 
         for allowed, path in ((self.inbox, self.inbox / "real.md"), (self.home, self.home / "Documents" / "plan.md"),
@@ -337,7 +347,7 @@ class MCPServerTests(unittest.TestCase):
                 result = self.call("documents_import", {"path": str(path), "idempotency_key": "import-ok"},
                                    allow_writes=True, import_dirs=[str(allowed)])
                 self.assertFalse(result.is_error, result.content)
-                [request] = self.api.requests
+                _, request = self.api.requests
                 self.assertEqual(request["body"], path.read_bytes())
 
     def test_unusable_import_dirs_stop_the_server_from_starting(self) -> None:
@@ -352,6 +362,31 @@ class MCPServerTests(unittest.TestCase):
             code = mcp_server.run(port=self.api.port, allow_writes=True, import_dirs=[str(self.base / "missing")])
         self.assertEqual(code, 2)
         self.assertIn("--import-dir", stderr.getvalue())
+
+    def test_status_gives_agents_the_unindexed_count_but_no_entry_paths(self) -> None:
+        status = {"ready": True, "indexing_pending": {
+            "count": 2, "entries": ["Journal/entries/2026-11-17 - Private lawyer call.md"]}}
+        self.api.routes[("GET", "/v1/status")] = (200, json.dumps(status).encode(), {})
+
+        result = self.call("status", {})
+
+        self.assertFalse(result.is_error, result.content)
+        self.assertEqual(result.structured_content, {"ready": True, "indexing_pending": {"count": 2}})
+        self.assertNotIn("Private lawyer call", json.dumps([item.text for item in result.content]))
+
+    def test_status_says_a_vault_path_was_refused_but_never_names_it(self) -> None:
+        refused = "Journal/entries/2026-11-17 - Private lawyer call.md"
+        for path, expected in ((refused, True), (None, False)):
+            status = {"ready": False, "dependencies": {"vault": {"ready": False, "refused_path": path}}}
+            self.api.routes[("GET", "/v1/status")] = (200, json.dumps(status).encode(), {})
+            with self.subTest(path=path):
+                result = self.call("status", {})
+                self.assertFalse(result.is_error, result.content)
+                vault = result.structured_content["dependencies"]["vault"]
+                self.assertNotIn("refused_path", vault)
+                self.assertEqual("path_refused" in vault, expected)
+                self.assertIn("lifecontext status", vault.get("path_refused", "lifecontext status"))
+                self.assertNotIn("Private lawyer call", json.dumps([item.text for item in result.content]))
 
     def test_api_errors_become_tool_errors_with_the_redacted_code(self) -> None:
         self.api.routes[("GET", "/v1/wiki/missing")] = (404, _typed_error("source_not_found"), {})
@@ -390,16 +425,32 @@ class MCPServerTests(unittest.TestCase):
         port = _unused_port()
         text = self.error_text(self.call("status", {}, port=port))
         self.assertIn("api_unavailable", text)
-        self.assertIn(f"127.0.0.1:{port}; the owner must start the LifeContext API", text)
+        self.assertIn(f"not reachable at 127.0.0.1:{port}. Next: the owner starts the LifeContext service or "
+                      "checks it with `lifecontext service status`; do not start it yourself.", text)
 
         self.token_path.unlink()
         for name, arguments in (("status", {}), ("recall", {"query": "anything"})):
             with self.subTest(tool=name):
                 text = self.error_text(self.call(name, arguments))
                 self.assertIn("token_unavailable", text)
-                self.assertIn("token is missing", text)
+                self.assertIn("No LifeContext API token for this user", text)
                 self.assertNotIn(str(self.home), text)
         self.assertEqual(self.api.requests, [])
+
+    def test_a_timeout_is_not_reported_as_an_unreachable_service(self) -> None:
+        self.api.gated.update({"/v1/status", "/v1/recall"})
+        self.api.gate.clear()
+        self.addCleanup(self.api.gate.set)
+        with patch.object(cli, "GET_TIMEOUT", 0.3), patch.object(cli, "HTTP_TIMEOUT", 0.3):
+            read = self.error_text(self.call("status", {}))
+            write = self.error_text(self.call("recall", {"query": "anything"}))
+        self.assertIn("api_unavailable: The LifeContext service did not answer in 30 s; it may be busy with an "
+                      "import. Next: try again in a few minutes.", read)
+        self.assertIn("api_unavailable: The LifeContext service did not answer in time; it may still be working "
+                      "on the request.", write)
+        for text in (read, write):
+            self.assertNotIn("not reachable", text)
+            self.assertNotIn("starts", text)
 
     def _one_at_a_time(self, gated_path: str, calls, **options):
         """Hold the first call at the API; run the second meanwhile, the third after."""
@@ -431,8 +482,8 @@ class MCPServerTests(unittest.TestCase):
         text = self._one_at_a_time("/v1/recall", [
             ("recall", {"query": "first"}), ("reflect", {"query": "second"}), ("recall", {"query": "third"}),
         ])
-        self.assertIn("busy: a previous recall or reflect call is still finishing; report it instead of retrying",
-                      text)
+        self.assertIn("busy: A previous recall or reflect call is still finishing. Next: report it instead of "
+                      "retrying.", text)
         self.assertEqual([json.loads(item["body"])["query"] for item in self.api.requests], ["first", "third"])
 
     def test_documents_import_runs_one_at_a_time(self) -> None:
@@ -441,8 +492,9 @@ class MCPServerTests(unittest.TestCase):
         arguments = {"path": str(original), "idempotency_key": "import-a"}
         text = self._one_at_a_time("/v1/documents", [("documents_import", arguments)] * 3,
                                    allow_writes=True, import_dirs=[str(self.inbox)])
-        self.assertIn("busy: a previous documents_import call is still finishing", text)
-        self.assertEqual(len(self.api.requests), 2)
+        self.assertIn("busy: A previous documents_import call is still finishing", text)
+        self.assertEqual([item["target"] for item in self.api.requests if item["method"] == "POST"],
+                         ["/v1/documents", "/v1/documents"])
 
     def test_locks_are_released_after_an_api_error(self) -> None:
         original = self.inbox / "a.md"

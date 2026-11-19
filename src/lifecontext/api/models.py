@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_serializer
 
 from lifecontext.config import LIMIT_CEILINGS, JournalLimits
 
@@ -143,6 +143,14 @@ class Citation(APIModel):
     source_id: SourceId
     source_version: Version
     sha256: Sha256
+    # A document's title and file name from the catalog; absent for journal sources.
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("filename")
+    @classmethod
+    def safe_citation_filename(cls, value: str | None) -> str | None:
+        return _basename(value)
 
 
 class RecallResult(APIModel):
@@ -223,6 +231,20 @@ class DocumentCoverage(APIModel):
     complete: bool
 
 
+_OUTCOMES = Literal[
+    "pending", "running", "retryable_failed", "permanent_failed", "completed", "completed_with_errors", "cancelled"
+]
+
+
+class DocumentProblem(APIModel):
+    """A stage that did not complete, why, and what to run next."""
+
+    stage: Literal["extraction", "indexing", "wiki", "projection"]
+    code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    reason: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    next_step: str = Field(min_length=1, max_length=512)
+
+
 class DocumentResponse(APIModel):
     source_id: SourceId
     source_version: Version
@@ -236,6 +258,15 @@ class DocumentResponse(APIModel):
     download_url: str
     extraction_warnings: list[Annotated[str, StringConstraints(max_length=1024)]] = Field(default_factory=list, max_length=1000)
     coverage: DocumentCoverage | None = None
+    # Added in 1.2.0; optional so older clients and servers keep working.
+    outcome: _OUTCOMES | None = None
+    problems: list[DocumentProblem] = Field(default_factory=list, max_length=5)
+    last_operation_id: Annotated[str, StringConstraints(pattern=r"^op_[0-9a-f]{32}$")] | None = None
+    extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    wiki_page_id: SourceId | None = None
+    vault_path: str | None = Field(default=None, min_length=1, max_length=1024)
+    # Added after 1.2.0rc1: how many claims of the last wiki compile failed their checks.
+    wiki_dropped_claims: int | None = Field(default=None, ge=0)
 
     @field_validator("filename")
     @classmethod
@@ -253,7 +284,11 @@ class DocumentRetryRequest(APIModel):
     vision: bool | None = None
 
 
-class RetainResponse(Citation):
+class RetainResponse(APIModel):
+    # Its own fields: a retain receipt keeps exactly the citation identity it always had.
+    source_id: SourceId
+    source_version: Version
+    sha256: Sha256
     size_bytes: int = Field(ge=0, le=LIMIT_CEILINGS["max_text_bytes"])
     submission_state: Literal["submitted"]
 
@@ -271,6 +306,8 @@ class VaultReadiness(APIModel):
     ready: bool
     permissions: bool
     error: Literal["unsafe_path", "unsafe_permissions", "vault_unavailable"] | None = None
+    # Vault-relative path of the last file or folder refused on disk; never in an error body.
+    refused_path: str | None = Field(default=None, max_length=4096)
 
 
 class CatalogReadiness(APIModel):
@@ -288,11 +325,17 @@ class ReconciliationSummary(APIModel):
     facts: dict[Literal["missing_original", "corrupt_original", "stale_projection"], int]
 
 
+class IndexingPending(APIModel):
+    count: int = Field(ge=0)
+    entries: list[str] = Field(max_length=20)
+
+
 class StatusResponse(APIModel):
     ready: bool
     max_file_bytes: int = Field(ge=1, le=LIMIT_CEILINGS["max_file_bytes"])
     dependencies: ReadinessDependencies
     reconciliation: ReconciliationSummary
+    indexing_pending: IndexingPending | None = None
 
 
 class SourceVersionSummary(APIModel):
@@ -313,7 +356,37 @@ class OperationResponse(APIModel):
     summary: OperationSummary = Field(default_factory=OperationSummary)
 
 
-class DocumentOperationResponse(OperationResponse):
+class WikiRebuildResponse(OperationResponse):
+    """A rebuild's operation; ``skipped`` names the documents a rebuild of every document
+    left out because an import, retry or reindex of them was running (first answer only)."""
+
+    skipped: list[SourceId] = Field(default_factory=list, max_length=4096)
+
+
+class OperationStatusResponse(OperationResponse):
+    """An operation as ``operations get`` and the list show it; ``outcome`` appears for document imports and retries."""
+
+    outcome: _OUTCOMES | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_outcome(self, handler):
+        data = handler(self)
+        if data.get("outcome") is None:
+            data.pop("outcome", None)
+        return data
+
+
+class OperationListItem(OperationStatusResponse):
+    operation_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    created_at: str = Field(max_length=64)
+    updated_at: str = Field(max_length=64)
+
+
+class OperationListResponse(APIModel):
+    operations: list[OperationListItem] = Field(max_length=1000)
+
+
+class DocumentOperationResponse(OperationStatusResponse):
     document: DocumentResponse | None = None
 
 
@@ -530,10 +603,23 @@ class WikiHistoryResponse(APIModel):
     revisions: list[WikiRevisionRecord] = Field(max_length=4096)
 
 
+class WikiCitationRecord(APIModel):
+    """One citation the page text shows: which claim, which source passages, and its label."""
+
+    claim: int | None = Field(default=None, ge=1)
+    source_id: SourceId
+    source_version: Version
+    extraction_revision: Version
+    passage_start: int = Field(ge=0)
+    passage_end: int = Field(ge=0)
+    label: str = Field(max_length=1024)
+
+
 class WikiShowResponse(APIModel):
     page: WikiPageRecord
     revision: WikiRevisionRecord | None = None
     managed: str = Field(max_length=LIMIT_CEILINGS["max_response_bytes"])
+    citations: list[WikiCitationRecord] = Field(default_factory=list, max_length=4096)
 
 
 class WikiStatusResponse(WikiListResponse):

@@ -4,15 +4,20 @@ Citation validation is provenance validation, NOT a semantic entailment guarante
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import difflib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import threading
 import unicodedata
+from array import array
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, tzinfo
@@ -28,9 +33,16 @@ MAX_PATCH_BYTES = 48_000
 # book instead of overflowing the 48 KB page; shared topic and entity pages take
 # fewer per document. The index lists document pages and is built without a model.
 MAX_SOURCE_CLAIMS = 48
+# An evidence window is asked for one claim per 3 KB of its text, 1 to 8.
+WINDOW_CLAIM_BYTES = 3000
+MAX_WINDOW_CLAIMS = 8
 MAX_SHARED_SOURCE_CLAIMS = 8
-MAX_INDEX_ENTRIES = 32
+MAX_INDEX_ENTRIES = 128
+# No index entry (a claim with its citation and link) is smaller than this, so a page
+# with less room left than this is full.
+MIN_INDEX_ENTRY_BYTES = 200
 MAX_PAGE_CLAIMS = 128
+INDEX_MORE = "And {count} more: `lifecontext documents list`"
 # After its own page, one routing request places a document's checked claims on
 # shared topic and entity pages: at most 6 routes of 8 claims, 16 pages per compile
 # with the document's own page, chosen from a catalog of at most 300 existing pages
@@ -40,6 +52,22 @@ MAX_ROUTES = 6
 MAX_ROUTE_CLAIMS = 8
 MAX_TARGET_PAGES = 16
 MAX_QUERY_BYTES = 60_000
+# A window that still fails after the provider's own retries is skipped and the page
+# publishes from the others; after this many windows in a row failed at the provider,
+# the remaining windows are skipped without asking, so a provider that is down costs
+# minutes, not one timeout per window.
+MAX_PROVIDER_FAILED_WINDOWS = 2
+# A window request whose failure asking again may fix (the compiler's ``retry`` hint, see
+# hindsight.compile_retry) is asked again after 2, 4 and 8 seconds or the provider's
+# Retry-After: up to three times, after a timeout once, and at most COMPILE_RETRY_BUDGET
+# times in one compile. The optional summary and routing requests are never asked again.
+# Before every attempt the document must still be there.
+COMPILE_BACKOFF = (2.0, 4.0, 8.0)
+COMPILE_TIMEOUT_RETRIES = 1
+COMPILE_RETRY_BUDGET = 6
+# Why a claim or contradiction of a model answer was dropped, by the check that failed.
+_DROP_REASONS = {"wiki quote not found": "quote_not_found",
+                 "wiki claim requires literal quote support": "claim_not_in_quote"}
 ROUTING_CATALOG_ENTRIES = 300
 ROUTING_CATALOG_BYTES = 12_000
 ROUTING_CLAIM_BYTES = 24_000
@@ -50,6 +78,11 @@ MAX_TITLE_CHARACTERS = 120
 # per entry instead.
 MAX_SUMMARY_SENTENCES = 5
 MAX_SUMMARY_CHARACTERS = 300
+# A document's own page keeps room for what is added after its claims are fitted, so
+# neither can push it over MAX_PATCH_BYTES: the largest summary (5 sentences of 300
+# characters of at most 4 bytes, each citing up to 4 claim numbers) and 32 page links.
+SUMMARY_RESERVE_BYTES = MAX_SUMMARY_SENTENCES * (4 * MAX_SUMMARY_CHARACTERS + 64)
+OWN_PAGE_RESERVE_BYTES = SUMMARY_RESERVE_BYTES + 32 * (128 + 3)
 SUMMARY_LABEL = "> Model summary, generated from the numbered claims below; verify before relying on it."
 INDEX_SUMMARY_LABEL = ("> Lines marked \"Model summary\" are generated from the numbered claims on that document's "
                        "page; verify before relying on them.")
@@ -70,6 +103,10 @@ MANAGED_START = "<!-- life-context:managed:start -->"
 MANAGED_END = "<!-- life-context:managed:end -->"
 USER_START = "<!-- life-context:user:start -->"
 USER_END = "<!-- life-context:user:end -->"
+
+
+class WikiProviderError(Exception):
+    """The model or compiler call itself failed; nothing was wrong with the document."""
 
 
 class WikiError(ValueError):
@@ -247,7 +284,8 @@ class WikiPatch:
                        if "summary" in value else ())
             return cls(page_id, _text(value["title"], 256), _integer(value["expected_revision"], 0), claims,
                        tuple(Contradiction.parse(c) for c in _items(value["contradictions"], 8)),
-                       tuple(_id(c) for c in _items(value["links"], 32)), summary)
+                       tuple(_id(c) for c in _items(value["links"], MAX_INDEX_ENTRIES if page_id == INDEX_PAGE else 32)),
+                       summary)
         except WikiError:
             raise
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -280,6 +318,12 @@ def parse_patches(raw: str) -> list[WikiPatch]:
         raise WikiError("invalid wiki patch batch") from None
 
 
+def lacks_summary(patch: WikiPatch) -> bool:
+    """A page with claims, no summary, and room for the largest one: asking again can add it."""
+    return (bool(patch.claims) and not patch.summary
+            and len(_patch_json(patch).encode()) + SUMMARY_RESERVE_BYTES <= MAX_PATCH_BYTES)
+
+
 def parse_summary(raw: str, claim_count: int) -> tuple[SummarySentence, ...]:
     """A strict ``{"summary": [...]}`` response: 1 to 5 sentences over existing claim numbers."""
     value = _load_json(raw)
@@ -293,8 +337,97 @@ def _line(text: str) -> str:
 
 
 def _citation_label(citation: Citation) -> str:
+    """The machine label, as pages showed citations before people's labels; the stored
+    citation keeps these fields either way."""
     return (f"{citation.source_id} v{citation.source_version}/e{citation.extraction_revision} "
             f"passages {citation.passage_start}:{citation.passage_end}")
+
+
+# How people count each kind of extraction locator: one and several.
+# Word paragraph and table-cell numbers are not shown anywhere a reader can find them,
+# so those citations carry the title alone.
+_PLACE_UNITS = {"page": ("p.", "pp."), "slide": ("slide", "slides"), "lines": ("line", "lines"),
+                "image": ("image", "images")}
+MAX_LABEL_TITLE_CHARACTERS = 60
+# Extraction locators kept for labels: one small list per extraction, enough for every
+# index entry and a few more, so an index with many revisions reads each artifact once.
+LOCATOR_CACHE_ENTRIES = MAX_INDEX_ENTRIES + 32
+# One workbook of 100,000 cells holds about 30 MB of locators, so the cache is also bounded
+# by the locators it holds in all; a larger extraction is read each time, not cached.
+LOCATOR_CACHE_LOCATORS = 200_000
+# What a damaged stored extraction says; anything else (storage unavailable, file
+# missing) may pass, so it is not remembered.
+PERMANENT_ARTIFACT_ERRORS = frozenset({
+    "invalid derived artifact", "derived identity mismatch", "derived checksum mismatch",
+    "noncanonical derived artifact", "invalid derived payload"})
+
+
+def citation_place(first: Mapping[str, Any], last: Mapping[str, Any]) -> str | None:
+    """Where a cited passage range sits in the original, from the locators of its first
+    and last passage: ``p. 3``, ``pp. 3–4``, ``slide 2``, ``sheet Budget``; None when unknown."""
+    kind = first.get("kind")
+    if kind == "sheet_cell":
+        sheet = _short_title(str(first.get("container") or "").rsplit("!", 1)[0])
+        return f"sheet {sheet}" if sheet else None
+    start = first.get("start")
+    end = last.get("end") if last.get("kind") == kind else first.get("end")
+    if kind not in _PLACE_UNITS or not isinstance(start, int) or isinstance(start, bool):
+        return None
+    one, several = _PLACE_UNITS[kind]
+    if not isinstance(end, int) or isinstance(end, bool) or end <= start:
+        return f"{one} {start}"
+    return f"{several} {start}–{end}"
+
+
+def coverage_line(locators: list, coverage: Mapping[str, Any], passages: Iterable[tuple[int, int]]) -> str | None:
+    """One line under a document page's title: of how many of the document's pages (or
+    slides, frames, sheets) its claims come from, and which pages were not read. None for
+    a document without such units (text, Word), where the line would say nothing."""
+    passages = list(passages)
+    unit = coverage.get("unit") or next((kind for kind in ("page", "slide")
+                                         if any(locator.get("kind") == kind for locator in locators)), None)
+    if unit is None:
+        def sheet(locator):
+            return str(locator.get("container") or "").rsplit("!", 1)[0] if locator.get("kind") == "sheet_cell" else None
+
+        sheets = {name for locator in locators if (name := sheet(locator))}
+        cited = {name for start, end in passages for locator in locators[start:end] if (name := sheet(locator))}
+        return f"Claims come from {len(cited)} of {len(sheets)} sheets." if len(sheets) > 1 else None
+    kind = {"frame": "image"}.get(unit, unit)
+    units = {locator.get("start") for locator in locators if locator.get("kind") == kind}
+    total = coverage.get("total") or len(units)
+    cited = {locator.get("start") for start, end in passages for locator in locators[start:end]
+             if locator.get("kind") == kind}
+    unread = [item.split(":", 1)[1] for item in coverage.get("unresolved") or ()
+              if item.startswith(unit + ":") and item.split(":", 1)[1].isdigit()]
+    # The listed items are capped; the count comes from the totals.
+    count = len(unread)
+    if coverage.get("total") and coverage.get("resolved") is not None:
+        count = max(count, coverage["total"] - coverage["resolved"])
+    line = f"Claims come from {len(cited)} of {total} {unit}{'' if total == 1 else 's'}"
+    if unread:
+        shown = ", ".join(unread[:10]) + (f" and {count - 10} more" if count > 10 else "")
+        line += f"; not read: {unit}{'' if count == 1 else 's'} {shown}"
+    return line + "."
+
+
+def _short_title(title: str) -> str:
+    title = _line(title)
+    if len(title) > MAX_LABEL_TITLE_CHARACTERS:
+        title = title[:MAX_LABEL_TITLE_CHARACTERS - 1].rstrip() + "…"
+    return title
+
+
+def citation_label(title: str, place: str | None, version: int | None = None, source_tag: str | None = None) -> str:
+    """A citation as people read it: ``Title, p. 3``; ``Title v2, p. 3`` when the
+    document has more than one version; ``Title (doc_1a2b), p. 3`` when another
+    document on the same page has the same title. Long titles are shortened."""
+    title = _short_title(title)
+    if version is not None:
+        title = f"{title} v{version}"
+    if source_tag:
+        title = f"{title} ({source_tag})"
+    return f"{title}, {place}" if place else title
 
 
 def _link_label(text: str) -> str:
@@ -316,7 +449,8 @@ def render_managed_v11(patch: WikiPatch) -> str:
 
 
 def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None, state: str | None = None,
-                   page_link=None, citation_link=None, withdrawn: str | None = None) -> str:
+                   page_link=None, citation_link=None, withdrawn: str | None = None, citation_label=None,
+                   coverage: str | None = None, index_more: int = 0, markdown: bool = False) -> str:
     """Render immutable managed content only; projection must preserve user bytes/CAS.
 
     Claims are numbered; a model summary is labelled and names the claims it rests
@@ -324,16 +458,25 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
     document page. ``titles`` names linked pages. For the vault, a ``stale`` state
     opens the page with a callout, and ``page_link(page_id)`` and
     ``citation_link(citation)`` return a relative link target, or None while the
-    target is not projected (the text then stays plain). A ``withdrawn`` page
-    ("forgotten" or "retired") shows one fixed line instead of claims.
+    target is not projected (the text then stays plain). ``citation_label(citation)``
+    names a citation for people (``WikiService.show`` passes title and page); without
+    it the machine label is shown. ``coverage`` is one line under a document page's
+    title; ``index_more`` counts the documents the index has no room for. A
+    ``withdrawn`` page ("forgotten" or "retired") shows one fixed line instead of claims.
+    Labels are plain text unless ``markdown`` (the vault's files) or a link escapes them.
     """
     if withdrawn:
         return "\n".join([MANAGED_START, f"# {_line(patch.title)}", "", WITHDRAWN_LINES[withdrawn], MANAGED_END, ""])
     titles = titles or {}
+    labels = citation_label or _citation_label
 
     def cite(citation: Citation) -> str:
         target = citation_link(citation) if citation_link else None
-        return f"[{_citation_label(citation)}]({target})" if target else _citation_label(citation)
+        label = labels(citation)
+        if citation_link is None and not markdown:
+            return label
+        label = _link_label(label)
+        return f"[{label}]({target})" if target else label
 
     def cited(c: Claim) -> str:
         refs = "; ".join(cite(r) for r in c.citations)
@@ -354,7 +497,11 @@ def render_managed(patch: WikiPatch, *, titles: Mapping[str, str] | None = None,
         for number, (claim, link) in enumerate(zip(patch.claims, patch.links, strict=True), 1):
             entry = f"Model summary: {sentences[number]}" if number in sentences else cited(claim)
             lines.append(f"{number}. {page(link)} — {entry}")
+        if index_more > 0:
+            lines.extend(["", INDEX_MORE.format(count=index_more)])
         return "\n".join([*lines, MANAGED_END, ""])
+    if coverage:
+        lines.extend([_line(coverage), ""])
     if patch.summary:
         prose = " ".join(f"{s.text} [{', '.join(map(str, s.claims))}]" for s in patch.summary)
         lines.extend([SUMMARY_LABEL, ">", f"> {prose}", ""])
@@ -449,6 +596,8 @@ class WikiRevisionStore:
 # Within one compile (per asyncio task), an extraction is read and its original
 # hashed once; other tasks keep their own reads.
 _READS: contextvars.ContextVar[dict | None] = contextvars.ContextVar("wiki_reads", default=None)
+# The retries left in the running compile (COMPILE_RETRY_BUDGET); None outside a compile.
+_RETRIES: contextvars.ContextVar[list | None] = contextvars.ContextVar("wiki_retries", default=None)
 
 
 def source_page_id(source_id: str) -> str:
@@ -521,6 +670,12 @@ def _sample(windows: list, limit: int) -> list:
     return [windows[i] for i in picks]
 
 
+def window_claims(window: Mapping[str, Any]) -> int:
+    """How many claims to ask of one evidence window: one per 3 KB of its text, 1 to 8."""
+    size = sum(len(segment["text"].encode()) for segment in window["segments"])
+    return max(1, min(MAX_WINDOW_CLAIMS, math.ceil(size / WINDOW_CLAIM_BYTES)))
+
+
 def _cites(claim: Claim, source_id: str) -> bool:
     return any(citation.source_id == source_id for citation in claim.citations)
 
@@ -554,6 +709,170 @@ def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
                    title=WITHDRAWN_TITLE if patch.page_id == source_page_id(source_id) else patch.title)
 
 
+# A model quote is found in its cited passages byte for byte, else on a normalised form
+# (NFKC, one space for any run of whitespace, one ' and one " for every quotation mark,
+# one - for every dash, no format characters such as soft hyphens, no hyphen breaking a
+# word across lines), else, for a quote of NEAR_MIN_CHARACTERS to NEAR_MAX_QUOTE normalised
+# characters, as the one passage span whose character trigrams are NEAR_RATIO alike
+# (Dice) with no other span within NEAR_MARGIN of it, and whose characters come in the
+# same order (difflib ratio NEAR_RATIO: trigrams alone accept the same words reordered,
+# which is a paraphrase, not a typo). The quote stored is that exact span
+# of the passage and the claim the exact part of it the claim names, so what a page
+# publishes stays literal text of the extraction; _validate still checks it byte for byte.
+NEAR_RATIO = 0.85
+NEAR_MARGIN = 0.05
+NEAR_MIN_CHARACTERS = 20
+NEAR_MAX_QUOTE = 400
+# Bounds on the CPU a model response can cost: passages longer than these are matched
+# byte for byte only (NORMALISE_MAX_CHARACTERS) or without the near rung, each near
+# search refines NEAR_CANDIDATES spans, and one response may spend at most
+# MATCH_BUDGET_CHARACTERS units: a passage normalised costs its length once per response,
+# a quote or claim its length each time, and a near search _near_cost (its passage, its
+# refinement probes and the order check, which grow with the quote). Measured on a loaded
+# 4-vCPU host, a near search takes about 3 to 12 microseconds per unit, so a spent budget
+# is a few seconds at worst, and a response's 48 KB bound keeps a real one far below that.
+NORMALISE_MAX_CHARACTERS = 100_000
+NEAR_MAX_CHARACTERS = 60_000
+NEAR_CANDIDATES = 3
+MATCH_BUDGET_CHARACTERS = 400_000
+_QUOTE_MARKS = {**dict.fromkeys(map(ord, "\u2018\u2019\u201a\u201b\u2032`\u00b4"), "'"),
+                **dict.fromkeys(map(ord, "\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb"), '"')}
+_LINE_HYPHEN = re.compile(r"(?<=\w)[-\u00ad\u2010\u2011]\s*\n\s*(?=\w)")
+
+
+def _normalised(text: str) -> tuple[str, array, array]:
+    """``text`` in its matching form, and for each of its characters the span of ``text`` it came from."""
+    characters, starts, ends = [], array("q"), array("q")
+    joins = {match.start(): match.end() for match in _LINE_HYPHEN.finditer(text)}
+    position = 0
+    while position < len(text):
+        if position in joins:
+            position = joins[position]
+            continue
+        end = position + 1
+        while end < len(text) and unicodedata.combining(text[end]):
+            end += 1
+        for character in unicodedata.normalize("NFKC", text[position:end]):
+            if character.isspace():
+                if characters and characters[-1] == " ":
+                    ends[-1] = end
+                    continue
+                character = " "
+            elif unicodedata.category(character) == "Cf":
+                continue
+            elif unicodedata.category(character) == "Pd" or character == "\u2212":
+                character = "-"
+            else:
+                character = _QUOTE_MARKS.get(ord(character), character)
+            characters.append(character)
+            starts.append(position)
+            ends.append(end)
+        position = end
+    return "".join(characters), starts, ends
+
+
+def _trigrams(text: str) -> Counter:
+    return Counter(text[i:i + 3] for i in range(len(text) - 2))
+
+
+def _alike(left: Counter, right: Counter) -> float:
+    total = sum(left.values()) + sum(right.values())
+    return 2 * sum((left & right).values()) / total if total else 0.0
+
+
+def _near_span(needle: str, text: str) -> tuple[int, int] | None:
+    """The one span of ``text`` whose trigrams are at least NEAR_RATIO alike to ``needle``'s
+    (both normalised), with no other span within NEAR_MARGIN; None for a short needle, a long
+    text, a poor match or two candidates that are about as good."""
+    width = min(len(needle), len(text))
+    if len(needle) < NEAR_MIN_CHARACTERS or width < 3 or len(text) > NEAR_MAX_CHARACTERS:
+        return None
+    wanted = _trigrams(needle)
+    # Shared trigrams of every window of the needle's length, kept as it slides by one character.
+    held = _trigrams(text[:width])
+    shared = sum((held & wanted).values())
+    scores = [shared]
+    for start in range(1, len(text) - width + 1):
+        gone, added = text[start - 1:start + 2], text[start + width - 3:start + width]
+        if held[gone] <= wanted[gone]:
+            shared -= 1
+        held[gone] -= 1
+        held[added] += 1
+        if held[added] <= wanted[added]:
+            shared += 1
+        scores.append(shared)
+    picks: list[int] = []
+    for start in sorted(range(len(scores)), key=scores.__getitem__, reverse=True):
+        if all(abs(start - other) >= width for other in picks):
+            picks.append(start)
+            if len(picks) == NEAR_CANDIDATES:
+                break
+    # Each candidate moves its start, its end, then its start again, by up to a tenth of the
+    # needle (8 characters at most) each time.
+    reach = max(1, min(8, len(needle) // 10))
+    found = []
+    for pick in picks:
+        best = max((_alike(_trigrams(text[start:start + width]), wanted), start, start + width)
+                   for start in range(max(0, pick - reach), min(len(text) - width, pick + reach) + 1))
+        _, start, end = best = max([best, *((_alike(_trigrams(text[start:end]), wanted), start, end) for end in
+                                            range(start + 3, min(len(text), best[2] + reach) + 1) if end >= best[2] - reach)])
+        _, start, end = max([best, *((_alike(_trigrams(text[start:end]), wanted), start, end) for start in
+                                     range(max(0, best[1] - reach), end - 2) if start <= best[1] + reach)])
+        # The span ends on whole words (up to 32 characters further): the model quoted the word it cut.
+        start, end = start + (text[start] == " "), end - (text[end - 1] == " ")
+        floor, ceiling = max(0, start - 32), min(len(text), end + 32)
+        while start > floor and text[start - 1].isalnum() and text[start].isalnum():
+            start -= 1
+        while end < ceiling and text[end].isalnum() and text[end - 1].isalnum():
+            end += 1
+        found.append((_alike(_trigrams(text[start:end]), wanted), start, end))
+    found.sort(reverse=True)
+    (ratio, start, end), others = found[0], found[1:]
+    if ratio < NEAR_RATIO or any(other >= ratio - NEAR_MARGIN and (stop <= start or begin >= end)
+                                 for other, begin, stop in others):
+        return None
+    if difflib.SequenceMatcher(None, needle, text[start:end], autojunk=False).ratio() < NEAR_RATIO:
+        return None
+    return start, end
+
+
+def _near_cost(passage: int, quote: int) -> int:
+    """The budget units of one near search: the sliding window over the passage, about 150
+    refinement probes of the quote's length, and difflib's order check, quadratic in the quote."""
+    return 2 * passage + 40 * quote + quote * quote // 2048
+
+
+def match_budget() -> dict:
+    """What one model response may spend on matching quotes (MATCH_BUDGET_CHARACTERS), with the
+    passages it normalised; dropped with the response, so no document text outlives it."""
+    return {"left": MATCH_BUDGET_CHARACTERS, "forms": {}}
+
+
+def _locate(needle: str, text: str, budget: dict, near: bool = False) -> tuple[str, bool] | None:
+    """The exact part of ``text`` that ``needle`` quotes once both are normalised, else (``near``)
+    the near span; with whether it was near. None when not found or ``budget`` is spent."""
+    forms = budget["forms"]
+    cost = len(needle) + (0 if text in forms else len(text))
+    if len(text) > NORMALISE_MAX_CHARACTERS or cost > budget["left"]:
+        return None
+    budget["left"] -= cost
+    if text not in forms:
+        forms[text] = _normalised(text)
+    form, starts, ends = forms[text]
+    wanted = _normalised(needle)[0].strip(" ")
+    if not wanted:
+        return None
+    at = form.find(wanted)
+    if at >= 0:
+        return text[starts[at]:ends[at + len(wanted) - 1]], False
+    cost = _near_cost(len(form), len(wanted))
+    if not near or not NEAR_MIN_CHARACTERS <= len(wanted) <= NEAR_MAX_QUOTE or cost > budget["left"]:
+        return None
+    budget["left"] -= cost
+    span = _near_span(wanted, form)
+    return (text[starts[span[0]]:ends[span[1] - 1]], True) if span else None
+
+
 # Front-matter lines that say nothing about the content: copyright and licence
 # notices, ISBNs and publisher imprint lines, in English, Ukrainian and Russian.
 _BOILERPLATE = re.compile(
@@ -565,6 +884,18 @@ _BOILERPLATE = re.compile(
 
 def _boilerplate(text: str) -> bool:
     return bool(_BOILERPLATE.search(text))
+
+
+# Only the unmistakable notices: a page drops these claims, so prose that mentions a
+# publisher, a printer or copyright law must not match.
+_FRONT_MATTER = re.compile(
+    r"©|\(c\)\s*\d{4}|\bcopyright\s+(?:©|\(c\)|\d{4})|\bisbn\b|all rights reserved"
+    r"|\bусі права захищені|\bвсі права захищені|\bвсе права защищены",
+    re.IGNORECASE)
+
+
+def _front_matter(text: str) -> bool:
+    return bool(_FRONT_MATTER.search(text))
 
 
 SUMMARY_INSTRUCTIONS = (
@@ -581,12 +912,13 @@ COMPILE_INSTRUCTIONS = (
     "Compile only the supplied source evidence into the managed wiki. All evidence is already provided; do not search "
     "memories or call retrieval tools. Return only one WikiPatch JSON object with page_id,title,expected_revision,"
     "claims,contradictions,links for the target: copy target.page_id, target.title, and target.current_revision "
-    "exactly as page_id,title,expected_revision. Each request contains one evidence window; return ONE short additive "
-    "claim for the target in that window, with a literal quote at most 160 characters, not a replacement for other "
-    "windows. Every claim text must be a literal substring of one cited quote; paraphrased unsupported prose is "
+    "exactly as page_id,title,expected_revision. Each request contains one evidence window; return up to max_claims "
+    "short additive claims for the target from different parts of that window, each with its own literal quote at "
+    "most 160 characters; they add to other windows' claims and never replace them. Every claim text must be a literal substring of one cited quote; paraphrased unsupported prose is "
     "rejected. Claims require text and citations (source_id,source_version,extraction_revision,passage_start,"
     "passage_end,original_sha256,quote). Use example_patch for the exact JSON structure and source identity; select a "
-    "meaningful short quote from the evidence, not merely the example text. Leave links empty: links between pages "
+    "meaningful short quote about the document's content from the evidence, not merely the example text and never a "
+    "copyright notice, ISBN or publisher line. Leave links empty: links between pages "
     "are computed later. Use an empty array for contradictions when none apply. Use each segment's GLOBAL "
     "passage_index, not its position in the window; passage_end is exclusive. A long segment may appear as multiple "
     "text fragments with the same global passage_index. Contradictions require left/right claims and "
@@ -621,6 +953,10 @@ class WikiService:
         # host's local time, as for briefs.
         self.timezone = timezone
         self.store = WikiRevisionStore(paths)
+        self._locator_cache: OrderedDict = OrderedDict()
+        self._locator_lock = threading.Lock()
+        # (page_id, revision, artifact sha256) -> lacks_summary; a stored revision never changes.
+        self._summary_gaps: dict[tuple, bool] = {}
 
     def source_withdrawn(self, source_id: str, version: int | None = None) -> bool:
         """The document version (by default the current one) was forgotten or deleted:
@@ -718,6 +1054,30 @@ class WikiService:
                 raise WikiError("wiki claim requires literal quote support")
         return list(dependencies.values())
 
+    def _literal(self, claim: Claim, budget: dict) -> Claim:
+        """The claim with each quote replaced by the passage span it matches (see NEAR_RATIO) and
+        its text by the part of a stored quote it matches; the near rung for the text only within a
+        near quote. What does not match is left as it was, for _validate to reject."""
+        citations, near = [], []
+        for citation in claim.citations:
+            payload = self._evidence(citation.source_id, citation.source_version, citation.extraction_revision)
+            text = "".join(s["text"] for s in payload["segments"][citation.passage_start:citation.passage_end])
+            found = None if citation.quote in text else _locate(citation.quote, text, budget, near=True)
+            try:
+                citations.append(replace(citation, quote=_text(found[0], 2048)) if found else citation)
+                near.append(bool(found and found[1]))
+            except WikiError:  # the span holds markup or control characters a quote may not
+                citations.append(citation)
+                near.append(False)
+        text = claim.text
+        if not any(text in citation.quote for citation in citations):
+            for citation, approximate in zip(citations, near, strict=True):
+                found = _locate(text, citation.quote, budget, near=approximate)
+                if found:
+                    text = found[0]
+                    break
+        return Claim(text, tuple(citations))
+
     def list(self) -> list[dict]:
         """The pages; a withdrawn page (``forgotten``) shows the neutral title, as in ``show``."""
         cache: dict = {}
@@ -795,8 +1155,116 @@ class WikiService:
                           summary=() if dropped else patch.summary)
         return visible, None if kept else ("forgotten" if gone else "retired")
 
-    def show(self, page_id: str, revision: int | None = None, **render: Any) -> dict | None:
+    def _extraction_view(self, source_id: str, version: int, extraction_revision: int) -> dict | None:
+        """The locator of each passage of one stored extraction and its coverage, or None
+        when it cannot be read. Extraction artifacts are immutable, so the most recently
+        used ones are kept per checksum across renders, within the entry and locator bounds
+        (a damaged file too, so it is opened once; a storage error is not remembered). The
+        cache is shared by threads."""
+        rows = [row for row in self.catalog.list_extractions(source_id, version)
+                if row["extraction_revision"] == extraction_revision and row["artifact_sha256"]]
+        if not rows:
+            return None
+        key = (source_id, version, extraction_revision, rows[-1]["artifact_sha256"])
+        cache = self._locator_cache
+        with self._locator_lock:
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+        from lifecontext.extraction import coverage_summary
+        try:
+            payload = self.derived.read(source_id, version, extraction_revision, expected_sha256=key[3])
+            view = {"locators": [segment.get("locator") or {} for segment in payload.get("segments", [])],
+                    "coverage": coverage_summary(payload)}
+        except ValueError as error:
+            if str(error) not in PERMANENT_ARTIFACT_ERRORS:
+                return None
+            view = None
+        except (KeyError, TypeError, AttributeError):
+            view = None
+        except OSError:
+            return None
+        weight = len(view["locators"]) if view else 0
+        if weight > LOCATOR_CACHE_LOCATORS:
+            return view
+        with self._locator_lock:
+            cache[key] = view
+            cache.move_to_end(key)
+            held = sum(len(item["locators"]) for item in cache.values() if item)
+            while len(cache) > LOCATOR_CACHE_ENTRIES or held > LOCATOR_CACHE_LOCATORS:
+                _, evicted = cache.popitem(last=False)
+                held -= len(evicted["locators"]) if evicted else 0
+        return view
+
+    def _citation_labels(self, citations: Iterable[Citation] = ()):
+        """People's label for each citation: the document's page title (else its
+        metadata title), ``v2`` when the document has more than one version, and the
+        page, slide or sheet of the cited passages. When two documents cited on one
+        page read the same, each gets a short source ID. Only the label is read here;
+        the stored citation keeps source, version, extraction revision and passages.
+        ``citations`` are those the page shows."""
+        titles, versions = {}, {}
+
+        def known(citation: Citation) -> None:
+            source = citation.source_id
+            if source not in titles:
+                page = self.catalog.get_wiki_page(source_page_id(source))
+                title = page["title"] if page and page["title"] != WITHDRAWN_TITLE else None
+                titles[source] = title or self._title(source, citation.source_version)
+                current = self.catalog.get_current_manifest(source)
+                versions[source] = current.source_version if current is not None else 1
+
+        shown: dict = {}
+        for citation in citations:
+            known(citation)
+            shown.setdefault(_short_title(titles[citation.source_id]).casefold(), set()).add(citation.source_id)
+        tags = {}
+        for sources in shown.values():
+            if len(sources) > 1:
+                size = 8
+                while len({source[:size] for source in sources}) < len(sources) and size < max(map(len, sources)):
+                    size += 1
+                tags.update({source: source[:size] for source in sources})
+
+        def label(citation: Citation) -> str:
+            known(citation)
+            source = citation.source_id
+            view = self._extraction_view(source, citation.source_version, citation.extraction_revision)
+            locators = view["locators"] if view else []
+            place = None
+            if citation.passage_end <= len(locators):
+                place = citation_place(locators[citation.passage_start], locators[citation.passage_end - 1])
+            several = max(versions[source], citation.source_version) > 1
+            return citation_label(titles[source], place, citation.source_version if several else None, tags.get(source))
+        return label
+
+    def _coverage_line(self, patch: WikiPatch) -> str | None:
+        """``coverage_line`` for a document's own page, from the extraction its claims cite."""
+        own = [c for claim in patch.claims for c in claim.citations if source_page_id(c.source_id) == patch.page_id]
+        if not own:
+            return None
+        first = own[0]
+        view = self._extraction_view(first.source_id, first.source_version, first.extraction_revision)
+        if view is None:
+            return None
+        return coverage_line(view["locators"], view["coverage"],
+                             [(c.passage_start, c.passage_end) for c in own
+                              if (c.source_version, c.extraction_revision) == (first.source_version, first.extraction_revision)])
+
+    def _index_more(self, listed: Iterable[str], cache: dict) -> int:
+        """How many document pages with something to show the index does not list."""
+        pages = {page["page_id"] for page in self.catalog.list_wiki_pages()
+                 if page["page_id"].startswith("source_") and page["current_revision"]
+                 and not self.forgotten(page["page_id"], page["current_revision"], cache=cache)}
+        return len(pages - set(listed))
+
+    def show(self, page_id: str, revision: int | None = None, *, history: bool = False, **render: Any) -> dict | None:
         """A page, one revision and its managed text; ``render`` passes the vault's state and link resolvers.
+
+        ``citations`` lists every citation the text shows, so a caller can tell which
+        source and passages a label stands for. ``history`` renders the revision for its
+        history file: the index then omits its count of unlisted documents, which belongs
+        to the current revision only and would rewrite every history file on each import.
 
         Text of forgotten or deleted documents is never shown, in current or earlier
         revisions; a page that cites nothing else shows a fixed line under a neutral
@@ -808,7 +1276,7 @@ class WikiService:
             return None
         revision = page["current_revision"] if revision is None else revision
         row = self.catalog.get_wiki_revision(page_id, revision) if revision else None
-        managed, title, withdrawn, neutral = "", page["title"], None, False
+        managed, title, withdrawn, neutral, citations = "", page["title"], None, False, []
         cache: dict = {}
         if row:
             patch = self.store.read(page_id, revision, row["artifact_sha256"])
@@ -819,9 +1287,23 @@ class WikiService:
             # Page titles never change, so naming linked pages keeps a revision's text stable;
             # links to withdrawn pages are gone already.
             titles = {item["page_id"]: item["title"] for item in self.catalog.list_wiki_pages()} if visible.links else None
-            managed = render_managed(visible, titles=titles, withdrawn=withdrawn, **render)
+            extra = {}
+            if not withdrawn and page_id == INDEX_PAGE:
+                if revision == page["current_revision"] and not history:
+                    extra["index_more"] = self._index_more(visible.links, cache)
+            elif not withdrawn and page_id.startswith("source_"):
+                extra["coverage"] = self._coverage_line(visible)
+            shown = [] if withdrawn else [
+                (number, citation) for number, claim in enumerate(visible.claims, 1) for citation in claim.citations]
+            shown += [] if withdrawn else [(None, citation) for c in visible.contradictions
+                                           for side in (c.left, c.right) for citation in side.citations]
+            label = self._citation_labels(citation for _, citation in shown)
+            managed = render_managed(visible, titles=titles, withdrawn=withdrawn, citation_label=label, **extra, **render)
+            citations = [{"claim": number, "source_id": citation.source_id, "source_version": citation.source_version,
+                          "extraction_revision": citation.extraction_revision, "passage_start": citation.passage_start,
+                          "passage_end": citation.passage_end, "label": label(citation)} for number, citation in shown]
         return {"page": {**page, "title": title}, "revision": row, "managed": managed, "title": title,
-                "title_withdrawn": neutral,
+                "citations": citations, "title_withdrawn": neutral,
                 "withdrawn": withdrawn, "reviews": [review for review in self.catalog.list_wiki_reviews(page_id)
                                                     if not self.review_withdrawn(review, cache)]}
 
@@ -881,6 +1363,60 @@ class WikiService:
     def status(self) -> dict:
         pages = self.list()
         return {"pages": pages, "semantic_support_verified": False, "summary_model_generated": True}
+
+    def summary_missing(self, source_id: str) -> bool:
+        """The document's own page is published with claims but without its model summary,
+        and has room for one (``lacks_summary``), so ``write_missing_summary`` can add it.
+
+        The stored page is the record: a failed summary leaves none, and a retry that
+        writes one clears it. Each stored revision is read once. An unreadable page is
+        not reported here; lint names it.
+        """
+        page = self.catalog.get_wiki_page(source_page_id(source_id))
+        # A page in review conflict refuses a commit, so a summary could not be saved.
+        if not page or not page["current_revision"] or page["state"] == "conflict":
+            return False
+        try:
+            row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"], dependencies=False)
+            key = (page["page_id"], page["current_revision"], row["artifact_sha256"])
+            if key not in self._summary_gaps:
+                gap = lacks_summary(self.store.read(*key))
+                if len(self._summary_gaps) >= 4096:
+                    self._summary_gaps.pop(next(iter(self._summary_gaps)), None)
+                self._summary_gaps[key] = gap
+            return self._summary_gaps[key]
+        except (ValueError, TypeError, KeyError, OSError):
+            return False
+
+    async def write_missing_summary(self, source_id: str, version: int) -> list[dict]:
+        """Ask only for the summary a published page lacks, and publish its claims with it.
+
+        The claims, links and contradictions stay as they are, so no evidence window is
+        asked again. Nothing happens when the page has a summary or no room for one. A
+        failed request or a page that changed meanwhile raises and leaves the page as it is.
+        """
+        page_id = source_page_id(source_id)
+        page = self.catalog.get_wiki_page(page_id)
+        patch = self._read(page_id, page["current_revision"]) if page and page["state"] != "conflict" else None
+        if patch is None or not lacks_summary(patch):
+            return []
+        reads = _READS.set({})
+        try:
+            dependencies = self._validate(patch)
+            patch = replace(patch, expected_revision=page["current_revision"])
+            patch = await self._summarize(patch, source_id, version, self._evidence(source_id, version)["extraction_revision"])
+            with self.catalog.wiki_publication():
+                if not self._still_current(patch):
+                    raise WikiError("stale wiki claim")
+                results = [self._commit(patch, self.store.write(patch), dependencies)]
+        finally:
+            _READS.reset(reads)
+        try:
+            results.extend(self._publish_index())
+        except Exception as exc:  # noqa: BLE001 -- the index is a convenience; the page is done
+            reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
+            logging.getLogger(__name__).warning("Wiki index not updated: %s", reason)
+        return results
 
     def lint(self, documents: Iterable[Mapping[str, Any]], *, documents_omitted: int = 0) -> dict:
         """Model-free health report over the catalog and stored revisions; never writes.
@@ -945,7 +1481,8 @@ class WikiService:
                     add("link_missing", "warning", f"A rebuild drops or restores the link: lifecontext wiki rebuild --json; see lifecontext wiki show {page_id} --json",
                         page_id=page_id, detail=link)
             size = len(_patch_json(patch).encode())
-            if len(patch.claims) > 0.9 * MAX_PAGE_CLAIMS or size > 0.9 * MAX_PATCH_BYTES:
+            # The index fills its page by design; its own bound is the entry count.
+            if page_id != INDEX_PAGE and (len(patch.claims) > 0.9 * MAX_PAGE_CLAIMS or size > 0.9 * MAX_PATCH_BYTES):
                 add("page_near_limit", "warning", f"At the bound a document's newest claims are left out; see lifecontext wiki show {page_id} --json",
                     page_id=page_id, detail=f"{len(patch.claims)}/{MAX_PAGE_CLAIMS} claims, {size}/{MAX_PATCH_BYTES} bytes")
             if page_id.startswith(SHARED_PREFIXES):
@@ -989,7 +1526,7 @@ class WikiService:
                 failed = stage["state"] in {"failed", "blocked", "conflict"}
                 detail = f"{name}: {stage['state']}" + (f" ({stage['error_code']})" if stage.get("error_code") else "")
                 add("stage_failed" if failed else "stage_pending", "error" if failed else "warning",
-                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry OPERATION_ID --json",
+                    f"lifecontext documents show {source_id} --json; retry with lifecontext documents retry {source_id} --json",
                     source_id=source_id, detail=detail)
                 reported = name
                 break
@@ -1112,12 +1649,36 @@ class WikiService:
         if window:
             yield {**header, "segments": window}
 
-    async def _request(self, query, parse, source_id, version, extraction_revision, *, correction):
+    async def _ask(self, query: str, source_id: str, version: int, retry: bool) -> Any:
+        """One model request, asked again after a failure the compiler marks as worth it, while
+        ``retry`` and the compile's budget allow (COMPILE_BACKOFF). The document must still be
+        there before every attempt."""
+        budget = _RETRIES.get() if retry else None
+        retries = timeouts = 0
+        while True:
+            self._still_there(source_id, version)
+            try:
+                return await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            except Exception as exc:  # any model failure is a provider failure
+                hint = getattr(exc, "retry", None)
+                if (not budget or budget[0] <= 0 or not isinstance(hint, tuple) or retries >= len(COMPILE_BACKOFF)
+                        or (hint[0] == "timeout" and timeouts >= COMPILE_TIMEOUT_RETRIES)):
+                    raise WikiProviderError(type(exc).__name__) from exc
+                wait = COMPILE_BACKOFF[retries] if hint[1] is None else hint[1]
+                budget[0] -= 1
+                retries += 1
+                timeouts += hint[0] == "timeout"
+                # The error's type and kind only: its text may hold provider messages.
+                logging.getLogger(__name__).warning("Wiki compile request failed (%s, %s); asking again in %.0f s",
+                                                    type(exc).__name__, hint[0], wait)
+            await asyncio.sleep(wait)
+
+    async def _request(self, query, parse, source_id, version, extraction_revision, *, correction, retry=False):
         """One model request under strict parsing; regenerate one rejected response once, never relaxing validation."""
         for attempt in range(2 if self.compiler is not None else 1):
             if len(query.encode()) > MAX_QUERY_BYTES:
                 raise WikiError("wiki query size limit")
-            response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            response = await self._ask(query, source_id, version, retry)
             try:
                 return parse(response.get("text"))
             except WikiError as exc:
@@ -1127,8 +1688,19 @@ class WikiService:
                 self._evidence(source_id, version, extraction_revision)
                 query = "Correct the rejected JSON response: " + str(exc) + ". " + correction + query
 
-    async def _compile_window(self, query, target, source_id, version, extraction_revision) -> WikiPatch:
-        """One evidence window's claims for the document's own page; shared pages come from routing."""
+    async def _compile_window(self, query, target, source_id, version, extraction_revision, window_index=0,
+                              dropped: list | None = None) -> WikiPatch:
+        """One evidence window's claims for the document's own page; shared pages come from routing.
+
+        ``dropped`` ends up holding, for each claim or contradiction of the last answer checked that
+        failed its checks, its kind and a reason code (``_DROP_REASONS``, else ``invalid_citation``),
+        never its text: a window that passes after its correction keeps none of the first answer's."""
+        dropped = [] if dropped is None else dropped
+        items: list = []
+
+        def drop(kind: str, exc: WikiError) -> None:
+            items.append({"kind": kind, "reason": _DROP_REASONS.get(str(exc), "invalid_citation")})
+
         def validate(text):
             patches = parse_patches(text)
             if len(patches) != 1:
@@ -1141,13 +1713,105 @@ class WikiService:
             # Document titles may hold any script or punctuation; the title is ours, so a
             # mistyped copy is corrected rather than rejected. Links are computed, not proposed.
             patch = replace(patch, title=target["title"], links=())
-            dependencies = self._validate(patch)
+            # Each claim and contradiction stands on its own quote, checked byte for byte:
+            # one bad quote drops that claim, not the whole window. Only a response with
+            # nothing valid is rejected (and corrected once).
+            # A quote that matches only once normalised, or nearly, is stored as the exact passage span.
+            claims, contradictions, dependencies, failure, budget = [], [], [], None, match_budget()
+            items.clear()
+            for claim in patch.claims:
+                try:
+                    literal = self._literal(claim, budget)
+                    dependencies += self._validate(replace(patch, claims=(literal,), contradictions=()))
+                    claims.append(literal)
+                except WikiError as exc:
+                    failure = failure or exc
+                    drop("claim", exc)
+            for contradiction in patch.contradictions:
+                try:
+                    literal = replace(contradiction, left=self._literal(contradiction.left, budget),
+                                      right=self._literal(contradiction.right, budget))
+                    dependencies += self._validate(replace(patch, claims=(), contradictions=(literal,)))
+                    contradictions.append(literal)
+                except WikiError as exc:
+                    failure = failure or exc
+                    drop("contradiction", exc)
+            dropped[:] = items
+            if items:
+                # Codes and counts only: the quotes are the user's document text.
+                logging.getLogger(__name__).warning(
+                    "Wiki window %s of %s: %s of %s checked items dropped (%s)", window_index, source_id, len(items),
+                    len(patch.claims) + len(patch.contradictions), failure)
+            if not claims:
+                raise failure or WikiError("wiki claim requires literal quote support")
             if not any(d["source_id"] == source_id and d["source_version"] == version for d in dependencies):
                 raise WikiError("wiki update lacks source evidence")
-            return patch
+            return replace(patch, claims=tuple(claims), contradictions=tuple(contradictions))
 
-        return await self._request(query, validate, source_id, version, extraction_revision,
+        return await self._request(query, validate, source_id, version, extraction_revision, retry=True,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
+
+    def _still_there(self, source_id: str, version: int) -> None:
+        """End the compile, as a failed one, once a forget of the document has started (it hides the
+        versions only after the provider's chunks go) or the version was forgotten or deleted (a
+        delete writes its tombstone first)."""
+        if self.catalog.forget_running(source_id):
+            raise WikiError("wiki forget pending")
+        if self.source_withdrawn(source_id, version):
+            raise WikiError("wiki evidence unavailable")
+
+    @staticmethod
+    def _window_key(evidence: dict, window: dict, asked: int, model: str | None) -> str:
+        """What a window's checked claims depend on: the version's bytes and extraction, the window's
+        own evidence (its index shifts with the target title's length), the claims asked for, the
+        model and the instructions."""
+        return hashlib.sha256(_canonical({
+            "original_sha256": evidence["original_checksum"], "extraction_revision": evidence["extraction_revision"],
+            "window": hashlib.sha256(_canonical(window).encode()).hexdigest(), "max_claims": asked, "model": model,
+            "instructions": hashlib.sha256(COMPILE_INSTRUCTIONS.encode()).hexdigest()}).encode()).hexdigest()
+
+    def _window_record(self, source_id: str, version: int, extraction: Mapping[str, Any]) -> dict:
+        """The version's window entries by key, when they come from ``extraction`` (an evidence payload
+        or an extraction row); otherwise none."""
+        try:
+            record = self.derived.read_wiki_windows(source_id, version)
+        except ValueError:  # an unreadable record is replaced by the next compile
+            return {}
+        checksum = extraction.get("original_checksum") or extraction.get("original_sha256")
+        if (not isinstance(record, dict) or record.get("original_sha256") != checksum
+                or record.get("extraction_revision") != extraction["extraction_revision"]
+                or not isinstance(record.get("windows"), dict)):
+            return {}
+        # A malformed entry counts as no entry: its window is asked again. A dropped claim keeps only
+        # its kind and reason, whatever an earlier record held, so its text is not written back.
+        return {key: {**entry, "dropped": [{"kind": item.get("kind"), "reason": item.get("reason")}
+                                           for item in entry.get("dropped", []) if isinstance(item, dict)]}
+                for key, entry in record["windows"].items()
+                if isinstance(entry, dict) and isinstance(entry.get("dropped", []), list)
+                and (entry.get("patch") is None or isinstance(entry.get("patch"), dict))}
+
+    def _reuse_window(self, entry: Any, target: dict) -> WikiPatch | None:
+        """A cached window's claims on the target's current revision, checked again without the model;
+        None when there are none or any of them no longer validates."""
+        if not isinstance(entry, dict) or not isinstance(entry.get("patch"), dict):
+            return None
+        try:
+            patch = WikiPatch.parse(json.dumps(entry["patch"], ensure_ascii=False))
+            patch = replace(patch, page_id=target["page_id"], title=target["title"],
+                            expected_revision=target["current_revision"], links=(), summary=())
+            self._validate(patch)
+        except (WikiError, ValueError, TypeError, RecursionError):
+            return None
+        return patch
+
+    def window_report(self, source_id: str, version: int) -> dict:
+        """How many evidence windows the version's last compile skipped (failed at the provider, so a
+        retry asks again; a window whose answer was rejected is not counted) and how many claims it
+        dropped, for its current extraction; counts only, never their text."""
+        rows = self.catalog.list_extractions(source_id, version)
+        windows = self._window_record(source_id, version, rows[-1]).values() if rows else ()
+        return {"skipped": sum(entry.get("patch") is None and entry.get("failure") != "rejected" for entry in windows),
+                "dropped": sum(len(entry.get("dropped", [])) for entry in windows)}
 
     async def _summarize(self, patch: WikiPatch, source_id: str, version: int, extraction_revision: int) -> WikiPatch:
         """Ask once for a short summary of the page's validated claims; the page is returned with it.
@@ -1186,12 +1850,12 @@ class WikiService:
                 continue
         return source_id
 
-    def _fit(self, patch: WikiPatch, source_id: str, limit: int) -> WikiPatch:
+    def _fit(self, patch: WikiPatch, source_id: str, limit: int, reserve: int = 0) -> WikiPatch:
         """Bring a page within its bounds, then validate its shape once.
 
         At most ``limit`` claims cite the source, at most 128 claims and 32 links in
-        all; above 128 claims or MAX_PATCH_BYTES, the source's last claims go first,
-        so other documents keep theirs. Contradictions always stay visible.
+        all; above 128 claims or MAX_PATCH_BYTES less ``reserve``, the source's last
+        claims go first, so other documents keep theirs. Contradictions always stay visible.
         """
         kept, count = [], 0
         for claim in patch.claims:
@@ -1211,7 +1875,7 @@ class WikiService:
             # A summary names claims by number; it goes when any claim does.
             summary = patch.summary if len(kept) == len(patch.claims) else ()
             raw = _patch_json(replace(patch, claims=tuple(kept), contradictions=tuple(contradictions), summary=summary))
-            if len(raw.encode()) <= MAX_PATCH_BYTES:
+            if len(raw.encode()) <= MAX_PATCH_BYTES - reserve:
                 return WikiPatch.parse(raw)
             if len(kept) > 1:
                 own = [i for i, claim in enumerate(kept) if _cites(claim, source_id)]
@@ -1242,7 +1906,7 @@ class WikiService:
         """Rebuild the model-free table of contents; never fails a document.
 
         One entry per document page, in title order, linked to that page, for as many
-        pages as fit in 32 links and 48 KB. An entry holds the claim the page's first
+        pages as fit in 128 links and 48 KB; the page then counts the rest. An entry holds the claim the page's first
         summary sentence rests on and that sentence, or else the page's first current
         claim that is not copyright or imprint boilerplate. An index whose managed
         text was edited by hand stays untouched until resolved.
@@ -1261,23 +1925,27 @@ class WikiService:
                 continue
         revision = current["current_revision"] if current else 0
         claims, links, summary, dependencies = [], [], [], {}
+        size = len(_patch_json(WikiPatch(INDEX_PAGE, "Index", revision, (), (), ())).encode())
         for page_id, patch in sorted(pages, key=lambda item: (item[1].title.casefold(), item[0])):
-            if len(links) == MAX_INDEX_ENTRIES:
+            if len(links) == MAX_INDEX_ENTRIES or MAX_PATCH_BYTES - size < MIN_INDEX_ENTRY_BYTES:
                 break
             for claim, sentence in self._index_candidates(patch):
+                sentences = [*summary, SummarySentence(sentence, (len(claims) + 1,))] if sentence else summary
+                candidate = WikiPatch(INDEX_PAGE, "Index", revision, (*claims, claim), (), (*links, page_id), tuple(sentences))
+                candidate_size = len(_patch_json(candidate).encode())
+                if candidate_size > MAX_PATCH_BYTES:
+                    # Too big for what is left; a later document's smaller entry may still fit.
+                    break
                 try:
-                    # One entry at a time: a damaged document is skipped, never fatal,
-                    # and only its own evidence is in memory.
+                    # Only an entry that fits is checked against its original: a damaged
+                    # document is skipped, never fatal, and only its own evidence is in memory.
                     entry = self._validate(WikiPatch(INDEX_PAGE, "Index", revision, (claim,), (), ()))
                 except (WikiError, ValueError, TypeError):
                     continue
-                sentences = [*summary, SummarySentence(sentence, (len(claims) + 1,))] if sentence else summary
-                candidate = WikiPatch(INDEX_PAGE, "Index", revision, (*claims, claim), (), (*links, page_id), tuple(sentences))
-                if len(_patch_json(candidate).encode()) <= MAX_PATCH_BYTES:
-                    claims.append(claim)
-                    links.append(page_id)
-                    summary = sentences
-                    dependencies.update({json.dumps(d, sort_keys=True): d for d in entry})
+                claims.append(claim)
+                links.append(page_id)
+                summary, size = sentences, candidate_size
+                dependencies.update({json.dumps(d, sort_keys=True): d for d in entry})
                 break
         if not claims:
             return []
@@ -1626,18 +2294,20 @@ class WikiService:
         One routing request then places its claims on existing or new topic/entity
         pages; the model only names claims by number and writes no quotes. A failed
         summary or routing, or a shared page that still conflicts after one reload,
-        never fails the document.
+        never fails the document. Neither does a window that still fails: it is skipped
+        (``window_report``) and the page publishes from the others; only when no window
+        validates does the stage fail, with the first window's reason.
         """
         _id(source_id)
         _integer(version)
         old = self.catalog.get_document_stage(source_id, version, "wiki")
         if old and old["state"] == "running":
-            self._stage(source_id, version, "failed", "reflect_failed")
+            self._stage(source_id, version, "failed", "wiki_interrupted")
         if old and old["state"] == "completed":
             self._stage(source_id, version, "pending")
         self._stage(source_id, version, "running")
         window_count = 0
-        reads = _READS.set({})
+        reads, retries = _READS.set({}), _RETRIES.set([COMPILE_RETRY_BUDGET])
         try:
             evidence = self._evidence(source_id, version)
             extraction_revision = evidence["extraction_revision"]
@@ -1651,39 +2321,132 @@ class WikiService:
                 # Each compile replaces this document's claims; nothing accumulates.
                 previous = replace(previous, claims=tuple(c for c in previous.claims if not _cites(c, source_id)))
             budget = min(24_000, MAX_QUERY_BYTES - len(COMPILE_INSTRUCTIONS.encode()) - len(_canonical(target).encode()) - 4000)
-            merged = None
-            for window in _sample(list(self._evidence_windows(evidence, budget)), MAX_SOURCE_CLAIMS):
-                window_count += 1
-                segment = window["segments"][0]
+            merged = fallback = None
+            windows = _sample(list(self._evidence_windows(evidence, budget)), MAX_SOURCE_CLAIMS)
+            # Each window keeps at most its share of the page's claims, so they come
+            # from the whole document rather than filling the page from its start.
+            quota = max(1, MAX_SOURCE_CLAIMS // max(1, len(windows)))
+
+            def example_claim(segment):
                 quote = segment["text"][:80]
-                example = {"page_id": own_id, "title": target["title"], "expected_revision": target["current_revision"],
-                           "claims": [{"text": quote, "citations": [{"source_id": source_id, "source_version": version,
-                           "extraction_revision": extraction_revision, "passage_start": segment["passage_index"],
-                           "passage_end": segment["passage_index"] + 1, "original_sha256": evidence["original_checksum"], "quote": quote}]}],
-                           "contradictions": [], "links": []}
-                query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "example_patch": example, "evidence": window},
-                                                          ensure_ascii=False, separators=(",", ":"))
-                patch = await self._compile_window(query, target, source_id, version, extraction_revision)
-                combined = patch if merged is None else self._combine(merged, patch)
-                if len(combined.claims) > MAX_PAGE_CLAIMS or len(_patch_json(combined).encode()) > MAX_PATCH_BYTES:
+                return {"text": quote, "citations": [{"source_id": source_id, "source_version": version,
+                        "extraction_revision": extraction_revision, "passage_start": segment["passage_index"],
+                        "passage_end": segment["passage_index"] + 1, "original_sha256": evidence["original_checksum"],
+                        "quote": quote}]}
+
+            # Checked windows are kept by _window_key; with a named model a rebuild or retry asks
+            # only for windows not kept or whose claims no longer validate. A window whose answer
+            # was rejected is kept as rejected and not asked again for that key; one that failed
+            # at the provider is kept as skipped, and a retry asks again.
+            model = getattr(self.compiler, "model", None)
+            cached = self._window_record(source_id, version, evidence) if model is not None else {}
+            record, failures, provider_failures = {}, [], 0
+
+            def save(windows: dict) -> None:
+                # JSON once more: the records hold tuples, which the store's canonical form refuses.
+                self.derived.write_wiki_windows(source_id, version, json.loads(json.dumps({
+                    "schema_version": 1, "original_sha256": evidence["original_checksum"],
+                    "extraction_revision": extraction_revision, "windows": windows}, ensure_ascii=False)))
+                try:
+                    self._still_there(source_id, version)
+                except WikiError:
+                    # Forgotten or deleted while the model was asked: what was just written goes too.
+                    self.derived.remove_wiki_windows(source_id)
+                    raise
+            for window in windows:
+                # A document forgotten or deleted meanwhile is never sent to the model again.
+                self._still_there(source_id, version)
+                window_count += 1
+                asked = min(window_claims(window), quota)
+                key = self._window_key(evidence, window, asked, model)
+                patch = self._reuse_window(cached.get(key), target)
+                if patch is not None:
+                    record[key] = cached[key]
+                elif isinstance(cached.get(key), dict) and cached[key].get("failure") == "rejected":
+                    record[key] = cached[key]
+                    failures.append(WikiError("wiki window rejected"))
+                    continue
+                elif provider_failures >= MAX_PROVIDER_FAILED_WINDOWS:
+                    record[key] = {"patch": None, "dropped": [], "failure": "skipped"}
+                    continue
+                else:
+                    first, last = window["segments"][0], window["segments"][-1]
+                    examples = [first, last] if asked > 1 and last["passage_index"] != first["passage_index"] else [first]
+                    example = {"page_id": own_id, "title": target["title"], "expected_revision": target["current_revision"],
+                               "claims": [example_claim(segment) for segment in examples], "contradictions": [], "links": []}
+                    query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "max_claims": asked, "example_patch": example,
+                                                               "evidence": window}, ensure_ascii=False, separators=(",", ":"))
+                    # Every returned claim is checked against its quote; the window keeps the
+                    # first `asked` distinct ones, so a repeated claim does not use up a slot.
+                    dropped: list = []
+                    try:
+                        patch = await self._compile_window(query, target, source_id, version, extraction_revision,
+                                                           window_count, dropped)
+                    except Exception as exc:  # noqa: BLE001 -- one failed window is skipped, not the page
+                        self._still_there(source_id, version)
+                        reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
+                        logging.getLogger(__name__).warning("Wiki window %s of %s skipped: %s", window_count, source_id, reason)
+                        failures.append(exc)
+                        provider_failures = provider_failures + 1 if isinstance(exc, WikiProviderError) else 0
+                        rejected = isinstance(exc, WikiError) and not isinstance(exc, WikiProviderError)
+                        record[key] = {"patch": None, "dropped": dropped, "failure": "rejected" if rejected else "skipped"}
+                        save({**cached, **record})
+                        continue
+                    provider_failures = 0
+                    record[key] = {"patch": patch_record(patch), "dropped": dropped}
+                    # Kept at once: a crash or cancel later keeps the windows already paid for.
+                    save({**cached, **record})
+                substantive = tuple(dict.fromkeys(claim for claim in patch.claims
+                                                  if not _front_matter(claim.text)))[:asked]
+                if substantive:
+                    patch = replace(patch, claims=substantive)
+                elif not patch.contradictions:
+                    # A front-matter window gave only a copyright or ISBN line; it is
+                    # kept only if no window yields anything else.
+                    fallback = fallback or patch
+                    continue
+                if merged is None:
+                    merged = patch
+                    continue
+                combined = self._combine(merged, patch)
+                # Room stays for the summary and links added later (OWN_PAGE_RESERVE_BYTES).
+                if len(_patch_json(combined).encode()) > MAX_PATCH_BYTES - OWN_PAGE_RESERVE_BYTES:
                     # Claims fill the page: keep what fits and stop asking the model.
                     logging.getLogger(__name__).warning("Wiki page %s full after evidence window %s", own_id, window_count)
                     break
                 merged = combined
+            merged = merged or fallback
             if merged is None:
-                raise WikiError("wiki evidence window limit")
-            patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id, MAX_SOURCE_CLAIMS)
+                # With no page to publish, a retry asks again for the rejected windows too.
+                for entry in record.values():
+                    if entry.get("failure") == "rejected":
+                        entry["failure"] = "skipped"
+            save(record)
+            if merged is None:
+                # Not one window validated: the first failure decides the stage's error code.
+                raise failures[0] if failures else WikiError("wiki has no evidence windows")
+            patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id,
+                              MAX_SOURCE_CLAIMS, OWN_PAGE_RESERVE_BYTES)
             self._validate(patch)
             patch = await self._with_summary(patch, source_id, version, extraction_revision)
             routes = await self._route(patch, source_id, version, extraction_revision)
+            self._still_there(source_id, version)  # the optional summary and routing handlers can swallow the forget check
             results = self._publish(patch, routes, source_id, version, own_links)
         except Exception as exc:  # noqa: BLE001 -- provider failures must leave retryable stage
-            reason = str(exc) if isinstance(exc, WikiError) else type(exc).__name__
+            reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
             logging.getLogger(__name__).warning("Wiki update rejected at evidence window %s: %s", window_count, reason)
-            self._stage(source_id, version, "failed", "reflect_failed")
+            # The reason is kept in the stage's error code, so documents show and doctor can name it.
+            # Only the model call maps to the provider code; a bug or a conflict keeps the generic one.
+            code = ("wiki_provider_failed" if isinstance(exc, WikiProviderError)
+                    else {"wiki evidence window limit": "wiki_evidence_limit",
+                          "wiki has no evidence windows": "wiki_no_evidence",
+                          "wiki forget pending": "wiki_forget_pending"}.get(reason, "wiki_update_rejected")
+                    if isinstance(exc, WikiError) else "internal_error")
+            self._stage(source_id, version, "failed", code)
             raise WikiError("wiki update failed; retry available") from None
         finally:
             _READS.reset(reads)
+            _RETRIES.reset(retries)
         try:
             results.extend(self._publish_index())
         except Exception as exc:  # noqa: BLE001 -- the index is a convenience; the document is done

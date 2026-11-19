@@ -30,7 +30,13 @@ boundaries in SKILL.md: report failures instead of repairing the environment.
   --idempotency-key unique-import-key --json
 "$CLI" documents show SOURCE_ID --version VERSION --json
 "$CLI" operations get OPERATION_ID --json
+"$CLI" operations list --outcome completed_with_errors --json
 ```
+
+`operations list` gives the newest operations first (`--state STATE`,
+`--outcome OUTCOME`, `--limit N`); each has its `operation_kind`, `state`,
+`outcome` for imports and retries, and the source ID in `summary.sources`. Use
+it to find an import whose ID you no longer have.
 
 For stdin supply `--filename original.txt`. Optional `--provenance` is JSON
 with only `source`, `source_ref`, `captured_at`, and `basename`; do not invent
@@ -45,7 +51,9 @@ timeout, oversized page or empty TIFF frame never fails the document: it is
 flagged and the rest is kept. A wholly unreadable PDF fails unless the owner's
 vision model reads it.
 Use `status.max_file_bytes` for the current limit (default 16 MiB), not the
-CLI's larger absolute ceiling. Do not silently truncate, split, decrypt, or
+CLI's larger absolute ceiling. Before uploading, `documents import` refuses an
+extension it cannot read with `unsupported_format` and a larger file with
+`body_too_large`; the `message` names the formats or the limit. Do not silently truncate, split, decrypt, or
 convert an original to bypass rejection. Handwriting, photos, diagrams, charts
 and tables stored as images are read only when the owner configured a `vision`
 block; otherwise they are listed as unread. Audio/video recognition and URL
@@ -95,6 +103,7 @@ additional worker/resource limits. Inspect `documents show.extraction_warnings`:
 | `ocr_no_text_page:N`, `ocr_failed_page:N; <reason>`, `ocr_unavailable_page:N` (and `_frame` forms) | Page N remains unresolved; never treat it as read. |
 | `figure_not_read:N` | Page N's text was read, but its images or drawings were not. |
 | `text_layer_suspect:N` | Page N's text layer may be garbled (broken glyphs, mixed scripts). |
+| `ocr_text_suspect:N` | Page or frame N was OCR'd, but the result looks garbled: Latin and Cyrillic look-alikes inside words, or words that alternate scripts in a PDF whose text layer up to that page is almost all Latin (a genuine bilingual form there is flagged too). The text is kept but not trusted; a vision reading settles it. |
 | `embedded_image_not_read:picture:N`, `chart_not_read:...` | A picture or chart in a DOCX, PPTX or XLSX was not read. |
 | `vision_page:N`, `vision_figure:N`, `vision_frame:N`, `vision_picture:N` | The owner's vision model read the item. Its text starts with a `[Model-read ...; verify against the original]` label. |
 | `vision_skipped:...`, `vision_refused:...`, `vision_failed:...`, `vision_blocked; <code>` | Vision was configured but did not read the item; the original warning stays. |
@@ -125,22 +134,42 @@ After the owner has fixed an extraction problem and asks for it, request a new
 extraction revision:
 
 ```bash
-"$CLI" documents retry OPERATION_ID --rerun-extraction \
-  --idempotency-key unique-extraction-retry-key --json
+"$CLI" documents retry SOURCE_ID --rerun-extraction \
+  --idempotency-key extraction-retry-ATTEMPT-NUMBER --json
 ```
 
-For transient indexing failures in an incomplete, recoverable operation, retry
-WITHOUT `--rerun-extraction`, with its own stable mutation key. The same applies
-when the vision endpoint was unreachable (extraction `failed` with
+The key is binding: repeating the same key and request replays the retry it
+started; the same key with another request is a conflict. Use a new key for each
+deliberate attempt (the number above), and leave `--idempotency-key` out when no
+replay is needed.
+
+For a document whose `outcome` is not `completed` (`completed_with_errors`,
+`retryable_failed`; `documents import` and `documents retry` then exit with
+code 4), retry by source ID WITHOUT `--rerun-extraction`; `problems`
+names the stage and its `next_step`. The retry runs again every stage of the
+current version that is not completed: indexing, then the wiki page and the vault
+note, so one command also covers a wiki-only or projection failure. The same
+applies when the vision endpoint was unreachable (extraction `failed` with
 `provider_unavailable`): a plain retry resumes the same revision and asks the
-model only about pages it has not read yet. Inspect the
-operation first: it may be `completed` despite wiki/projection failure, and
-retry then does nothing. Use reconciliation for projection-only failures;
-use standalone rebuild below for wiki-only failures. After an
+model only about pages it has not read yet. A retry that finds the document still
+being processed (imported, retried, reindexed or rebuilt) returns the running
+operation instead of starting another run; a reindex or `wiki rebuild
+--source-id` of it fails with `conflict` and stores nothing: send the same
+request with the same key once it finishes. A rebuild of every document leaves
+such documents out and lists them in `skipped`. `wiki_summary_missing` means the
+page has claims but no model summary; a retry by source ID asks only for the
+summary. `wiki_windows_skipped` means the page was published without the parts of
+the document the model failed on; a retry by source ID asks only for those parts.
+`wiki_dropped_claims` in `documents show` only counts model claims whose quotes
+failed the check; nothing on the page comes from them. A pending or running stage that nothing is running
+shows as `completed_with_errors` with the stage state as its problem `code`: retry
+by source ID. No retry rebuilds the page of a version a newer one replaced.
+`wiki_evidence_limit` and `wiki_no_evidence` fail the same way every time, so do
+not retry them. Give each deliberate retry its own `--idempotency-key`; the same
+key replays the retry it started instead of running it again. After an
 uncertain import outcome, replay the identical keyed import or inspect its
-known operation before another mutation. Do not repeat an extraction rerun
-blindly: the retry endpoint allocates a new extraction revision and does not
-consume the CLI idempotency header. First inspect the existing document/operation.
+known operation before another mutation. First inspect the existing
+document/operation (`operations get`, `outcome`, `problems`).
 A timed-out synchronous retain may still run remotely; matching provider
 memory counts can be partial. Report uncertainty rather than certifying full
 indexing while that retain is still processing. Allow one identical-key retry for a
@@ -161,8 +190,10 @@ projection automatically. Inspect the resulting pages and history:
 "$CLI" wiki history PAGE_ID --json
 ```
 
-Read the resulting managed text and citations; match the intended source
-ID/version. `semantic_support_verified: false` means the system does not
+Read the resulting managed text and its `citations` list: each citation shows
+as a `Title, p. 3` label in the text, and `citations` gives that label's source ID,
+version, extraction revision and passages; match the intended source ID/version
+there. `semantic_support_verified: false` means the system does not
 certify semantic entailment; it is not a service-down flag. The service compiles supplied evidence with the configured LLM without
 agentic retrieval. A rejected model response can be regenerated once for the
 same window after rechecking the source; failed checks are never bypassed.
@@ -192,8 +223,9 @@ returns the saved status without another LLM call; it is not a retry. For a
 transient provider failure, diagnose the cause and use a new rebuild key once.
 If publication succeeded but projection failed, reconcile first rather than
 republishing. An operation stuck `running` after a crash needs inspection;
-replay does not force it to run again. Document retry of a completed operation
-is also a no-op; use standalone rebuild for wiki-only failures.
+replay does not force it to run again. Document retry by source ID also covers a
+wiki-only failure of a completed import; standalone rebuild remains the way to
+refresh a page that did not fail.
 
 Use `"$CLI" reconcile --json` to repair local projections from existing
 revisions; this does not generate new wiki content. After forgetting or
@@ -278,7 +310,8 @@ There is currently no CLI for reading the complete extracted-text artifact.
 Use available document-reading tools on the downloaded original as necessary;
 do not pretend a truncated response or an OCR warning is complete evidence.
 
-Cite source ID, version, and page/passage locator when available. Separate
+Cite the document and page as the page's `Title, p. 3` label shows them, and take the
+source ID and version from the `citations` field of `wiki show` when available. Separate
 quoted facts, synthesis, recommendations, and open questions. Do not invent
 missing dates, commitments, or facts. If indexing/wiki is unavailable, a
 requested output may still use the supplied original, but explicitly say

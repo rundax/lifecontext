@@ -51,7 +51,8 @@ def _service_up(target: str) -> dict:
         "/v1/status": {"ready": True, "max_file_bytes": 1,
                        "dependencies": {"hindsight": {"ready": True}, "vault": {"ready": True},
                                         "catalog": {"ready": True}},
-                       "reconciliation": {"fact_count": 0, "facts": {}}},
+                       "reconciliation": {"fact_count": 0, "facts": {}},
+                       "indexing_pending": {"count": 1, "entries": ["Journal/entries/2026-10-17 - Private.md"]}},
         "/v1/wiki/lint": {"findings": [{"page_id": "source_secret", "hint": "private"}],
                           "counts": {"error": 1, "warning": 2, "info": 3}, "omitted": 0},
     }[target]
@@ -101,6 +102,9 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(report["service"]["state"], "running")
             self.assertTrue(report["service"]["ready"])
             self.assertEqual(report["service"]["lint"], {"error": 1, "warning": 2, "info": 3, "omitted": 0})
+            # A count of entries waiting for indexing, never their names.
+            self.assertEqual(report["service"]["indexing_pending"], 1)
+            self.assertIn("Journal entries waiting for indexing: 1", render(report))
             self.assertEqual(report["command"]["lifecontext"], "/home/u/.local/bin/lifecontext")
             self.assertEqual(report["tesseract"]["missing_languages"], ["ukr"])
             self.assertIn("tesseract_languages_missing", report["warnings"])
@@ -141,6 +145,20 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("model_rejects_forced_tool_use", report["warnings"])
             self.assertNotIn("model_rejects_forced_tool_use", report["problems"])
 
+    def test_plain_http_to_a_model_server_off_this_machine_is_a_warning(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            for url, warned in (("http://192.168.1.20:8000/v1", True), ("http://127.0.0.1:11434/v1", False),
+                                ("https://api.example.test/v1", False)):
+                with self.subTest(url=url):
+                    paths.config_path.write_text(
+                        f'llm:\n  provider: "openai_compatible"\n  model: "m"\n  base_url: "{url}"\n'
+                        f'vault:\n  root: "{home / "LifeContext" / "vault"}"\n'
+                        f'  journal_path: "{home / "LifeContext" / "vault" / "Journal"}"\n')
+                    report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+                    self.assertEqual("model_uses_plain_http" in report["warnings"], warned)
+                    self.assertNotIn("model_uses_plain_http", report["problems"])
+
     def test_unsafe_modes_and_missing_key_are_problems(self) -> None:
         with _temporary_home() as home:
             paths = _set_up(home)
@@ -176,6 +194,62 @@ class DoctorTests(unittest.TestCase):
             self.assertTrue(report["models"]["offline_next_start"])
             self.assertTrue(report["models"]["last_daemon_start"]["hf_hub_offline"])
             self.assertNotIn("models_not_cached", report["warnings"])
+
+    def test_a_failure_a_later_success_on_the_same_source_replaced_is_not_counted(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, operation_kind TEXT, state TEXT, result_json TEXT)")
+                def intent(source, version=1):
+                    return json.dumps({"sources": [{"source_id": source, "source_version": version}]})
+                connection.executemany("INSERT INTO operations VALUES (?, ?, ?, ?)", [
+                    ("a", "document_import", "retryable_failed", intent("doc_1")),
+                    ("b", "document_retry", "completed", intent("doc_1")),
+                    ("c", "document_import", "permanent_failed", intent("doc_2")),
+                    ("d", "document_import", "retryable_failed", "{}"),
+                    ("e", "document_import", "completed", intent("doc_3")),
+                    ("f", "document_retry", "retryable_failed", intent("doc_3")),
+                    # A completed category decision does not hide an indexing failure.
+                    ("g", "document_import", "retryable_failed", intent("doc_4")),
+                    ("h", "category_decision", "completed", intent("doc_4")),
+                    # An older version's success does not replace a newer version's failure.
+                    ("i", "document_import", "completed", intent("doc_5", 1)),
+                    ("j", "document_import", "retryable_failed", intent("doc_5", 2)),
+                    # A later rebuild of a newer version does.
+                    ("k", "document_import", "retryable_failed", intent("doc_6", 1)),
+                    ("l", "wiki_rebuild", "completed", intent("doc_6", 2))])
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"], {"pending": 0, "retryable_failed": 4, "permanent_failed": 1})
+
+    def test_a_failed_rebuild_of_several_sources_is_counted_until_each_one_completed_later(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, operation_kind TEXT, state TEXT, result_json TEXT)")
+                sources = json.dumps({"sources": [{"source_id": f"doc_{n}", "source_version": 1} for n in (1, 2)]})
+
+                def done(source):
+                    return json.dumps({"sources": [{"source_id": source, "source_version": 1}]})
+                connection.executemany("INSERT INTO operations VALUES (?, ?, ?, ?)", [
+                    ("a", "wiki_rebuild", "permanent_failed", sources),
+                    ("b", "document_retry", "completed", done("doc_1"))])
+                connection.commit()
+                report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+                self.assertEqual(report["operations"]["permanent_failed"], 1)
+                connection.execute("INSERT INTO operations VALUES ('c', 'document_retry', 'completed', ?)", (done("doc_2"),))
+                connection.commit()
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"]["permanent_failed"], 0)
+
+    def test_a_catalog_without_the_columns_to_match_counts_every_operation(self) -> None:
+        with _temporary_home() as home:
+            paths = _set_up(home)
+            with sqlite3.connect(paths.catalog_path) as connection:
+                connection.execute("CREATE TABLE operations (operation_id TEXT, state TEXT)")
+                connection.executemany("INSERT INTO operations VALUES (?, ?)", [
+                    ("a", "retryable_failed"), ("b", "completed"), ("c", "running"), ("d", "permanent_failed")])
+            report, _ = run_doctor(port=8765, fetch=_service_down, run=_tesseract_run)
+            self.assertEqual(report["operations"], {"pending": 1, "retryable_failed": 1, "permanent_failed": 1})
 
     def test_engine_auth_port_owner_and_postgres_listen_are_reported_without_secrets(self) -> None:
         from lifecontext import hindsight

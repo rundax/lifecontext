@@ -9,18 +9,22 @@ or passage, and the source version, so you can check it.
 
 For people who work with AI agents and keep documents that matter: leases,
 contracts, insurance, tax and medical letters, research PDFs, scans in
-English, Ukrainian or Russian.
+English, Ukrainian or Russian. OCR and reranking cover Ukrainian and Russian;
+search quality for text that is not in English improves in a later release.
 
 Free for one person for their own use, including at work; businesses need a
 commercial license ([License](#license)). Linux, and macOS on Apple silicon.
 
 ## Quick start
 
+> 1.2.0rc1 is a pre-release; the final 1.2.0 is pending. The command below
+> installs the release candidate.
+
 **1. Install.** On Linux (x86_64 or aarch64, glibc 2.35 or later) or macOS 14
 or later on Apple silicon, with about 3 GB of free disk:
 
 ```bash
-curl -fsSL https://github.com/rundax/lifecontext/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/rundax/lifecontext/releases/download/v1.2.0rc1/install.sh | sh
 ```
 
 It installs into your home directory, asks which model to use (there is no
@@ -28,6 +32,8 @@ default: pick Anthropic, OpenAI, Google Gemini, OpenRouter, a local model
 server or another OpenAI-compatible endpoint, and have its API key ready),
 checks that the model answers, starts LifeContext as a user service and gives
 your agents the skill. [docs/install.md](docs/install.md) explains each step.
+A Claude Code or ChatGPT subscription is not an API key: the provider bills
+API use separately.
 
 **2. Open the vault in Obsidian.** Choose "Open folder as vault" and pick
 `~/LifeContext/vault` (or the folder you gave the installer). Any Markdown
@@ -39,12 +45,13 @@ editor works too.
 lifecontext documents import ~/Documents/lease.pdf
 ```
 
-(If the shell does not find `lifecontext`, add `~/.local/bin` to your `PATH`
-as the installer says, or open a new terminal.) Indexing and compiling call your model and can take a few minutes; the page
+(If the shell does not find `lifecontext`: when step 1 printed a `curl:`
+error, nothing was installed, so run it again; when it finished, open a new
+terminal or add `~/.local/bin` to your `PATH` as the installer says.) Indexing and compiling call your model and can take a few minutes; the page
 then appears under `Journal/wiki/` in the vault. Ask Claude Code, Codex or
 Gemini CLI: *"What does my lease say about the deposit?"* The agent answers
-from LifeContext's evidence: the quote, the page and the version of the lease
-it came from.
+from LifeContext's evidence and cites the lease and the version it came from;
+the lease's wiki page holds the quote and its page.
 
 ## What you get
 
@@ -56,7 +63,9 @@ it came from.
   adds a version, and pages built on a corrected or forgotten source are
   marked stale.
 - **Scans read locally**: Tesseract OCR for English, Ukrainian and Russian.
-  Pages it could not read are listed, not skipped.
+  Pages it could not read are listed, not skipped. Recall reranks Ukrainian
+  and Russian text too; its embedding model is English-only, so search in
+  other languages is weaker until a later release adds a multilingual one.
 - **One memory for your agents**: one CLI and one skill for Claude Code, Codex,
   Gemini CLI and Hermes, and a read-only MCP server for Claude Desktop and
   Cursor.
@@ -66,10 +75,10 @@ it came from.
 
 ## Status
 
-This tree is the 1.2.0 development version (1.2.0.dev0). 1.2.0, the first
-public release, is planned for 2026-11-01; until then the install command
-above and the Docker image are not available, and you can install from a
-checkout ([docs/install.md](docs/install.md#installsh)).
+The only release so far is 1.2.0rc1, a pre-release from 2026-10-22; the final
+1.2.0 is pending. The install command above installs 1.2.0rc1. The Docker
+image is not published yet, so build it from a checkout ([Docker](#docker)).
+This tree is the 1.2.0 development version (1.2.0.dev0).
 
 - Each release candidate is installed on clean GitHub-hosted machines and put
   through one scenario against a real model: on Ubuntu 24.04 (x86_64) with
@@ -88,16 +97,22 @@ checkout ([docs/install.md](docs/install.md#installsh)).
 ### Docker
 
 The image runs as an unprivileged user, publishes no port, and has Tesseract
-and the local models inside. From a checkout:
+and the local models inside. It is not published yet, so build it from a
+checkout first: it is about 3 GB, and the build takes about 3 minutes on
+GitHub-hosted runners.
 
 ```bash
+docker compose build
 mkdir -p secrets && (umask 077 && cat > secrets/lifecontext_api_key)   # paste the key, Ctrl-D
+sudo chown 1000 secrets/lifecontext_api_key                            # Linux, if your uid is not 1000
 LIFECONTEXT_PROVIDER=anthropic LIFECONTEXT_MODEL=claude-sonnet-5 docker compose up -d
 docker compose exec lifecontext lifecontext doctor
 ```
 
 Set `LIFECONTEXT_PROVIDER` and `LIFECONTEXT_MODEL` to the provider and model
 you chose; without them the container waits and logs which one is missing.
+The vault is in a Docker volume; to open it in Obsidian, mount a folder that
+belongs to uid 1000 instead ([volumes](docs/install.md#volumes)).
 Agents on the host use `bin/lifecontext-docker`; see
 [docs/install.md](docs/install.md#docker).
 
@@ -183,8 +198,9 @@ and use either the plugin or `lifecontext skills install` for Claude Code.
 
 LifeContext uses one model at a time and has no default: the installer and
 `lifecontext init` ask you to pick the provider and the model, and the text of
-your documents and notes is sent to it. With Anthropic, `claude-sonnet-5` works
-and `claude-haiku-5-5` costs less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and
+your documents and notes is sent to it. With Anthropic, `claude-sonnet-5` is
+expected to work (not yet qualified end to end) and `claude-haiku-5-5` costs
+less; Claude Sonnet 5.5, Opus 5.5, Fable 5.1 and
 Mythos 5.1 do not work yet. Change it later with `lifecontext llm set`; every
 provider, field and rule, the API key and the optional vision model are in
 [docs/operations.md](docs/operations.md#choosing-the-model).
@@ -207,15 +223,17 @@ lifecontext documents show SOURCE_ID         # stages and page coverage
 ```
 
 **Read the wiki.** Each document has a page `source_<source id>` with numbered,
-quote-backed claims; `index` lists them. The pages also appear under
-`Journal/wiki/` in the vault.
+quote-backed claims; `index` links as many as fit (up to 128), then says how
+many more there are and points to `lifecontext documents list`. The pages also
+appear under `Journal/wiki/` in the vault.
 
 ```bash
 lifecontext wiki list
 lifecontext wiki show index
 ```
 
-**Ask.** `recall` returns cited passages, each tied to one source version. It
+**Ask.** `recall` returns matching evidence, each item tied to one source ID
+and version; the quote and its page are on the document's wiki page. It
 reranks on the CPU and can take tens of seconds; run one at a time. `reflect`
 writes an answer from cited evidence.
 
@@ -244,7 +262,8 @@ and failure codes.
 
 **Connect Claude Desktop or Cursor.** `lifecontext mcp` is an MCP server over
 the same API, read-only unless you add `--allow-writes`; the configuration is
-in [docs/agents.md](docs/agents.md#mcp-server).
+in [docs/agents.md](docs/agents.md#mcp-server). These clients may time out on
+slow recalls ([slow calls and client timeouts](docs/agents.md#slow-calls-and-client-timeouts)).
 
 **Agents on another machine.** `bin/lifecontext-remote` runs the same
 `lifecontext` command over SSH, against a dedicated key that
@@ -278,9 +297,9 @@ must run the same LiveSync release as the plugin on every device;
   cached, later starts make no Hugging Face calls. When Hindsight starts, its
   libraries may fetch public reference files that contain none of your data: a
   model price list from raw.githubusercontent.com and a tokenizer table from
-  openaipublic.blob.core.windows.net. LifeContext v1.2 turns both off once they
-  are cached.
-  <!-- verify at release -->
+  openaipublic.blob.core.windows.net. LifeContext v1.2 makes litellm use its
+  bundled price list, and keeps the tokenizer file in a local cache after its
+  first download.
 - No telemetry. The API listens on loopback only and requires its local token.
 
 Details, including what agents and vault sync do with your data:
