@@ -1001,15 +1001,31 @@ print(", ".join(linked) if linked else ("!" if agents else ""))
 	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
 	*) skills_state="linked for $linked" ;;
 	esac
-	# Opt-in: the note goes into the agents' own instruction files only on request.
-	if [ "$agent_instructions" -eq 0 ] && [ -n "$linked" ] && [ "$interactive" != no ] && tty_available; then
-		ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
-		agent_instructions=$reply
-	fi
-	if [ "$agent_instructions" -eq 1 ] && [ -n "$linked" ]; then
-		"$lc" skills install --instructions </dev/null ||
-			warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
-	fi
+	# Opt-in: the note goes into an instruction file only on request. It exists for Claude Code and Codex.
+	case "$linked" in
+	*"Claude Code"* | *Codex*)
+		note=$("$lc" skills check --instructions --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
+import json, sys
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+states = {item.get("state") for item in report.get("instructions") or [] if item.get("agent") in ("claude", "codex")}
+print("present" if states & {"current", "outdated"} else "absent" if "absent" in states else "other")
+') || note=""
+		# A block that is there (the person said yes before) is refreshed without asking; an edited one is left alone.
+		if [ "$note" = present ]; then
+			agent_instructions=1
+		elif [ "$agent_instructions" -eq 0 ] && [ "$note" = absent ] && [ "$interactive" != no ] && tty_available; then
+			ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
+			agent_instructions=$reply
+		fi
+		if [ "$agent_instructions" -eq 1 ]; then
+			"$lc" skills install --instructions </dev/null ||
+				warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
+		fi
+		;;
+	esac
 }
 
 remove_units_directly() {
@@ -1063,10 +1079,14 @@ uninstall() {
 	# Without a working command (a broken venv), remove the known files directly.
 	if [ -x "$lc" ] && "$lc" --version </dev/null >/dev/null 2>&1; then
 		"$lc" service uninstall </dev/null || warn "lifecontext service uninstall reported a problem (above)"
-		removal=$("$lc" skills remove --instructions </dev/null) || warn "lifecontext skills remove reported a problem (below)"
+		# An older installed command does not know --instructions: remove the links the plain way,
+		# and by hand when that fails too, before the venv goes.
+		removal=$("$lc" skills remove --instructions </dev/null) || {
+			"$lc" skills remove </dev/null || remove_skill_links_directly
+		}
 		printf '%s\n' "$removal"
 		# A block the person edited, or a file that cannot be changed, stays; the uninstall goes on.
-		printf '%s\n' "$removal" | grep ' instructions \(edited by hand\|refused\)' |
+		printf '%s\n' "$removal" | grep -E ' instructions (edited by hand|refused)' |
 			while IFS= read -r line; do warn "$line"; done || true
 	else
 		remove_units_directly
