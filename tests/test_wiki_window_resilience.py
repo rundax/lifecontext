@@ -116,6 +116,23 @@ class SkippedWindowTests(WindowFixture):
         self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_provider_failed"))
         self.assertIsNone(fixture.catalog.get_wiki_page(PAGE))
 
+    def test_a_document_withdrawn_during_a_compile_is_never_sent_again(self):
+        for withdrawn_at in (0, 2):
+            with self.subTest(window=withdrawn_at):
+                fixture = self.pages(5)
+
+                def fail(data):
+                    if data["evidence"]["segments"][0]["passage_index"] == withdrawn_at:
+                        # Forgotten while the model reads this window.
+                        fixture.catalog.source_withdrawn = lambda *args: True
+
+                asked = self.asking(fixture, fail)
+                with self.assertRaises(WikiError):
+                    fixture.update()
+                self.assertEqual(asked, list(range(withdrawn_at + 1)))
+                stage = fixture.catalog.get_document_stage("doc_1", 1, "wiki")
+                self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_update_rejected"))
+
     def test_a_retry_asks_only_for_the_skipped_window_and_fills_it(self):
         fixture, down = self.pages(4), [True]
 

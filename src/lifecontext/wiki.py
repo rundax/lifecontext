@@ -1694,6 +1694,11 @@ class WikiService:
         return await self._request(query, validate, source_id, version, extraction_revision,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
 
+    def _still_there(self, source_id: str, version: int) -> None:
+        """End the compile, as a failed one, once the document version was forgotten or deleted."""
+        if self.source_withdrawn(source_id, version):
+            raise WikiError("wiki evidence unavailable")
+
     @staticmethod
     def _window_key(evidence: dict, window: dict, asked: int, model: str | None) -> str:
         """What a window's checked claims depend on: the version's bytes and extraction, the window's
@@ -2267,6 +2272,8 @@ class WikiService:
             cached = self._window_record(source_id, version, evidence) if model is not None else {}
             record, failures, provider_failures = {}, [], 0
             for window in windows:
+                # A document forgotten or deleted meanwhile is never sent to the model again.
+                self._still_there(source_id, version)
                 window_count += 1
                 asked = min(window_claims(window), quota)
                 key = self._window_key(evidence, window, asked, model)
@@ -2290,6 +2297,7 @@ class WikiService:
                         patch = await self._compile_window(query, target, source_id, version, extraction_revision,
                                                            window_count, dropped)
                     except Exception as exc:  # noqa: BLE001 -- one failed window is skipped, not the page
+                        self._still_there(source_id, version)
                         reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
                         logging.getLogger(__name__).warning("Wiki window %s of %s skipped: %s", window_count, source_id, reason)
                         failures.append(exc)
