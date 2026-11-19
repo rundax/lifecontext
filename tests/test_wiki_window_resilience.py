@@ -353,6 +353,36 @@ class KeptWindowTests(WindowFixture):
         self.assertNotIn("A sentence page 2 never had.", [claim.text for claim in fixture.current().claims])
         self.assertEqual(self.record(fixture)["windows"][key]["patch"]["claims"][0]["citations"][0]["passage_start"], 1)
 
+    def test_a_tampered_record_counts_as_none(self):
+        fixture = self.pages(2)
+        asked = self.asking(fixture)
+        fixture.update()
+        path = fixture.paths.lifeweave_home / "derived" / "doc_1" / "v1" / WIKI_WINDOWS
+        record = self.record(fixture)
+        malformed = {key: value for key, value in zip(record["windows"], ({"patch": 5, "dropped": "x"}, 7), strict=True)}
+        for contents in ("[" * 100_000 + "]" * 100_000, "{not json",
+                         json.dumps({**record, "windows": malformed}), json.dumps({**record, "windows": []})):
+            with self.subTest(contents=contents[:20]):
+                path.write_text(contents)
+                path.chmod(0o600)
+                self.assertEqual(fixture.service.window_report("doc_1", 1), {"skipped": 0, "dropped": 0})
+                asked.clear()
+                fixture.update()
+                # Every window is asked again, and a sound record replaces the tampered one.
+                self.assertEqual(asked, [0, 1])
+                self.assertEqual(len(self.record(fixture)["windows"]), 2)
+
+    def test_a_forget_removes_staging_copies_a_stopped_write_left(self):
+        fixture = self.pages(2)
+        fixture.update()
+        directory = fixture.paths.lifeweave_home / "derived" / "doc_1" / "v1"
+        leftover = directory / ".staging-wiki-windows-0123456789abcdef"
+        leftover.write_text("{}")
+        leftover.chmod(0o600)
+        self.assertEqual(fixture.derived.list_inventory(), [("doc_1", 1, 1), ("doc_1", 1, 2)])
+        fixture.derived.remove_wiki_windows("doc_1")
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["r1.json", "r2.json"])
+
     def test_kept_windows_from_another_extraction_are_not_used(self):
         fixture = self.pages(2)
         asked = self.asking(fixture)
@@ -493,11 +523,10 @@ class QuoteMatchTests(WindowFixture):
         with self.assertLogs("lifecontext.wiki", "WARNING") as logged:
             fixture.update()
         entry = next(iter(self.record(fixture)["windows"].values()))
-        self.assertEqual(entry["dropped"], [{"kind": "claim", "reason": "quote_not_found", "claim": {
-            "text": "An invented claim.", "citations": [{
-                "source_id": "doc_1", "source_version": 1, "extraction_revision": 2, "passage_start": 0,
-                "passage_end": 1, "original_sha256": fixture.digest,
-                "quote": "An invented quote the page lacks entirely."}]}}])
+        # The kind and the reason only: the model's text is not kept.
+        self.assertEqual(entry["dropped"], [{"kind": "claim", "reason": "quote_not_found"}])
+        path = fixture.paths.lifeweave_home / "derived" / "doc_1" / "v1" / WIKI_WINDOWS
+        self.assertNotIn(b"invented", path.read_bytes())
         self.assertEqual(fixture.service.window_report("doc_1", 1), {"skipped": 0, "dropped": 1})
         self.assertNotIn("invented", "\n".join(logged.output))
 

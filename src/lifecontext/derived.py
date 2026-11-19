@@ -27,6 +27,7 @@ MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 # claims), next to its extractions so a delete removes it with them; a forget removes
 # it with remove_wiki_windows. Its shape belongs to WikiService.
 WIKI_WINDOWS = "wiki-windows.json"
+_WIKI_WINDOWS_STAGING = ".staging-wiki-windows-"
 
 
 class DerivedError(ValueError):
@@ -344,7 +345,7 @@ class DerivedStore:
             raw = _read_private_file(descriptors[-1], WIKI_WINDOWS, MAX_ARTIFACT_BYTES)
         try:
             value = json.loads(raw)
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
             return None
         return value if isinstance(value, dict) else None
 
@@ -354,7 +355,7 @@ class DerivedStore:
         raw = _canonical(record)
         with self._directories(("derived", source_id, f"v{source_version}"), create=False) as descriptors:
             directory = descriptors[-1]
-            temporary = f".staging-{secrets.token_hex(16)}"
+            temporary = f"{_WIKI_WINDOWS_STAGING}{secrets.token_hex(16)}"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
             descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
             try:
@@ -372,7 +373,8 @@ class DerivedStore:
             os.fsync(directory)
 
     def remove_wiki_windows(self, source_id: str) -> None:
-        """Remove the window record of every version of a source; its extractions stay."""
+        """Remove the window record of every version of a source, with any staging copy a stopped
+        write left; its extractions stay."""
         _identity(source_id, 1, 1)
         if not os.path.lexists(self.paths.lifeweave_home / "derived" / source_id):
             return
@@ -383,10 +385,13 @@ class DerivedStore:
                     raise DerivedError("unexpected derived entry")
                 version_fd = _open_child_dir(source_fd, version_name, create=False)
                 try:
-                    os.unlink(WIKI_WINDOWS, dir_fd=version_fd)
+                    for name in os.listdir(version_fd):
+                        if name == WIKI_WINDOWS or name.startswith(_WIKI_WINDOWS_STAGING):
+                            try:
+                                os.unlink(name, dir_fd=version_fd)
+                            except FileNotFoundError:
+                                pass
                     os.fsync(version_fd)
-                except FileNotFoundError:
-                    pass
                 finally:
                     os.close(version_fd)
 
@@ -423,7 +428,8 @@ class DerivedStore:
                                 source_fd, version_name, create=False
                             )
                             try:
-                                revisions = sorted(name for name in os.listdir(version_fd) if name != WIKI_WINDOWS)
+                                revisions = sorted(name for name in os.listdir(version_fd) if name != WIKI_WINDOWS
+                                                   and not name.startswith(_WIKI_WINDOWS_STAGING))
                                 if len(inventory) + len(revisions) > limit:
                                     raise DerivedError(
                                         "derived inventory limit exceeded"

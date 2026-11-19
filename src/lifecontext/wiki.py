@@ -1681,14 +1681,14 @@ class WikiService:
                               dropped: list | None = None) -> WikiPatch:
         """One evidence window's claims for the document's own page; shared pages come from routing.
 
-        ``dropped`` ends up holding each claim or contradiction of the last answer checked that failed
-        its checks, as the model wrote it, with a reason code (``_DROP_REASONS``, else
-        ``invalid_citation``): a window that passes after its correction keeps none of the first answer's."""
+        ``dropped`` ends up holding, for each claim or contradiction of the last answer checked that
+        failed its checks, its kind and a reason code (``_DROP_REASONS``, else ``invalid_citation``),
+        never its text: a window that passes after its correction keeps none of the first answer's."""
         dropped = [] if dropped is None else dropped
         items: list = []
 
-        def drop(kind: str, item: Any, exc: WikiError) -> None:
-            items.append({"kind": kind, "reason": _DROP_REASONS.get(str(exc), "invalid_citation"), kind: asdict(item)})
+        def drop(kind: str, exc: WikiError) -> None:
+            items.append({"kind": kind, "reason": _DROP_REASONS.get(str(exc), "invalid_citation")})
 
         def validate(text):
             patches = parse_patches(text)
@@ -1715,7 +1715,7 @@ class WikiService:
                     claims.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
-                    drop("claim", claim, exc)
+                    drop("claim", exc)
             for contradiction in patch.contradictions:
                 try:
                     literal = replace(contradiction, left=self._literal(contradiction.left, budget),
@@ -1724,7 +1724,7 @@ class WikiService:
                     contradictions.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
-                    drop("contradiction", contradiction, exc)
+                    drop("contradiction", exc)
             dropped[:] = items
             if items:
                 # Codes and counts only: the quotes are the user's document text.
@@ -1767,7 +1767,10 @@ class WikiService:
                 or record.get("extraction_revision") != extraction["extraction_revision"]
                 or not isinstance(record.get("windows"), dict)):
             return {}
-        return record["windows"]
+        # A malformed entry counts as no entry: its window is asked again.
+        return {key: entry for key, entry in record["windows"].items()
+                if isinstance(entry, dict) and isinstance(entry.get("dropped", []), list)
+                and (entry.get("patch") is None or isinstance(entry.get("patch"), dict))}
 
     def _reuse_window(self, entry: Any, target: dict) -> WikiPatch | None:
         """A cached window's claims on the target's current revision, checked again without the model;
@@ -1779,7 +1782,7 @@ class WikiService:
             patch = replace(patch, page_id=target["page_id"], title=target["title"],
                             expected_revision=target["current_revision"], links=(), summary=())
             self._validate(patch)
-        except WikiError:
+        except (WikiError, ValueError, TypeError, RecursionError):
             return None
         return patch
 
@@ -1789,9 +1792,8 @@ class WikiService:
         dropped, for its current extraction; counts only, never their text."""
         rows = self.catalog.list_extractions(source_id, version)
         windows = self._window_record(source_id, version, rows[-1]).values() if rows else ()
-        return {"skipped": sum(isinstance(entry, dict) and entry.get("patch") is None
-                               and entry.get("failure") != "rejected" for entry in windows),
-                "dropped": sum(len(entry.get("dropped") or ()) for entry in windows if isinstance(entry, dict))}
+        return {"skipped": sum(entry.get("patch") is None and entry.get("failure") != "rejected" for entry in windows),
+                "dropped": sum(len(entry.get("dropped", [])) for entry in windows)}
 
     async def _summarize(self, patch: WikiPatch, source_id: str, version: int, extraction_revision: int) -> WikiPatch:
         """Ask once for a short summary of the page's validated claims; the page is returned with it.
