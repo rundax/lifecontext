@@ -1277,25 +1277,34 @@ space, every quotation mark as `'` or `"`, every dash as `-`, no soft hyphens or
 other format characters, no hyphen breaking a word across lines), else, for a quote
 of at least 20 normalised characters, as the one span of those passages whose
 character trigrams are at least 85% alike (Dice) with its characters in the same
-order (85% by `difflib`) and no other span within 5 points of it; the near search
-covers passages of up to 60,000 characters and 32 quotes per answer. The page stores
+order (85% by `difflib`) and no other span within 5 points of it. The near search
+covers passages of up to 60,000 characters, and one answer may normalise and search at
+most 400,000 characters in all (each cited passage once, each quote and claim, and a
+near search twice its passage); what is left over once that is spent is dropped as
+not found. The page stores
 the exact text of that span as the quote and the matching part of it as the claim,
 so a published claim and quote are always literal text of the extraction, and a
-paraphrase or reordered sentence is still rejected. Dropped claims are kept, with
-their reason (`quote_not_found`, `claim_not_in_quote` or `invalid_citation`), in
-`wiki-windows.json` next to the version's extractions under
-`~/.lifeweave/derived/`; a forget or delete removes the file, and `documents show`
-gives only their number (`wiki_dropped_claims`). The same file keeps each checked
-window, keyed by the version's checksum and extraction revision, a hash of the
-window's evidence, the claims asked for, the model and the compile instructions: a
-retry or `wiki rebuild` checks the kept claims again without the model and asks only
-for windows that are missing or whose claims no longer check out (without a model
-name, as with Hindsight reflect, nothing is reused). A window that still fails after
-the call's retries is skipped and the page publishes from the others, with the wiki
-stage `completed` and `wiki_windows_skipped` in `problems` until a retry fills them;
-after two windows in a row fail at the provider, the rest are skipped without
-asking. Only when no window validates does the stage fail, with the first window's
-code. After the summary below, one
+paraphrase or reordered sentence is still rejected. For each dropped claim only its
+kind and reason (`quote_not_found`, `claim_not_in_quote` or `invalid_citation`) are
+kept, never the model's text, in `wiki-windows.json` next to the version's
+extractions under `~/.lifeweave/derived/`; a forget (once the version can no longer
+be recalled) or a delete removes the file, and `documents show` gives only their
+number (`wiki_dropped_claims`). The same file keeps each checked window, keyed by the
+version's checksum and extraction revision, a hash of the window's evidence, the
+claims asked for, the model and the compile instructions, and is saved after each
+window, so a stopped compile keeps the windows it paid for: a retry or `wiki
+rebuild` checks the kept claims again without the model and asks only for windows
+that are missing, whose claims no longer check out, or that failed at the provider
+(without a model name, as with Hindsight reflect, nothing is reused). A window that
+still fails at the provider after its retries is skipped and the page publishes from
+the others, with the wiki stage `completed` and `wiki_windows_skipped` in `problems`
+until a retry fills it; after two windows in a row fail at the provider, the rest
+are skipped without asking. A window whose answer is rejected again after its
+correction is kept as rejected, not listed, and not asked again for the same key;
+when no window validates at all, the stage fails with the first window's code and a
+retry asks every window again. A compile stops, as a failed one, as soon as the
+document is forgotten or deleted: no later window is sent. A malformed or tampered
+`wiki-windows.json` counts as none. After the summary below, one
 routing request places the own page's checked claims on shared pages: the model
 sees the claims by number, a catalog of up to 300 existing `topic_`/`entity_`
 pages (12 KB, pages that already cite the document first, then by words shared
@@ -1396,12 +1405,17 @@ and an index whose managed text was edited by hand is left alone until resolved.
 with the pinned LLM provider using the same validated model, URL, reasoning
 effort, and private credential file. Compilation supplies bounded evidence
 and no tools; Hindsight recall/reflect remains available for retrieval. Each
-compile call has a 180-second deadline per attempt and closes its provider client;
-a timeout, rate limit (429), server error (5xx) or lost connection is asked again
-up to three times, after 2, 4 and 8 seconds or the provider's `Retry-After` up to
-120 seconds (a longer `Retry-After` ends the retries), and any other failure is not
-retried. The service imports the provider client in a background thread when it
-starts, so the first compile does not spend its deadline on the import. A response
+compile call has a 180-second deadline and closes its provider client. An evidence
+window request that timed out is asked again once; one that was rate limited (429),
+timed out at the server (408), hit a server error (5xx) or lost its connection is
+asked again up to three times, after 2, 4 and 8 seconds or the provider's
+`Retry-After` up to 120 seconds (a longer `Retry-After` ends the retries); one
+compile asks again at most six times in all, and an auth error, bad request or
+unusable answer is not asked again. Before every attempt the document must still be
+there. The summary and routing requests, and category suggestions, are not asked
+again. The service starts importing the provider client in a background thread when
+it starts, so the first compile starts sooner; a compile that starts while the
+import is still running waits for it. A response
 rejected by schema/citation validation may be regenerated once for that window after
 rechecking the source; a second rejection skips that window. OpenAI chat-compatible compilation requests
 JSON-object mode, which the selected endpoint must support. Schema and literal-citation validation still gate publication.
