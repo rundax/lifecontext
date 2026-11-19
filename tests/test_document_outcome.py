@@ -533,6 +533,22 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again["document"]["outcome"], "completed")
         self.assertEqual((len(calls), len(self.provider.calls)), (2, 2))
 
+    async def test_a_stop_before_a_keyed_takeover_commits_leaves_only_the_failed_import(self):
+        from lifecontext.application import JournalApplication
+
+        calls = self.flaky_wiki(failures=3)
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        # As a stop after the retry is admitted, before the original is cancelled.
+        with patch.object(self.catalog, "transition_operation", side_effect=RuntimeError("stopped")), \
+                self.assertRaises(RuntimeError):
+            await self.service.retry(first["operation_id"], idempotency_key="retry-key")
+        recoverable = [row["operation_id"] for row in self.catalog.list_recoverable_operations()]
+        application = JournalApplication.__new__(JournalApplication)
+        application.catalog, application.documents = self.catalog, self.service
+        await application.recover_startup()
+        self.assertEqual((recoverable, len(calls)), ([first["operation_id"]], 1))
+
     async def test_a_keyed_recovery_of_an_import_left_running_takes_it_over(self):
         self.provider.fail_at = 1
         first = await self.ingest()

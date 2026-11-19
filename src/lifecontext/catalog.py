@@ -2183,6 +2183,35 @@ class LifeContextCatalog:
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 
+    def take_over_operation(
+        self,
+        idempotency_key: str,
+        request_digest: str,
+        operation_kind: str,
+        result: dict[str, Any],
+        original_id: str,
+    ) -> dict[str, Any]:
+        """Admit or replay a keyed operation with its intent and cancel the one it replaces.
+
+        One transaction, so a restart finds the original or its replacement, never both.
+        """
+        with self.transaction():
+            operation = self.begin_operation(idempotency_key, request_digest, operation_kind)
+            if not operation["result"]:
+                operation = self.set_operation_intent(operation["operation_id"], result)
+            original = self.get_operation(original_id)
+            if original is None:
+                raise CatalogError("operation not found")
+            kept = {key: value for key, value in original["result"].items() if key != "error_code"}
+            state = original["state"]
+            if state == "running":
+                # Left running by a stopped process; only a resting operation can be cancelled.
+                state = self.transition_operation(original_id, "running", "retryable_failed",
+                                                  result=kept, error_code="internal_error")["state"]
+            if state != "cancelled":
+                self.transition_operation(original_id, state, "cancelled", result=kept)
+            return operation
+
     def latest_document_operation(self, source_id: str, source_version: int) -> dict[str, Any] | None:
         """The newest import or retry operation recorded for one document version."""
         _validate_identity(source_id, source_version)
