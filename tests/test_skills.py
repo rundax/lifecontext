@@ -179,6 +179,9 @@ class InstructionsTests(unittest.TestCase):
             self.assertIn(command.replace("lifecontext ", '"$CLI" '), recipes)
             self.assertIn(command, INSTRUCTIONS)
 
+    def test_the_documented_block_is_the_shipped_one(self) -> None:
+        self.assertIn(instructions_block(), (V1_ROOT / "docs" / "agents.md").read_text())
+
     def test_no_block_without_the_flag(self) -> None:
         report = install(self.home, ["claude", "codex"], environ=self.environ)
         self.assertNotIn("instructions", report)

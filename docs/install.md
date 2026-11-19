@@ -231,7 +231,8 @@ sh install.sh --uninstall
 It removes the service units (`lifecontext service uninstall`), the skill
 links that point at LifeContext and the unedited "check LifeContext first" block
 in the instruction files (`lifecontext skills remove --instructions`; a block you
-edited stays, with a warning), the link
+edited stays, with a warning; when the installed command is broken, only the
+links are removed and the instruction files are left as they are), the link
 `~/.local/bin/lifecontext` and `~/.local/share/lifecontext` (uv, Python, the
 virtual environment). It keeps `~/.lifeweave` (settings, the key in `.env`,
 custody archive, catalog), the vault, `~/LifeContext/backups`, `~/.hindsight`,
