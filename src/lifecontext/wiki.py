@@ -1783,8 +1783,11 @@ class WikiService:
                 or record.get("extraction_revision") != extraction["extraction_revision"]
                 or not isinstance(record.get("windows"), dict)):
             return {}
-        # A malformed entry counts as no entry: its window is asked again.
-        return {key: entry for key, entry in record["windows"].items()
+        # A malformed entry counts as no entry: its window is asked again. A dropped claim keeps only
+        # its kind and reason, whatever an earlier record held, so its text is not written back.
+        return {key: {**entry, "dropped": [{"kind": item.get("kind"), "reason": item.get("reason")}
+                                           for item in entry.get("dropped", []) if isinstance(item, dict)]}
+                for key, entry in record["windows"].items()
                 if isinstance(entry, dict) and isinstance(entry.get("dropped", []), list)
                 and (entry.get("patch") is None or isinstance(entry.get("patch"), dict))}
 

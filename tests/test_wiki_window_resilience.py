@@ -407,6 +407,24 @@ class KeptWindowTests(WindowFixture):
                 self.assertEqual(asked, [0, 1])
                 self.assertEqual(len(self.record(fixture)["windows"]), 2)
 
+    def test_a_kept_window_from_an_older_record_loses_the_text_of_its_dropped_claims(self):
+        fixture = self.pages(2)
+        asked = self.asking(fixture)
+        fixture.update()
+        record = self.record(fixture)
+        for entry in record["windows"].values():
+            entry["dropped"] = [{"kind": "claim", "reason": "quote_not_found",
+                                 "claim": {"text": "An invented claim kept by an older build."}}]
+        fixture.derived.write_wiki_windows("doc_1", 1, record)
+        asked.clear()
+        fixture.update()
+        self.assertEqual(asked, [])
+        path = fixture.paths.lifeweave_home / "derived" / "doc_1" / "v1" / WIKI_WINDOWS
+        self.assertNotIn(b"invented", path.read_bytes())
+        self.assertEqual([entry["dropped"] for entry in self.record(fixture)["windows"].values()],
+                         [[{"kind": "claim", "reason": "quote_not_found"}]] * 2)
+        self.assertEqual(fixture.service.window_report("doc_1", 1), {"skipped": 0, "dropped": 2})
+
     def test_a_forget_removes_staging_copies_a_stopped_write_left(self):
         fixture = self.pages(2)
         fixture.update()
