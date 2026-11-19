@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import difflib
+import functools
 import hashlib
 import json
 import logging
@@ -15,7 +16,8 @@ import re
 import secrets
 import threading
 import unicodedata
-from collections import OrderedDict
+from array import array
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, tzinfo
@@ -689,6 +691,147 @@ def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
                    title=WITHDRAWN_TITLE if patch.page_id == source_page_id(source_id) else patch.title)
 
 
+# A model quote is found in its cited passages byte for byte, else on a normalised form
+# (NFKC, one space for any run of whitespace, one ' and one " for every quotation mark,
+# one - for every dash, no format characters such as soft hyphens, no hyphen breaking a
+# word across lines), else, for a quote of at least NEAR_MIN_CHARACTERS normalised
+# characters, as the one passage span whose character trigrams are NEAR_RATIO alike
+# (Dice) with no other span within NEAR_MARGIN of it, and whose characters come in the
+# same order (difflib ratio NEAR_RATIO: trigrams alone accept the same words reordered,
+# which is a paraphrase, not a typo). The quote stored is that exact span
+# of the passage and the claim the exact part of it the claim names, so what a page
+# publishes stays literal text of the extraction; _validate still checks it byte for byte.
+NEAR_RATIO = 0.85
+NEAR_MARGIN = 0.05
+NEAR_MIN_CHARACTERS = 20
+# Bounds on the CPU a model response can cost: passages longer than these are matched
+# byte for byte only (NORMALISE_MAX_CHARACTERS) or without the near rung, each near
+# search refines NEAR_CANDIDATES spans, and one response gets NEAR_ATTEMPTS searches.
+NORMALISE_MAX_CHARACTERS = 100_000
+NEAR_MAX_CHARACTERS = 60_000
+NEAR_CANDIDATES = 3
+NEAR_ATTEMPTS = 32
+_QUOTE_MARKS = {**dict.fromkeys(map(ord, "\u2018\u2019\u201a\u201b\u2032`\u00b4"), "'"),
+                **dict.fromkeys(map(ord, "\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb"), '"')}
+_LINE_HYPHEN = re.compile(r"(?<=\w)[-\u00ad\u2010\u2011]\s*\n\s*(?=\w)")
+
+
+@functools.lru_cache(maxsize=16)
+def _normalised(text: str) -> tuple[str, array, array]:
+    """``text`` in its matching form, and for each of its characters the span of ``text`` it came from."""
+    characters, starts, ends = [], array("q"), array("q")
+    joins = {match.start(): match.end() for match in _LINE_HYPHEN.finditer(text)}
+    position = 0
+    while position < len(text):
+        if position in joins:
+            position = joins[position]
+            continue
+        end = position + 1
+        while end < len(text) and unicodedata.combining(text[end]):
+            end += 1
+        for character in unicodedata.normalize("NFKC", text[position:end]):
+            if character.isspace():
+                if characters and characters[-1] == " ":
+                    ends[-1] = end
+                    continue
+                character = " "
+            elif unicodedata.category(character) == "Cf":
+                continue
+            elif unicodedata.category(character) == "Pd" or character == "\u2212":
+                character = "-"
+            else:
+                character = _QUOTE_MARKS.get(ord(character), character)
+            characters.append(character)
+            starts.append(position)
+            ends.append(end)
+        position = end
+    return "".join(characters), starts, ends
+
+
+def _trigrams(text: str) -> Counter:
+    return Counter(text[i:i + 3] for i in range(len(text) - 2))
+
+
+def _alike(left: Counter, right: Counter) -> float:
+    total = sum(left.values()) + sum(right.values())
+    return 2 * sum((left & right).values()) / total if total else 0.0
+
+
+def _near_span(needle: str, text: str) -> tuple[int, int] | None:
+    """The one span of ``text`` whose trigrams are at least NEAR_RATIO alike to ``needle``'s
+    (both normalised), with no other span within NEAR_MARGIN; None for a short needle, a long
+    text, a poor match or two candidates that are about as good."""
+    width = min(len(needle), len(text))
+    if len(needle) < NEAR_MIN_CHARACTERS or width < 3 or len(text) > NEAR_MAX_CHARACTERS:
+        return None
+    wanted = _trigrams(needle)
+    # Shared trigrams of every window of the needle's length, kept as it slides by one character.
+    held = _trigrams(text[:width])
+    shared = sum((held & wanted).values())
+    scores = [shared]
+    for start in range(1, len(text) - width + 1):
+        gone, added = text[start - 1:start + 2], text[start + width - 3:start + width]
+        if held[gone] <= wanted[gone]:
+            shared -= 1
+        held[gone] -= 1
+        held[added] += 1
+        if held[added] <= wanted[added]:
+            shared += 1
+        scores.append(shared)
+    picks: list[int] = []
+    for start in sorted(range(len(scores)), key=scores.__getitem__, reverse=True):
+        if all(abs(start - other) >= width for other in picks):
+            picks.append(start)
+            if len(picks) == NEAR_CANDIDATES:
+                break
+    # Each candidate moves its start, its end, then its start again, by up to a tenth of the
+    # needle (8 characters at most) each time.
+    reach = max(1, min(8, len(needle) // 10))
+    found = []
+    for pick in picks:
+        best = max((_alike(_trigrams(text[start:start + width]), wanted), start, start + width)
+                   for start in range(max(0, pick - reach), min(len(text) - width, pick + reach) + 1))
+        _, start, end = best = max([best, *((_alike(_trigrams(text[start:end]), wanted), start, end) for end in
+                                            range(start + 3, min(len(text), best[2] + reach) + 1) if end >= best[2] - reach)])
+        _, start, end = max([best, *((_alike(_trigrams(text[start:end]), wanted), start, end) for start in
+                                     range(max(0, best[1] - reach), end - 2) if start <= best[1] + reach)])
+        # The span ends on whole words (up to 32 characters further): the model quoted the word it cut.
+        start, end = start + (text[start] == " "), end - (text[end - 1] == " ")
+        floor, ceiling = max(0, start - 32), min(len(text), end + 32)
+        while start > floor and text[start - 1].isalnum() and text[start].isalnum():
+            start -= 1
+        while end < ceiling and text[end].isalnum() and text[end - 1].isalnum():
+            end += 1
+        found.append((_alike(_trigrams(text[start:end]), wanted), start, end))
+    found.sort(reverse=True)
+    (ratio, start, end), others = found[0], found[1:]
+    if ratio < NEAR_RATIO or any(other >= ratio - NEAR_MARGIN and (stop <= start or begin >= end)
+                                 for other, begin, stop in others):
+        return None
+    if difflib.SequenceMatcher(None, needle, text[start:end], autojunk=False).ratio() < NEAR_RATIO:
+        return None
+    return start, end
+
+
+def _locate(needle: str, text: str, budget: list[int] | None) -> tuple[str, bool] | None:
+    """The exact part of ``text`` that ``needle`` quotes once both are normalised, else, while
+    ``budget`` (searches left) lasts, the near span; with whether it was near. None when not found."""
+    if len(text) > NORMALISE_MAX_CHARACTERS:
+        return None
+    form, starts, ends = _normalised(text)
+    wanted = _normalised(needle)[0].strip(" ")
+    if not wanted:
+        return None
+    at = form.find(wanted)
+    if at >= 0:
+        return text[starts[at]:ends[at + len(wanted) - 1]], False
+    if not budget or budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    span = _near_span(wanted, form)
+    return (text[starts[span[0]]:ends[span[1] - 1]], True) if span else None
+
+
 # Front-matter lines that say nothing about the content: copyright and licence
 # notices, ISBNs and publisher imprint lines, in English, Ukrainian and Russian.
 _BOILERPLATE = re.compile(
@@ -869,6 +1012,30 @@ class WikiService:
             if not supported:
                 raise WikiError("wiki claim requires literal quote support")
         return list(dependencies.values())
+
+    def _literal(self, claim: Claim, budget: list[int]) -> Claim:
+        """The claim with each quote replaced by the passage span it matches (see NEAR_RATIO) and
+        its text by the part of a stored quote it matches; the near rung for the text only within a
+        near quote. What does not match is left as it was, for _validate to reject."""
+        citations, near = [], []
+        for citation in claim.citations:
+            payload = self._evidence(citation.source_id, citation.source_version, citation.extraction_revision)
+            text = "".join(s["text"] for s in payload["segments"][citation.passage_start:citation.passage_end])
+            found = None if citation.quote in text else _locate(citation.quote, text, budget)
+            try:
+                citations.append(replace(citation, quote=_text(found[0], 2048)) if found else citation)
+                near.append(bool(found and found[1]))
+            except WikiError:  # the span holds markup or control characters a quote may not
+                citations.append(citation)
+                near.append(False)
+        text = claim.text
+        if not any(text in citation.quote for citation in citations):
+            for citation, approximate in zip(citations, near, strict=True):
+                found = _locate(text, citation.quote, budget if approximate else None)
+                if found:
+                    text = found[0]
+                    break
+        return Claim(text, tuple(citations))
 
     def list(self) -> list[dict]:
         """The pages; a withdrawn page (``forgotten``) shows the neutral title, as in ``show``."""
@@ -1476,17 +1643,21 @@ class WikiService:
             # Each claim and contradiction stands on its own quote, checked byte for byte:
             # one bad quote drops that claim, not the whole window. Only a response with
             # nothing valid is rejected (and corrected once).
-            claims, contradictions, dependencies, failure = [], [], [], None
+            # A quote that matches only once normalised, or nearly, is stored as the exact passage span.
+            claims, contradictions, dependencies, failure, budget = [], [], [], None, [NEAR_ATTEMPTS]
             for claim in patch.claims:
                 try:
-                    dependencies += self._validate(replace(patch, claims=(claim,), contradictions=()))
-                    claims.append(claim)
+                    literal = self._literal(claim, budget)
+                    dependencies += self._validate(replace(patch, claims=(literal,), contradictions=()))
+                    claims.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
             for contradiction in patch.contradictions:
                 try:
-                    dependencies += self._validate(replace(patch, claims=(), contradictions=(contradiction,)))
-                    contradictions.append(contradiction)
+                    literal = replace(contradiction, left=self._literal(contradiction.left, budget),
+                                      right=self._literal(contradiction.right, budget))
+                    dependencies += self._validate(replace(patch, claims=(), contradictions=(literal,)))
+                    contradictions.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
             dropped = len(patch.claims) - len(claims) + len(patch.contradictions) - len(contradictions)
