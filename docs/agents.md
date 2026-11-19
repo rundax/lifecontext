@@ -107,7 +107,8 @@ was, byte for byte. A file the command created is left empty, not deleted.
 The file is replaced atomically and keeps its permission bits (without setuid
 or setgid). Before it touches a file the command checks that the directory is
 yours and not world-writable (group-writable is fine), that a symlinked file is
-your own link to a regular file you own, and that the file is writable, at most
+your own link, one hop only, to a regular file you own in a directory that passes the
+same checks, that `CODEX_HOME` is an absolute path, and that the file is writable, at most
 1 MiB and UTF-8. If any check fails, or the file changes while the command
 works, it refuses with the reason and changes nothing: `install` and `remove`
 exit 1, and `check --instructions` prints the reason and exits 0, because it

@@ -1036,7 +1036,12 @@ for item in report.get("instructions") or []:
 		done
 		# Files without the block get it only after the question, default no.
 		if [ -n "$absent" ] && [ "$interactive" != no ] && tty_available; then
-			ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
+			where=""
+			for agent in $absent; do
+				case "$agent" in claude) file="~/.claude/CLAUDE.md" ;; *) file="Codex AGENTS.md" ;; esac
+				where="${where:+$where and }$file"
+			done
+			ask_no "Add a short note to $where so your agents check LifeContext first?"
 			if [ "$reply" = 1 ]; then
 				for agent in $absent; do
 					"$lc" skills install --instructions --agent "$agent" </dev/null ||
@@ -1099,11 +1104,15 @@ uninstall() {
 	# Without a working command (a broken venv), remove the known files directly.
 	if [ -x "$lc" ] && "$lc" --version </dev/null >/dev/null 2>&1; then
 		"$lc" service uninstall </dev/null || warn "lifecontext service uninstall reported a problem (above)"
-		# An older installed command does not know --instructions: remove the links the plain way,
-		# and by hand when that fails too, before the venv goes.
-		removal=$("$lc" skills remove --instructions </dev/null) || {
-			"$lc" skills remove </dev/null || remove_skill_links_directly
-		}
+		# Exit 1 is a refused or edited block (the links are gone). Anything higher is an older installed
+		# command that does not know --instructions: remove its links the plain way, and by hand when that
+		# fails too, before the venv goes.
+		removal_status=0
+		removal=$("$lc" skills remove --instructions </dev/null) || removal_status=$?
+		if [ "$removal_status" -gt 1 ]; then
+			say "Older lifecontext without --instructions; removing skill links only."
+			"$lc" skills remove </dev/null || remove_skill_links_directly || true
+		fi
 		printf '%s\n' "$removal"
 		# A block the person edited, or a file that cannot be changed, stays; the uninstall goes on.
 		printf '%s\n' "$removal" | grep -E ' instructions (edited by hand|refused)' |

@@ -206,6 +206,7 @@ class InstallScriptTests(unittest.TestCase):
         result = self.run_installer("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.logged()[-2:], ["lifecontext skills remove --instructions", "lifecontext skills remove"])
+        self.assertIn("Older lifecontext without --instructions; removing skill links only.", result.stdout)
         self.assertFalse(os.path.lexists(ours))
         self.assertTrue(foreign.is_symlink())
         self.assertFalse(data_dir.exists())
@@ -214,7 +215,8 @@ class InstallScriptTests(unittest.TestCase):
         data_dir = self.home / ".local" / "share" / "lifecontext"
         command = data_dir / "venv" / "bin" / "lifecontext"
         command.parent.mkdir(parents=True)
-        _stub(command, 'case "$*" in "skills remove --instructions")\n'
+        _stub(command, f'echo "lifecontext $*" >> "{self.calls}"\n'
+                       'case "$*" in "skills remove --instructions")\n'
                        '  echo "claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md"\n'
                        '  echo "codex   instructions refused (not_utf8): /h/.codex/AGENTS.md"\n'
                        '  exit 1 ;; esac\n')
@@ -224,6 +226,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Warning: claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md",
                       result.stderr)
         self.assertIn("Warning: codex   instructions refused (not_utf8): /h/.codex/AGENTS.md", result.stderr)
+        # Exit 1 means the links are gone already: no fallback to the plain command.
+        self.assertNotIn("lifecontext skills remove", self.logged())
+        self.assertNotIn("Older lifecontext", result.stdout)
         self.assertFalse(data_dir.exists())
 
     @unittest.skipUnless(platform.system() == "Linux", "systemd unit layout")
@@ -865,7 +870,7 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         def note(state: str) -> str:
             return json.dumps({"instructions": [{"agent": "claude", "state": state}, {"agent": "gemini", "state": "unsupported"}]})
 
-        question = "ASKED: Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
+        question = "ASKED: Add a short note to ~/.claude/CLAUDE.md so your agents check LifeContext first?"
         refresh = "skills install --instructions --agent claude\n"
         yes = self.run_function("link_skills", report, note=note("absent"), ask="yes").stdout
         self.assertEqual(yes.count(question), 1)
@@ -899,6 +904,8 @@ class InstallSkillsAndPathTests(unittest.TestCase):
                 self.assertEqual(out.count(question), 1 if answer else 0)
         out = self.run_function("link_skills", report, note=mixed, ask="yes").stdout
         self.assertEqual(out.count(question), 1)
+        # The question names only the file that lacks the block.
+        self.assertIn("ASKED: Add a short note to Codex AGENTS.md so your agents check LifeContext first?", out)
         self.assertIn("skills install --instructions --agent claude\n", out)
         self.assertIn("skills install --instructions --agent codex\n", out)
         # A file whose agent got no skill link is skipped, even with its block absent.
@@ -910,8 +917,7 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         text = INSTALLER.read_text()
         self.assertIn("--agent-instructions  also add", text)
         self.assertIn("--agent-instructions) agent_instructions=1", text)
-        self.assertIn('ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check '
-                      'LifeContext first?"', text)
+        self.assertIn('ask_no "Add a short note to $where so your agents check LifeContext first?"', text)
 
     def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
         for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/zsh", "Linux", "~/.zshrc"),
