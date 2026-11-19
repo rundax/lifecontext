@@ -4,6 +4,7 @@ Citation validation is provenance validation, NOT a semantic entailment guarante
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import difflib
 import functools
@@ -57,6 +58,14 @@ MAX_QUERY_BYTES = 60_000
 # the remaining windows are skipped without asking, so a provider that is down costs
 # minutes, not one timeout per window.
 MAX_PROVIDER_FAILED_WINDOWS = 2
+# A window request whose failure asking again may fix (the compiler's ``retry`` hint, see
+# hindsight.compile_retry) is asked again after 2, 4 and 8 seconds or the provider's
+# Retry-After: up to three times, after a timeout once, and at most COMPILE_RETRY_BUDGET
+# times in one compile. The optional summary and routing requests are never asked again.
+# Before every attempt the document must still be there.
+COMPILE_BACKOFF = (2.0, 4.0, 8.0)
+COMPILE_TIMEOUT_RETRIES = 1
+COMPILE_RETRY_BUDGET = 6
 # Why a claim or contradiction of a model answer was dropped, by the check that failed.
 _DROP_REASONS = {"wiki quote not found": "quote_not_found",
                  "wiki claim requires literal quote support": "claim_not_in_quote"}
@@ -588,6 +597,8 @@ class WikiRevisionStore:
 # Within one compile (per asyncio task), an extraction is read and its original
 # hashed once; other tasks keep their own reads.
 _READS: contextvars.ContextVar[dict | None] = contextvars.ContextVar("wiki_reads", default=None)
+# The retries left in the running compile (COMPILE_RETRY_BUDGET); None outside a compile.
+_RETRIES: contextvars.ContextVar[list | None] = contextvars.ContextVar("wiki_retries", default=None)
 
 
 def source_page_id(source_id: str) -> str:
@@ -1616,15 +1627,36 @@ class WikiService:
         if window:
             yield {**header, "segments": window}
 
-    async def _request(self, query, parse, source_id, version, extraction_revision, *, correction):
+    async def _ask(self, query: str, source_id: str, version: int, retry: bool) -> Any:
+        """One model request, asked again after a failure the compiler marks as worth it, while
+        ``retry`` and the compile's budget allow (COMPILE_BACKOFF). The document must still be
+        there before every attempt."""
+        budget = _RETRIES.get() if retry else None
+        retries = timeouts = 0
+        while True:
+            self._still_there(source_id, version)
+            try:
+                return await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
+            except Exception as exc:  # any model failure is a provider failure
+                hint = getattr(exc, "retry", None)
+                if (not budget or budget[0] <= 0 or not isinstance(hint, tuple) or retries >= len(COMPILE_BACKOFF)
+                        or (hint[0] == "timeout" and timeouts >= COMPILE_TIMEOUT_RETRIES)):
+                    raise WikiProviderError(type(exc).__name__) from exc
+                wait = COMPILE_BACKOFF[retries] if hint[1] is None else hint[1]
+                budget[0] -= 1
+                retries += 1
+                timeouts += hint[0] == "timeout"
+                # The error's type and kind only: its text may hold provider messages.
+                logging.getLogger(__name__).warning("Wiki compile request failed (%s, %s); asking again in %.0f s",
+                                                    type(exc).__name__, hint[0], wait)
+            await asyncio.sleep(wait)
+
+    async def _request(self, query, parse, source_id, version, extraction_revision, *, correction, retry=False):
         """One model request under strict parsing; regenerate one rejected response once, never relaxing validation."""
         for attempt in range(2 if self.compiler is not None else 1):
             if len(query.encode()) > MAX_QUERY_BYTES:
                 raise WikiError("wiki query size limit")
-            try:
-                response = await (self.compiler or self.hindsight.reflect)(query, max_tokens=4096, budget="low")
-            except Exception as exc:  # any model failure is a provider failure
-                raise WikiProviderError(type(exc).__name__) from exc
+            response = await self._ask(query, source_id, version, retry)
             try:
                 return parse(response.get("text"))
             except WikiError as exc:
@@ -1691,7 +1723,7 @@ class WikiService:
                 raise WikiError("wiki update lacks source evidence")
             return replace(patch, claims=tuple(claims), contradictions=tuple(contradictions))
 
-        return await self._request(query, validate, source_id, version, extraction_revision,
+        return await self._request(query, validate, source_id, version, extraction_revision, retry=True,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
 
     def _still_there(self, source_id: str, version: int) -> None:
@@ -2239,7 +2271,7 @@ class WikiService:
             self._stage(source_id, version, "pending")
         self._stage(source_id, version, "running")
         window_count = 0
-        reads = _READS.set({})
+        reads, retries = _READS.set({}), _RETRIES.set([COMPILE_RETRY_BUDGET])
         try:
             evidence = self._evidence(source_id, version)
             extraction_revision = evidence["extraction_revision"]
@@ -2355,6 +2387,7 @@ class WikiService:
             raise WikiError("wiki update failed; retry available") from None
         finally:
             _READS.reset(reads)
+            _RETRIES.reset(retries)
         try:
             results.extend(self._publish_index())
         except Exception as exc:  # noqa: BLE001 -- the index is a convenience; the document is done

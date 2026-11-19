@@ -90,55 +90,40 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(server.shutdown)
             server.server_close()
 
-    async def compile_with(self, *answers):
-        """Run one compile whose provider calls raise or return ``answers`` in turn; the sleeps are recorded."""
+    async def failure_of(self, error):
+        """The failure of one compile whose provider call raises ``error``."""
         with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}), \
-                patch("hindsight_api.engine.llm_wrapper.LLMProvider") as factory, \
-                patch("lifecontext.hindsight.asyncio.sleep", new=AsyncMock()) as sleep:
+                patch("hindsight_api.engine.llm_wrapper.LLMProvider") as factory:
             model = factory.return_value
-            model.call = AsyncMock(side_effect=list(answers))
+            model.call = AsyncMock(side_effect=[error, '{"claims":[]}'])
             model.cleanup = AsyncMock()
             compile_document = document_compiler({"llm": {"provider": "openai", "model": "chosen"}})
-            try:
-                return await compile_document("evidence"), model, sleep
-            except HindsightStartupError as error:
-                self.assertNotIn("private-test-key", str(error))
-                return error, model, sleep
+            with self.assertRaises(HindsightStartupError) as failure:
+                await compile_document("evidence")
+            # One attempt, its client closed: the wiki decides whether to ask again.
+            self.assertEqual(model.call.await_count, 1)
+            model.cleanup.assert_awaited_once()
+            self.assertEqual(failure.exception.code, "document_generation_failed")
+            self.assertNotIn("private-test-key", str(failure.exception))
+            return failure.exception.retry
 
-    async def test_transient_failures_are_asked_again_with_backoff(self):
-        for failure in (StatusError(503), TimeoutError(), ConnectionResetError("reset")):
-            with self.subTest(failure=type(failure).__name__):
-                result, model, sleep = await self.compile_with(failure, StatusError(500), '{"claims":[]}')
-                self.assertEqual(result, {"text": '{"claims":[]}'})
-                self.assertEqual(model.call.await_count, 3)
-                self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0, 4.0])
-                # Each attempt closes its own client.
-                self.assertEqual(model.cleanup.await_count, 3)
-
-    async def test_retry_after_is_honoured_up_to_its_cap(self):
-        result, model, sleep = await self.compile_with(StatusError(429, {"retry-after": "7"}), '{"claims":[]}')
-        self.assertEqual(result, {"text": '{"claims":[]}'})
-        self.assertEqual([call.args[0] for call in sleep.await_args_list], [7.0])
-        # A wait longer than the cap is not slept through: the call fails now.
-        result, model, sleep = await self.compile_with(StatusError(429, {"retry-after": "600"}), '{"claims":[]}')
-        self.assertIsInstance(result, HindsightStartupError)
-        self.assertEqual(model.call.await_count, 1)
-        sleep.assert_not_awaited()
-
-    async def test_permanent_failures_are_not_asked_again(self):
-        for failure in (StatusError(401), StatusError(400), ValueError("invalid response")):
-            with self.subTest(failure=failure):
-                result, model, sleep = await self.compile_with(failure, '{"claims":[]}')
-                self.assertIsInstance(result, HindsightStartupError)
-                self.assertEqual(result.code, "document_generation_failed")
-                self.assertEqual(model.call.await_count, 1)
-                sleep.assert_not_awaited()
-
-    async def test_three_retries_at_most(self):
-        result, model, sleep = await self.compile_with(*[StatusError(502)] * 5)
-        self.assertIsInstance(result, HindsightStartupError)
-        self.assertEqual(model.call.await_count, 4)
-        self.assertEqual(len(sleep.await_args_list), 3)
+    async def test_a_failure_says_whether_asking_again_may_help(self):
+        cases = [
+            (TimeoutError(), ("timeout", None)),
+            (type("APITimeoutError", (Exception,), {})(), ("timeout", None)),
+            (StatusError(503), ("transient", None)),
+            (StatusError(408), ("transient", None)),
+            (StatusError(429, {"retry-after": "7"}), ("transient", 7.0)),
+            (ConnectionResetError("reset"), ("transient", None)),
+            # A wait longer than the cap is not asked again.
+            (StatusError(429, {"retry-after": "600"}), None),
+            (StatusError(401), None),
+            (StatusError(400), None),
+            (ValueError("invalid response"), None),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__, status=getattr(error, "status_code", None)):
+                self.assertEqual(await self.failure_of(error), expected)
 
     async def test_the_compiler_names_its_model(self):
         with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}):

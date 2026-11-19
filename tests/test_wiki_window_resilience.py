@@ -1,6 +1,7 @@
 """One bad model answer no longer discards the wiki page: skipped windows, kept windows, matched quotes."""
 import json
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import test_wiki
 import test_wiki_claims_per_window
@@ -149,6 +150,90 @@ class SkippedWindowTests(WindowFixture):
         self.assertEqual(asked, [2])
         self.assertEqual(self.pages_cited(fixture), [0, 1, 2, 3])
         self.assertEqual(fixture.service.window_report("doc_1", 1), {"skipped": 0, "dropped": 0})
+
+
+class Flaky(Exception):
+    """A failed compile call carrying the compiler's hint (see hindsight.compile_retry)."""
+
+    def __init__(self, retry):
+        super().__init__("provider text")
+        self.retry = retry
+
+
+class CompileRetryTests(WindowFixture):
+    def run_with(self, pages, failures):
+        """Compile while window ``i`` raises the errors ``failures[i]`` holds, in turn; returns the
+        windows asked, in order, and the waits."""
+        fixture = self.pages(pages)
+        left = {window: list(errors) for window, errors in failures.items()}
+
+        def fail(data):
+            errors = left.get(data["evidence"]["segments"][0]["passage_index"])
+            if errors:
+                raise errors.pop(0)
+
+        asked = self.asking(fixture, fail)
+        with patch("lifecontext.wiki.asyncio.sleep", new=AsyncMock()) as sleep:
+            fixture.update()
+        return fixture, asked, [call.args[0] for call in sleep.await_args_list]
+
+    def test_a_transient_failure_is_asked_again_with_backoff_or_retry_after(self):
+        _, asked, waits = self.run_with(2, {0: [Flaky(("transient", None)), Flaky(("transient", None))]})
+        self.assertEqual((asked, waits), ([0, 0, 0, 1], [2.0, 4.0]))
+        fixture, asked, waits = self.run_with(2, {0: [Flaky(("transient", 7.0))]})
+        self.assertEqual((asked, waits), ([0, 0, 1], [7.0]))
+        self.assertEqual(self.pages_cited(fixture), [0, 1])
+
+    def test_a_permanent_failure_is_not_asked_again(self):
+        fixture, asked, waits = self.run_with(2, {0: [Flaky(None)]})
+        self.assertEqual((asked, waits), ([0, 1], []))
+        self.assertEqual(self.pages_cited(fixture), [1])
+
+    def test_three_retries_at_most_and_a_timeout_once(self):
+        _, asked, waits = self.run_with(2, {0: [Flaky(("transient", None))] * 5})
+        self.assertEqual((asked, waits), ([0, 0, 0, 0, 1], [2.0, 4.0, 8.0]))
+        _, asked, waits = self.run_with(2, {0: [Flaky(("timeout", None))] * 5})
+        self.assertEqual((asked, waits), ([0, 0, 1], [2.0]))
+
+    def test_one_compile_retries_six_times_in_all(self):
+        three = [Flaky(("transient", None))] * 3
+        _, asked, waits = self.run_with(4, {0: list(three), 1: list(three), 2: [Flaky(("transient", None))]})
+        self.assertEqual(asked, [0, 0, 0, 0, 1, 1, 1, 1, 2, 3])
+        self.assertEqual(len(waits), 6)
+
+    def test_the_summary_and_routing_requests_are_never_asked_again(self):
+        fixture = self.pages(2)
+        compiler, summaries = fixture.service.compiler, []
+
+        async def ask(query, **kwargs):
+            if "UNTRUSTED_DATA=" in query and "evidence" not in data_of(query):
+                summaries.append(query)
+                raise Flaky(("transient", None))
+            return await compiler(query, **kwargs)
+
+        ask.model = compiler.model
+        fixture.service.compiler = ask
+        with patch("lifecontext.wiki.asyncio.sleep", new=AsyncMock()) as sleep:
+            fixture.update()
+        # One summary request and one routing request, each asked once; the page publishes.
+        self.assertEqual(len(summaries), 2)
+        sleep.assert_not_awaited()
+        self.assertEqual(self.pages_cited(fixture), [0, 1])
+
+    def test_a_document_deleted_during_the_wait_is_not_asked_again(self):
+        fixture = self.pages(3)
+
+        def fail(data):
+            raise Flaky(("transient", 30.0))
+
+        asked = self.asking(fixture, fail)
+
+        async def wait(seconds):
+            fixture.catalog.source_withdrawn = lambda *args: True
+
+        with patch("lifecontext.wiki.asyncio.sleep", new=AsyncMock(side_effect=wait)), self.assertRaises(WikiError):
+            fixture.update()
+        self.assertEqual(asked, [0])
 
 
 class KeptWindowTests(WindowFixture):
