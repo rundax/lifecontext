@@ -1,4 +1,5 @@
 """One bad model answer no longer discards the wiki page: skipped windows, kept windows, matched quotes."""
+import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -252,6 +253,82 @@ class KeptWindowTests(WindowFixture):
         fixture.update()
         self.assertEqual(len(asked), 4)
 
+    def invalid(self, fixture, window):
+        """The model's answers for ``window`` hold only a claim its page never says."""
+        compiler = fixture.service.compiler
+        original = compiler.window
+
+        def answer(data):
+            result = original(data)
+            if data["evidence"]["segments"][0]["passage_index"] == window:
+                result["claims"] = [{**claim, "text": "A sentence the page never says."} for claim in result["claims"]]
+            return result
+
+        compiler.window = answer
+
+    def test_a_rejected_window_is_kept_as_rejected_and_not_asked_again(self):
+        fixture = self.pages(3)
+        self.invalid(fixture, 1)
+        asked = self.asking(fixture)
+        fixture.update()
+        # Asked twice (the answer and its correction), rejected, not counted as skipped.
+        self.assertEqual(asked, [0, 1, 1, 2])
+        self.assertEqual(fixture.service.window_report("doc_1", 1)["skipped"], 0)
+        asked.clear()
+        fixture.update()
+        self.assertEqual(asked, [])
+        self.assertEqual(self.pages_cited(fixture), [0, 2])
+
+    def test_without_any_page_rejected_windows_are_asked_again_by_a_retry(self):
+        fixture = self.pages(2)
+        self.invalid(fixture, 0)
+        self.invalid(fixture, 1)
+        asked = self.asking(fixture)
+        for _ in range(2):
+            with self.assertRaises(WikiError):
+                fixture.update()
+        self.assertEqual(asked, [0, 0, 1, 1] * 2)
+        stage = fixture.catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_update_rejected"))
+
+    def test_windows_paid_for_are_kept_when_the_compile_is_cancelled(self):
+        fixture, cancel = self.pages(3), [True]
+
+        def fail(data):
+            if cancel[0] and data["evidence"]["segments"][0]["passage_index"] == 2:
+                raise asyncio.CancelledError()
+
+        asked = self.asking(fixture, fail)
+        with self.assertRaises(asyncio.CancelledError):
+            fixture.update()
+        cancel[0] = False
+        asked.clear()
+        fixture.update()
+        self.assertEqual(asked, [2])
+
+    def test_a_kept_window_brings_no_summary_or_links(self):
+        fixture = self.pages(2)
+        fixture.update()
+        record = self.record(fixture)
+        for entry in record["windows"].values():
+            entry["patch"]["summary"] = [{"text": "A summary nobody checked.", "claims": [1]}]
+            entry["patch"]["links"] = ["topic_planted"]
+        fixture.derived.write_wiki_windows("doc_1", 1, record)
+        compiler = fixture.service.compiler
+
+        async def no_summary(query, **kwargs):
+            if "claims" in data_of(query) and "pages" not in data_of(query):
+                raise ConnectionError("summary down")
+            return await compiler(query, **kwargs)
+
+        no_summary.model = compiler.model
+        fixture.service.compiler = no_summary
+        fixture.update()
+        page = fixture.current()
+        # The summary request failed, so nothing may stand where the model summary goes.
+        self.assertEqual(page.summary, ())
+        self.assertNotIn("topic_planted", page.links)
+
     def test_without_a_model_name_nothing_is_reused(self):
         fixture = self.pages(2, model=None)
         del fixture.service.compiler.model
@@ -393,6 +470,22 @@ class QuoteMatchTests(WindowFixture):
         self.assertEqual(_locate("rent is", passage, budget), ("rent\u00a0is", False))
         self.assertEqual(budget["left"], left - len("rent is"))
         self.assertIsNone(_locate("The rent is due.", "Another passage.", {"left": 10, "forms": {}}))
+
+    def test_a_window_that_passes_after_its_correction_keeps_none_of_the_first_answers_drops(self):
+        fixture = self.segments([SENTENCE])
+        answers = [("An invented claim.", "An invented quote the page lacks entirely."), None]
+
+        def window(data):
+            citation = data["example_patch"]["claims"][0]["citations"][0]
+            self.anchor = None
+            text, quote = answers.pop(0) or (SENTENCE, SENTENCE)
+            return {**data["example_patch"], "claims": [
+                {"text": text, "citations": [{**citation, "passage_start": 0, "passage_end": 1, "quote": quote}]}]}
+
+        fixture.service.compiler.window = window
+        fixture.update()
+        self.assertEqual(self.claims(fixture), [(SENTENCE, SENTENCE)])
+        self.assertEqual(self.dropped(fixture), [])
 
     def test_dropped_claims_are_kept_with_their_reason_and_counted_without_their_text(self):
         fixture = self.segments([SENTENCE])
