@@ -67,6 +67,47 @@ deletes only links that point at a LifeContext skill and leaves everything else
 alone. Add `--json` for the report. `scripts/install_agent_skill.sh` in a
 checkout now runs these commands with `--agent all`.
 
+### A short note so the agent checks LifeContext first
+
+An agent rarely calls a tool it was not told about, and the skill description
+alone is easy to miss. `--instructions` adds one short block to the agent's own
+instruction file, for the agents that have one and that `skills` selects:
+Claude Code (`~/.claude/CLAUDE.md`) and Codex (`$CODEX_HOME/AGENTS.md`, default
+`~/.codex/AGENTS.md`). Gemini CLI and Hermes get no block. Nothing is written
+unless you pass the flag (or answer yes to the installer's question, or pass
+`--agent-instructions` to it).
+
+```bash
+lifecontext skills install --instructions --dry-run   # show the plan only
+lifecontext skills install --instructions             # add or update the block
+lifecontext skills check --instructions               # present, absent or edited
+lifecontext skills remove --instructions              # take the block out again
+```
+
+The block:
+
+```
+<!-- lifecontext:instructions:begin sha256=4850261e36a1b8285391576a819508f841e1b69656e500f13242663a8be169ae -->
+LifeContext holds the user's own documents and notes (leases, contracts, insurance, tax and medical letters, scans, journal).
+Before answering a question about them, check LifeContext first with the `personal-journal-operations` skill: `lifecontext wiki list`, then `lifecontext wiki show PAGE`, then `lifecontext recall --query "..."` only if the page does not answer it (slow, one at a time).
+Cite the title, the page when it has one, and the quote it returns. If LifeContext has nothing, say so instead of guessing.
+<!-- lifecontext:instructions:end -->
+```
+
+The begin marker holds the sha256 of the text between the markers. Running
+`install` again replaces a block whose text still matches its hash (a newer
+LifeContext may reword it) and appends it, after one blank line, when it is
+absent; a missing file is created. If you edited the text, the command reports
+`edited`, says so in one line and leaves the file alone: delete the block or put
+its text back, then run it again. `remove` deletes the block and the blank line
+before it only when the hash matches; everything else in the file stays as it
+was, byte for byte. A file the command created is left empty, not deleted.
+
+The file is replaced atomically and keeps its mode. A symlinked file (a dotfile
+manager) is edited through the link only when its target is a regular file you
+own. A file over 1 MiB, one that is not UTF-8, or one the command cannot write is
+refused with the reason (exit 1), and nothing is changed.
+
 ### As a Claude Code plugin
 
 The repository is also a Claude Code plugin marketplace

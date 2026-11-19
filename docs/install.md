@@ -144,6 +144,7 @@ you configure it ([operations](operations.md)). It never prints your key.
 | `--non-interactive` | Never prompt; set up from the variables below only |
 | `--no-service` | Do not install the systemd user service or launchd agent |
 | `--no-skills` | Do not link the agent skill |
+| `--agent-instructions` | Also add the short "check LifeContext first" note to `~/.claude/CLAUDE.md` and Codex `AGENTS.md` ([what it says](agents.md#a-short-note-so-the-agent-checks-lifecontext-first)); a terminal run asks instead, default no |
 | `--skip-model-probe` | Do not call the model at the end of the setup (also `LIFECONTEXT_SKIP_MODEL_PROBE=1`) |
 | `--no-backup` | Do not back up before upgrading an existing installation |
 | `--allow-root` | Allow running as root (not recommended) |

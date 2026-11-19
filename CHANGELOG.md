@@ -1,5 +1,12 @@
 # Unreleased
 
+- **An opt-in note so agents check LifeContext first.** `lifecontext skills
+  install --instructions` adds a short marked block to `~/.claude/CLAUDE.md` and
+  Codex's `AGENTS.md` (`$CODEX_HOME`, default `~/.codex`); `check` and `remove`
+  take the same flag. A block you edited is never touched, `--dry-run` shows the
+  plan, and nothing is written without the flag. The installer asks once at a
+  terminal (default no) and takes `--agent-instructions` for unattended runs.
+
 - **A failed import says so.** A document or operation answer now has an
   `outcome` (`completed`, `completed_with_errors`, or the failure state) and a
   `problems` list (stage, code, reason, next step), plus `last_operation_id`
