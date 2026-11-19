@@ -1751,14 +1751,13 @@ class WikiService:
         return await self._request(query, validate, source_id, version, extraction_revision, retry=True,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
 
-    def _leaving(self, source_id: str, version: int) -> bool:
-        """The version was forgotten or deleted, or a forget of the document has started (a delete
-        writes its tombstone first; a forget hides the versions only after the provider's chunks go)."""
-        return self.source_withdrawn(source_id, version) or self.catalog.forget_running(source_id)
-
     def _still_there(self, source_id: str, version: int) -> None:
-        """End the compile, as a failed one, once the document version is being forgotten or deleted."""
-        if self._leaving(source_id, version):
+        """End the compile, as a failed one, once a forget of the document has started (it hides the
+        versions only after the provider's chunks go) or the version was forgotten or deleted (a
+        delete writes its tombstone first)."""
+        if self.catalog.forget_running(source_id):
+            raise WikiError("wiki forget pending")
+        if self.source_withdrawn(source_id, version):
             raise WikiError("wiki evidence unavailable")
 
     @staticmethod
@@ -2348,10 +2347,12 @@ class WikiService:
                 self.derived.write_wiki_windows(source_id, version, json.loads(json.dumps({
                     "schema_version": 1, "original_sha256": evidence["original_checksum"],
                     "extraction_revision": extraction_revision, "windows": windows}, ensure_ascii=False)))
-                if self._leaving(source_id, version):
+                try:
+                    self._still_there(source_id, version)
+                except WikiError:
                     # Forgotten or deleted while the model was asked: what was just written goes too.
                     self.derived.remove_wiki_windows(source_id)
-                    raise WikiError("wiki evidence unavailable")
+                    raise
             for window in windows:
                 # A document forgotten or deleted meanwhile is never sent to the model again.
                 self._still_there(source_id, version)
@@ -2437,7 +2438,8 @@ class WikiService:
             # Only the model call maps to the provider code; a bug or a conflict keeps the generic one.
             code = ("wiki_provider_failed" if isinstance(exc, WikiProviderError)
                     else {"wiki evidence window limit": "wiki_evidence_limit",
-                          "wiki has no evidence windows": "wiki_no_evidence"}.get(reason, "wiki_update_rejected")
+                          "wiki has no evidence windows": "wiki_no_evidence",
+                          "wiki forget pending": "wiki_forget_pending"}.get(reason, "wiki_update_rejected")
                     if isinstance(exc, WikiError) else "internal_error")
             self._stage(source_id, version, "failed", code)
             raise WikiError("wiki update failed; retry available") from None

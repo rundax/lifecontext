@@ -59,6 +59,8 @@ _WIKI_STEPS = {
     "wiki_no_evidence": "The document has no readable text to summarise and a retry does not change that; check the extraction with: lifecontext documents show {source_id}",
     "wiki_update_rejected": "The page failed its checks; run: lifecontext documents retry {source_id}",
     "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
+    # A retry fails the same way while the forget runs; a forgotten document gets no page.
+    "wiki_forget_pending": "A forget of this document is still running, so it gets no wiki page; if that forget fails, run: lifecontext documents retry {source_id}",
     # The stage completed; only the page's model summary is missing.
     "wiki_summary_missing": "The page has no model summary; run: lifecontext documents retry {source_id}",
     # The stage completed from the windows that validated; a retry asks only for the others.

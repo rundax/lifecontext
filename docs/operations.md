@@ -473,9 +473,11 @@ a fresh key for every deliberate new attempt.
 A wiki stage that failed keeps its reason as the stage's error code:
 `wiki_provider_failed` (the model call failed), `wiki_update_rejected` (the page
 failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
-`wiki_evidence_limit` (one passage is too large for a model request) and
-`wiki_no_evidence` (the document has no text to summarise). The last two come back
-the same way on every retry, so their `next_step` suggests none. Any other failure
+`wiki_evidence_limit` (one passage is too large for a model request),
+`wiki_no_evidence` (the document has no text to summarise) and `wiki_forget_pending`
+(a forget of the document was running; it gets no page unless that forget fails).
+`wiki_evidence_limit` and `wiki_no_evidence` come back the same way on every retry, so
+their `next_step` suggests none. Any other failure
 inside LifeContext reports `internal_error`. A wiki stage that completed without
 some of its evidence windows (the model failed on them; see
 [Document OCR and standalone wiki refresh](#document-ocr-and-standalone-wiki-refresh)) is listed in `problems` as
@@ -674,6 +676,7 @@ test fails when the two differ).
 - `wiki_provider_failed`: The model did not answer while the document's wiki page was compiled. Next: check the model with `lifecontext doctor --model-probe`, then run `lifecontext documents retry SOURCE_ID`.
 - `wiki_update_rejected`: The compiled wiki page failed its checks and was not saved. Next: run `lifecontext documents retry SOURCE_ID`.
 - `wiki_interrupted`: An earlier wiki run for the document stopped part-way. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_forget_pending`: A forget of the document was still running, so its wiki page was not compiled. Next: wait for the forget (`lifecontext operations list`); a forgotten document gets no page, and if the forget failed, run `lifecontext documents retry SOURCE_ID`.
 - `wiki_windows_skipped`: The wiki page was published without the parts of the document the model failed on. Next: run `lifecontext documents retry SOURCE_ID`; it asks only for those parts.
 - `wiki_evidence_limit`: One passage of the document is too large for a single model request, so a retry fails the same way. Next: import a version with shorter passages.
 - `wiki_no_evidence`: The document has no readable text to compile a wiki page from, so a retry fails the same way. Next: check what was read with `lifecontext documents show SOURCE_ID`.

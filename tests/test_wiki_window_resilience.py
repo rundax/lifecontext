@@ -10,6 +10,7 @@ import test_wiki_claims_per_window
 from wiki_fake_compiler import FakeCompiler
 
 from lifecontext.derived import WIKI_WINDOWS
+from lifecontext.documents import document_problems
 from lifecontext.wiki import (
     Citation,
     Claim,
@@ -163,6 +164,13 @@ class SkippedWindowTests(WindowFixture):
             fixture.update()
         self.assertFalse(catalog.source_withdrawn("doc_1", 1))
         self.assertEqual(asked, [0])
+        # Its own code: a retry while the forget runs would fail the same way.
+        stage = catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_forget_pending"))
+        [problem] = document_problems("doc_1", {name: catalog.get_document_stage("doc_1", 1, name) for name in
+                                                ("extraction", "indexing", "wiki", "projection")}, [])
+        self.assertEqual(problem["code"], "wiki_forget_pending")
+        self.assertIn("A forget of this document is still running", problem["next_step"])
         # A forget that failed hides nothing, so the document compiles again.
         catalog.transition_operation(forget["operation_id"], "running", "retryable_failed",
                                      result=forget["result"], error_code="provider_unavailable")

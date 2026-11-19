@@ -171,12 +171,12 @@ _OPERATION_ERROR_CODES = {
     "unsafe_permissions", "vault_unavailable", "internal_error",
     # Why a document's wiki stage failed; stored in the stage's error code.
     "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
-    "wiki_interrupted",
+    "wiki_interrupted", "wiki_forget_pending",
 }
 # Codes an earlier release rejects in a snapshot; a bundle carries ``reflect_failed`` for them.
 _WIKI_STAGE_CODES = frozenset({
     "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
-    "wiki_interrupted",
+    "wiki_interrupted", "wiki_forget_pending",
 })
 _OPERATION_RESULT_FIELDS = {
     "sources", "item_count", "size_bytes", "error_code", "recovery_intent"

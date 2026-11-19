@@ -463,6 +463,10 @@ _STAGE: dict[str, ErrorText] = {
     "wiki_update_rejected": ErrorText("The compiled wiki page failed its checks and was not saved.",
                                       _RETRY_DOCUMENT, True),
     "wiki_interrupted": ErrorText("An earlier wiki run for the document stopped part-way.", _RETRY_DOCUMENT, True),
+    "wiki_forget_pending": ErrorText("A forget of the document was still running, so its wiki page was not "
+                                     "compiled.", "wait for the forget (`lifecontext operations list`); a "
+                                     "forgotten document gets no page, and if the forget failed, "
+                                     + _RETRY_DOCUMENT),
     "wiki_windows_skipped": ErrorText("The wiki page was published without the parts of the document the model "
                                       "failed on.", _RETRY_DOCUMENT + "; it asks only for those parts", True),
     "wiki_evidence_limit": ErrorText("One passage of the document is too large for a single model request, so a "

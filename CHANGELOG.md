@@ -61,7 +61,10 @@
   correction is not asked again until the page has no valid window, the model
   or instructions change, or `documents retry --rerun-extraction` runs; when no
   window validates, the stage fails with the same codes as before. A compile
-  stops as soon as a forget or delete of its document starts. Each checked window is kept as soon as it is paid for,
+  stops as soon as a forget or delete of its document starts; a forget that is
+  still running leaves the stage failed with `wiki_forget_pending` (exported in
+  bundles as `reflect_failed`, which 1.2.0rc1 reads). Each checked window is kept
+  as soon as it is paid for,
   so a retry or `wiki rebuild` asks again only for windows that are missing,
   whose claims no longer check out, or after the model or the instructions
   changed. A quote now matches its passage once both are normalised (Unicode
