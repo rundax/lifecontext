@@ -5,12 +5,17 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 
-def atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
-    """Replace ``path`` with ``data`` through a synced temporary file in the same directory."""
+def atomic_write(path: Path, data: bytes, *, mode: int = 0o600,
+                 before_replace: Callable[[], None] | None = None) -> None:
+    """Replace ``path`` with ``data`` through a synced temporary file in the same directory.
+
+    ``before_replace`` runs just before the rename; raising there abandons the write.
+    """
     descriptor, staged = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as stream:
@@ -18,6 +23,8 @@ def atomic_write(path: Path, data: bytes, *, mode: int = 0o600) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(staged, path)
     except BaseException:
         try:
