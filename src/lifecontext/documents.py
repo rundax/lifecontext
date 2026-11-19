@@ -387,6 +387,10 @@ class DocumentService:
         old = operation["result"].get("recovery_intent")
         if not old:
             raise CatalogError("document intent unavailable")
+        if operation["state"] == "cancelled":
+            # Only a keyed retry cancels a document operation: retrying it retries the newer one.
+            operation = self.catalog.latest_document_operation(old["source_id"], old["source_version"])
+            old = operation["result"]["recovery_intent"]
         if self._running(operation, by_source=True):
             return self._response(operation)
         sid, version = old["source_id"], old["source_version"]
@@ -402,6 +406,15 @@ class DocumentService:
                 retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
                 if not retry["result"]:
                     retry = self.catalog.set_operation_intent(retry["operation_id"], self._envelope(old))
+                # The retry takes the work over, so startup recovery does not run the original again.
+                state = operation["state"]
+                if state == "running":
+                    # Left running by a stopped process; only a resting operation can be cancelled.
+                    state = self.catalog.transition_operation(
+                        operation["operation_id"], "running", "retryable_failed",
+                        result=self._envelope(old), error_code="internal_error")["state"]
+                self.catalog.transition_operation(operation["operation_id"], state, "cancelled",
+                                                  result=self._envelope(old))
                 return await self._run(retry)
             return await self.recover(operation)
         self._active(sid, version)

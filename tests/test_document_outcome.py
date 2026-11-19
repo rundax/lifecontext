@@ -513,6 +513,37 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(two["operation_id"], one["operation_id"])
         self.assertEqual(len(calls), 1)
 
+    async def test_a_restart_after_a_keyed_recovery_does_not_run_the_failed_import_again(self):
+        from lifecontext.application import JournalApplication
+
+        calls = self.flaky_wiki()
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        one = await self.service.retry(first["operation_id"], idempotency_key="retry-key")
+        self.assertEqual((len(calls), len(self.provider.calls)), (1, 2))
+        application = JournalApplication.__new__(JournalApplication)
+        application.catalog, application.documents = self.catalog, self.service
+        report = await application.recover_startup()
+        self.assertEqual((len(calls), len(self.provider.calls)), (1, 2))
+        self.assertEqual(report["examined"], 0)
+        # The original reads as cancelled; retrying it retries the operation that took it over.
+        self.assertEqual(application.operation_status(first["operation_id"])["state"], "cancelled")
+        again = await self.service.retry(first["operation_id"])
+        self.assertNotIn(again["operation_id"], {first["operation_id"], one["operation_id"]})
+        self.assertEqual(again["document"]["outcome"], "completed")
+        self.assertEqual((len(calls), len(self.provider.calls)), (2, 2))
+
+    async def test_a_keyed_recovery_of_an_import_left_running_takes_it_over(self):
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        # As after a stop mid-run: running, though no process runs it.
+        self.catalog.transition_operation(first["operation_id"], "retryable_failed", "running",
+                                          result=self.service._envelope(first["result"]["recovery_intent"]))
+        one = await self.service.retry(first["operation_id"], idempotency_key="retry-key")
+        self.assertEqual(one["state"], "completed")
+        self.assertEqual(self.catalog.get_operation(first["operation_id"])["state"], "cancelled")
+        self.assertEqual(self.catalog.list_recoverable_operations(), [])
+
     async def test_a_rerun_extraction_with_a_key_allocates_one_revision(self):
         first = await self.ingest()
         sid = first["document"]["source_id"]
