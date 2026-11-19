@@ -1275,13 +1275,14 @@ claim is rejected and asked again once. A quote is found in its cited passages b
 for byte, else once both are normalised (Unicode NFKC, any run of whitespace as one
 space, every quotation mark as `'` or `"`, every dash as `-`, no soft hyphens or
 other format characters, no hyphen breaking a word across lines), else, for a quote
-of at least 20 normalised characters, as the one span of those passages whose
+of 20 to 400 normalised characters, as the one span of those passages whose
 character trigrams are at least 85% alike (Dice) with its characters in the same
 order (85% by `difflib`) and no other span within 5 points of it. The near search
-covers passages of up to 60,000 characters, and one answer may normalise and search at
-most 400,000 characters in all (each cited passage once, each quote and claim, and a
-near search twice its passage); what is left over once that is spent is dropped as
-not found. The page stores
+covers passages of up to 60,000 characters. One answer may spend at most 400,000 units
+on matching: each cited passage normalised costs its length once, each quote and
+claim its length, and a near search twice its passage plus 40 units per quote
+character and the quote's length squared over 2,048 (its refinement and order check);
+a quote left over once that is spent is dropped as not found. The page stores
 the exact text of that span as the quote and the matching part of it as the claim,
 so a published claim and quote are always literal text of the extraction, and a
 paraphrase or reordered sentence is still rejected. For each dropped claim only its
@@ -1300,10 +1301,13 @@ still fails at the provider after its retries is skipped and the page publishes 
 the others, with the wiki stage `completed` and `wiki_windows_skipped` in `problems`
 until a retry fills it; after two windows in a row fail at the provider, the rest
 are skipped without asking. A window whose answer is rejected again after its
-correction is kept as rejected, not listed, and not asked again for the same key;
-when no window validates at all, the stage fails with the first window's code and a
-retry asks every window again. A compile stops, as a failed one, as soon as the
-document is forgotten or deleted: no later window is sent. A malformed or tampered
+correction is kept as rejected, not listed in `problems`, and not asked again for the
+same key. It is asked again when the page has no valid window at all (the stage then
+fails with the first window's code, and a retry asks every window again), when the
+model or the compile instructions change, or after `lifecontext documents retry
+SOURCE_ID --rerun-extraction`, which makes a new extraction revision. A compile stops,
+as a failed one, as soon as a forget or delete of the document starts: no further
+window request is sent, and an answer already on its way is not kept. A malformed or tampered
 `wiki-windows.json` counts as none. After the summary below, one
 routing request places the own page's checked claims on shared pages: the model
 sees the claims by number, a catalog of up to 300 existing `topic_`/`entity_`
@@ -1407,8 +1411,8 @@ effort, and private credential file. Compilation supplies bounded evidence
 and no tools; Hindsight recall/reflect remains available for retrieval. Each
 compile call has a 180-second deadline and closes its provider client. An evidence
 window request that timed out is asked again once; one that was rate limited (429),
-timed out at the server (408), hit a server error (5xx) or lost its connection is
-asked again up to three times, after 2, 4 and 8 seconds or the provider's
+timed out at the server (408), hit a server error (5xx), or could not connect (a
+connect timeout included) or lost its connection is asked again up to three times, after 2, 4 and 8 seconds or the provider's
 `Retry-After` up to 120 seconds (a longer `Retry-After` ends the retries); one
 compile asks again at most six times in all, and an auth error, bad request or
 unusable answer is not asked again. Before every attempt the document must still be

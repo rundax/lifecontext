@@ -47,8 +47,8 @@
   it used to stop at 32.
 - **One bad model answer no longer discards the wiki page.** An evidence
   window request that times out is asked again once; one that is rate limited
-  (429), times out at the server (408), hits a server error (5xx) or loses its
-  connection is asked again up to three times, after 2, 4 and 8 seconds or the
+  (429), times out at the server (408), hits a server error (5xx), cannot
+  connect or loses its connection is asked again up to three times, after 2, 4 and 8 seconds or the
   provider's `Retry-After` (up to 2 minutes; a longer wait ends the retries).
   One compile asks again at most six times, the document must still be there
   before every attempt, and an auth error, bad request or unusable answer, the
@@ -58,14 +58,15 @@
   `wiki_windows_skipped`; `documents retry SOURCE_ID` asks the model only for
   the skipped windows. After two windows in a row fail at the provider, the rest
   are skipped without asking. A window whose answer is rejected again after its
-  correction is not asked again; when no window validates, the stage fails with
-  the same codes as before. A compile stops as soon as its document is
-  forgotten or deleted. Each checked window is kept as soon as it is paid for,
+  correction is not asked again until the page has no valid window, the model
+  or instructions change, or `documents retry --rerun-extraction` runs; when no
+  window validates, the stage fails with the same codes as before. A compile
+  stops as soon as a forget or delete of its document starts. Each checked window is kept as soon as it is paid for,
   so a retry or `wiki rebuild` asks again only for windows that are missing,
   whose claims no longer check out, or after the model or the instructions
   changed. A quote now matches its passage once both are normalised (Unicode
   NFKC, whitespace, quotation marks, dashes, soft hyphens, words hyphenated
-  across lines) or, for a quote of at least 20 characters, when one passage
+  across lines) or, for a quote of 20 to 400 characters, when one passage
   span is nearly the same text in the same order; the page stores the exact
   text of the document either way, and a paraphrase is still rejected. The
   kind and reason of each claim that fails its checks are kept beside the
