@@ -107,6 +107,11 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("private-test-key", str(failure.exception))
             return failure.exception.retry
 
+    @staticmethod
+    def caused(error, cause):
+        error.__cause__ = cause
+        return error
+
     async def test_a_failure_says_whether_asking_again_may_help(self):
         cases = [
             (TimeoutError(), ("timeout", None)),
@@ -115,6 +120,13 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
             (StatusError(408), ("transient", None)),
             (StatusError(429, {"retry-after": "7"}), ("transient", 7.0)),
             (ConnectionResetError("reset"), ("transient", None)),
+            # A connect timeout is a failed connection, asked again up to three times, even inside
+            # an SDK error named after timeouts; a read timeout stays a timeout.
+            (type("ConnectTimeout", (Exception,), {})(), ("transient", None)),
+            (self.caused(type("APITimeoutError", (Exception,), {})(), type("ConnectTimeout", (Exception,), {})()),
+             ("transient", None)),
+            (self.caused(type("APITimeoutError", (Exception,), {})(), type("ReadTimeout", (Exception,), {})()),
+             ("timeout", None)),
             # A wait longer than the cap is not asked again.
             (StatusError(429, {"retry-after": "600"}), None),
             (StatusError(401), None),

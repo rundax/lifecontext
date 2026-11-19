@@ -503,26 +503,33 @@ def _retry_after(error: BaseException) -> float | None:
     return None
 
 
+# Failures to connect, which a connect timeout is too: asked again like a lost connection, not
+# like a timeout (httpx, the OpenAI and Anthropic SDKs, aiohttp for google-genai).
+_CONNECT_ERRORS = frozenset({"ConnectError", "ConnectTimeout", "APIConnectionError", "ClientConnectorError",
+                             "ServerDisconnectedError"})
+
+
 def compile_retry(error: BaseException) -> tuple[str, float | None] | None:
     """Whether asking again may fix a failed compile call: ``("timeout", None)`` after a timeout,
     ``("transient", wait)`` after a rate limit (429), request timeout (408), server error (5xx) or
-    lost connection, with the provider's Retry-After in seconds when it gave one; None when the
-    same request fails again (auth, bad request, unusable answer) or the provider asked for a wait
-    above _RETRY_AFTER_CAP. The error's text is read here but never returned."""
-    seen = set()
+    failed or lost connection, with the provider's Retry-After in seconds when it gave one; None
+    when the same request fails again (auth, bad request, unusable answer) or the provider asked
+    for a wait above _RETRY_AFTER_CAP. The error's text is read here but never returned."""
+    chain, seen = [], set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, TimeoutError) or "Timeout" in type(current).__name__:
-            return "timeout", None
-        status = _probe_status(current)
-        if type(current).__name__ == "ProviderRateLimitResetError" or status is not None:
-            if status is not None and status not in (408, 429) and status < 500:
-                return None
-            break
+        chain.append(current)
         current = current.__cause__ or current.__context__
-    else:
-        if probe_cause(error) != "unreachable":
+    statuses = [status for status in map(_probe_status, chain) if status is not None]
+    # A connect error first: its SDK wrapper may be named a timeout (APITimeoutError from ConnectTimeout).
+    if not any(isinstance(item, ConnectionError) or type(item).__name__ in _CONNECT_ERRORS for item in chain):
+        if any(isinstance(item, TimeoutError) or "Timeout" in type(item).__name__ for item in chain):
+            return "timeout", None
+        if statuses and statuses[0] not in (408, 429) and statuses[0] < 500:
+            return None  # auth, bad request, model not found: the same request fails again
+        if (not statuses and probe_cause(error) != "unreachable"
+                and not any(type(item).__name__ == "ProviderRateLimitResetError" for item in chain)):
             return None
     wait = _retry_after(error)
     return None if wait is not None and wait > _RETRY_AFTER_CAP else ("transient", wait)
