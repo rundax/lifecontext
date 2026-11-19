@@ -20,6 +20,7 @@ from lifecontext.wiki import (
     ERASED,
     USER_END,
     USER_START,
+    WikiError,
     WikiPatch,
     WikiRevisionStore,
     WikiService,
@@ -148,6 +149,26 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         with patch.object(self.app, "_retire_document_chunks", side_effect=retire_while_a_compile_ends):
             self.curate("forget", forgotten)
         self.assertFalse(path.exists())
+
+    def test_a_compile_during_a_forget_that_has_started_sends_nothing(self):
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        asked = len(self.compiler.queries["window"])
+        retire, outcomes = self.app._retire_document_chunks, []
+
+        async def compile_while_the_forget_waits(source_id, version, **kwargs):
+            # The forget is confirmed but the version is still recallable while Hindsight answers.
+            self.assertFalse(self.app.catalog.source_withdrawn(source_id, version))
+            try:
+                await self.app.wiki.update_for_document(source_id, version)
+                outcomes.append("compiled")
+            except WikiError:
+                outcomes.append("stopped")
+            await retire(source_id, version, **kwargs)
+
+        with patch.object(self.app, "_retire_document_chunks", side_effect=compile_while_the_forget_waits):
+            self.curate("forget", forgotten)
+        self.assertEqual(outcomes, ["stopped"])
+        self.assertEqual(len(self.compiler.queries["window"]), asked)
 
     def test_a_forgotten_document_takes_no_new_version(self):
         withdrawn = self.import_text("Secret notes.txt", "Coffee is a stimulant.", "x")

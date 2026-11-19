@@ -1751,9 +1751,14 @@ class WikiService:
         return await self._request(query, validate, source_id, version, extraction_revision, retry=True,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
 
+    def _leaving(self, source_id: str, version: int) -> bool:
+        """The version was forgotten or deleted, or a forget of the document has started (a delete
+        writes its tombstone first; a forget hides the versions only after the provider's chunks go)."""
+        return self.source_withdrawn(source_id, version) or self.catalog.forget_running(source_id)
+
     def _still_there(self, source_id: str, version: int) -> None:
-        """End the compile, as a failed one, once the document version was forgotten or deleted."""
-        if self.source_withdrawn(source_id, version):
+        """End the compile, as a failed one, once the document version is being forgotten or deleted."""
+        if self._leaving(source_id, version):
             raise WikiError("wiki evidence unavailable")
 
     @staticmethod
@@ -2340,7 +2345,7 @@ class WikiService:
                 self.derived.write_wiki_windows(source_id, version, json.loads(json.dumps({
                     "schema_version": 1, "original_sha256": evidence["original_checksum"],
                     "extraction_revision": extraction_revision, "windows": windows}, ensure_ascii=False)))
-                if self.source_withdrawn(source_id, version):
+                if self._leaving(source_id, version):
                     # Forgotten or deleted while the model was asked: what was just written goes too.
                     self.derived.remove_wiki_windows(source_id)
                     raise WikiError("wiki evidence unavailable")

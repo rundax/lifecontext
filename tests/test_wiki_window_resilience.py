@@ -144,6 +144,32 @@ class SkippedWindowTests(WindowFixture):
                 stage = fixture.catalog.get_document_stage("doc_1", 1, "wiki")
                 self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_update_rejected"))
 
+    def test_a_forget_that_started_stops_the_compile_until_it_fails(self):
+        fixture = self.pages(3)
+        catalog = fixture.catalog
+        prepared = catalog.begin_operation("prepare-forget", "a" * 64, "curation")
+        catalog.record_curation_history(prepared["operation_id"], "doc_1", 1, "prepare_forget")
+        forget = catalog.begin_operation("forget", "b" * 64, "curation")
+        forget = catalog.transition_operation(forget["operation_id"], "pending", "running", result=forget["result"])
+
+        def fail(data):
+            if data["evidence"]["segments"][0]["passage_index"] == 0:
+                # Confirmed while the model reads the first window; still recallable.
+                catalog.record_curation_history(forget["operation_id"], "doc_1", 1, "forget",
+                                                prepared_operation_id=prepared["operation_id"])
+
+        asked = self.asking(fixture, fail)
+        with self.assertRaises(WikiError):
+            fixture.update()
+        self.assertFalse(catalog.source_withdrawn("doc_1", 1))
+        self.assertEqual(asked, [0])
+        # A forget that failed hides nothing, so the document compiles again.
+        catalog.transition_operation(forget["operation_id"], "running", "retryable_failed",
+                                     result=forget["result"], error_code="provider_unavailable")
+        asked.clear()
+        fixture.update()
+        self.assertEqual(asked, [0, 1, 2])
+
     def test_a_retry_asks_only_for_the_skipped_window_and_fills_it(self):
         fixture, down = self.pages(4), [True]
 

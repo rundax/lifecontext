@@ -4315,6 +4315,21 @@ class LifeContextCatalog:
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 
+    def forget_running(self, source_id: str) -> bool:
+        """A confirmed forget of the source has started and has neither finished nor failed. Its
+        history is written with the confirmation, before any effect, while the versions stay
+        recallable until the provider's chunks are retired."""
+        _validate_identity(source_id, 1)
+        self._ensure_open()
+        try:
+            return self._connection.execute(
+                "SELECT 1 FROM curation_history AS h JOIN operations AS o ON o.operation_id=h.operation_id "
+                "WHERE h.source_id=? AND h.action='forget' AND o.state='running' LIMIT 1",
+                (source_id,),
+            ).fetchone() is not None
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
     def source_withdrawn(self, source_id: str, source_version: int | None = None) -> bool:
         """The version (by default the current one) was forgotten or deleted: the source
         has a tombstone, or the version can no longer be recalled (a document forget
