@@ -133,6 +133,22 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
         self.assertFalse((derived / deleted).exists())
         self.assertTrue((derived / kept / "v1" / "wiki-windows.json").is_file())
 
+    def test_windows_kept_by_a_compile_that_ends_during_the_forget_are_removed(self):
+        self.compiler.model = "fake-model"
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        record = self.app.derived.read_wiki_windows(forgotten, 1)
+        path = self.app.paths.lifeweave_home / "derived" / forgotten / "v1" / "wiki-windows.json"
+        retire = self.app._retire_document_chunks
+
+        async def retire_while_a_compile_ends(source_id, version, **kwargs):
+            await retire(source_id, version, **kwargs)
+            # A compile that started before the forget writes its windows now.
+            self.app.derived.write_wiki_windows(source_id, version, record)
+
+        with patch.object(self.app, "_retire_document_chunks", side_effect=retire_while_a_compile_ends):
+            self.curate("forget", forgotten)
+        self.assertFalse(path.exists())
+
     def test_a_forgotten_document_takes_no_new_version(self):
         withdrawn = self.import_text("Secret notes.txt", "Coffee is a stimulant.", "x")
         self.curate("forget", withdrawn)

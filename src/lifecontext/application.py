@@ -2630,14 +2630,16 @@ class JournalApplication:
             self.catalog.update_provider_chunk(chunk["provider_id"], expected_revision=chunk["revision"], submission_state="retired", completion_state="completed")
 
     async def _forget_document_chunks(self, source_id: str, manifests: list[SourceManifest]) -> None:
-        # Cached model readings and wiki windows (dropped claims too) are derived page content;
-        # they go with the source. A delete removes the windows again with the extractions.
+        # Cached model readings are derived page content; they go with the source.
         self.documents.forget_vision_cache(source_id)
-        self.derived.remove_wiki_windows(source_id)
         for manifest in manifests:
             self.wiki.mark_dependent_stale(source_id, manifest.source_version)
             await self._retire_document_chunks(source_id, manifest.source_version)
             self.catalog.set_provider_state(source_id, manifest.source_version, recall_visibility="not_visible")
+        # Kept wiki windows go once the versions can no longer be recalled: a compile that ends
+        # earlier would write them again, one that ends later finds the version withdrawn.
+        # A delete removes them again with the extractions.
+        self.derived.remove_wiki_windows(source_id)
         # Without a model: shared pages drop the source's claims and the index is
         # rebuilt; renderings already hide forgotten text.
         try:
