@@ -3,15 +3,25 @@
 Every agent gets a symlink to the one copy installed with the package, so an
 upgrade updates them all. A different entry at a link location is moved to a
 backup first; ``remove`` deletes only links that point at a LifeContext skill.
+
+With ``--instructions`` the same commands also manage one short marked block in
+the instruction file of Claude Code and Codex, so the agent checks LifeContext
+first. The begin marker carries the sha256 of the block text: a block whose text
+no longer matches was edited by the user and is never touched.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import stat
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+
+from lifecontext.paths import atomic_write
 
 SKILL_NAME = "personal-journal-operations"
 # Agent: (skills directory under HOME, directories whose presence means it is installed).
@@ -21,6 +31,28 @@ AGENTS = {
     "gemini": (".agents/skills", (".gemini", ".agents")),
     "hermes": (".hermes/skills/productivity", (".hermes",)),
 }
+
+INSTRUCTIONS = (
+    "LifeContext holds the user's own documents and notes (leases, contracts, insurance, tax and medical "
+    "letters, scans, journal).\n"
+    "Before answering a question about them, check LifeContext first with the `personal-journal-operations` "
+    "skill: `lifecontext wiki list`, then `lifecontext wiki show PAGE`, then `lifecontext recall --query \"...\"` "
+    "only if the page does not answer it (slow, one at a time).\n"
+    "Cite the title, the page when it has one, and the quote it returns. If LifeContext has nothing, say so "
+    "instead of guessing."
+)
+_BEGIN = "<!-- lifecontext:instructions:begin sha256="
+_END = "<!-- lifecontext:instructions:end -->"
+_BLOCK_RE = re.compile(re.escape(_BEGIN) + r"([0-9a-f]{64}) -->\n(.*?)\n" + re.escape(_END), re.DOTALL)
+MAX_INSTRUCTION_BYTES = 1024 * 1024
+
+
+def _digest(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def instructions_block() -> str:
+    return f"{_BEGIN}{_digest(INSTRUCTIONS)} -->\n{INSTRUCTIONS}\n{_END}"
 
 
 class SkillsError(RuntimeError):
@@ -71,8 +103,117 @@ def _backup_path(environ: Mapping[str, str], home: Path, agent: str) -> Path:
     return candidate
 
 
+def _instruction_file(home: Path, environ: Mapping[str, str], agent: str) -> Path | None:
+    if agent == "claude":
+        return home / ".claude" / "CLAUDE.md"
+    if agent == "codex":
+        return Path(environ.get("CODEX_HOME") or home / ".codex") / "AGENTS.md"
+    return None
+
+
+def _read_instruction_file(path: Path) -> tuple[str | None, Path, int]:
+    """The file's text (``None`` when it does not exist), the file to write and its mode.
+
+    A symlink (a dotfile manager) is followed to its target, which must be a regular
+    file of this user. Anything else, a large file or text that is not UTF-8 is refused.
+    """
+    target = path
+    if path.is_symlink():
+        try:
+            target = path.resolve(strict=True)
+        except OSError:
+            raise ValueError("dangling_symlink") from None
+    try:
+        info = target.stat()
+    except FileNotFoundError:
+        return None, target, 0o600
+    except OSError:
+        raise ValueError("unreadable") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("not_a_regular_file")
+    if info.st_uid != os.getuid():
+        raise ValueError("owned_by_another_user")
+    if info.st_size > MAX_INSTRUCTION_BYTES:
+        raise ValueError("too_large")
+    try:
+        return target.read_bytes().decode("utf-8"), target, stat.S_IMODE(info.st_mode)
+    except UnicodeDecodeError:
+        raise ValueError("not_utf8") from None
+    except OSError:
+        raise ValueError("unreadable") from None
+
+
+def _block_state(text: str) -> tuple[str, re.Match[str] | None]:
+    """``absent``, ``current``, ``outdated`` (our older text) or ``edited`` (never ours to change)."""
+    matches = list(_BLOCK_RE.finditer(text))
+    if text.count(_BEGIN) + text.count(_END) != 2 * len(matches) or len(matches) > 1:
+        return "edited", None
+    if not matches:
+        return "absent", None
+    found = matches[0]
+    if found.group(2) == INSTRUCTIONS and found.group(1) == _digest(INSTRUCTIONS):
+        return "current", found
+    if found.group(2) == INSTRUCTIONS or found.group(1) == _digest(found.group(2)):
+        return "outdated", found
+    return "edited", found
+
+
+def _without_block(text: str, found: re.Match[str]) -> str:
+    before, after = text[:found.start()], text[found.end():]
+    if after.startswith("\n"):
+        after = after[1:]
+        before = before[:-1] if before.endswith("\n\n") else before
+    elif before.endswith("\n\n"):
+        before = before[:-2]
+    return before + after
+
+
+def _instructions_item(agent: str, path: Path | None, command: str, dry_run: bool, can_create: bool = False) -> dict[str, Any]:
+    if path is None:
+        return {"agent": agent, "file": None, "state": "unsupported", "action": "none"}
+    item: dict[str, Any] = {"agent": agent, "file": str(path)}
+    try:
+        text, target, mode = _read_instruction_file(path)
+    except ValueError as exc:
+        return {**item, "state": "refused", "action": "refused", "reason": str(exc)}
+    state, found = _block_state(text or "")
+    item["state"] = state
+    new = None
+    if command == "check":
+        return item
+    if command == "remove":
+        item["action"] = {"absent": "none", "edited": "edited"}.get(state, "remove")
+        if item["action"] == "remove":
+            new = _without_block(text, found)
+    elif state == "absent" and text is None and not (path.parent.is_dir() or can_create):
+        item.update(state="no_directory", action="none")
+    else:
+        item["action"] = {"current": "none", "edited": "edited", "outdated": "update"}.get(state, "write")
+        if item["action"] == "update":
+            new = text[:found.start()] + instructions_block() + text[found.end():]
+        elif item["action"] == "write":
+            gap = "" if not text else "\n" if text.endswith("\n") else "\n\n"
+            new = (text or "") + gap + instructions_block() + ("\n" if not text or text.endswith("\n") else "")
+    if new is not None and not dry_run:
+        try:
+            atomic_write(target, new.encode(), mode=mode)
+        except OSError:
+            item.update(action="refused", reason="write_failed")
+    return item
+
+
+def _instructions(home: Path, environ: Mapping[str, str], agents: Iterable[str], command: str, dry_run: bool,
+                  creatable: Mapping[str, Path] | None = None) -> list[dict[str, Any]]:
+    items = []
+    for agent in agents:
+        path = _instruction_file(home, environ, agent)
+        can_create = path is not None and creatable is not None and path.parent in Path(creatable[agent]).parents
+        items.append(_instructions_item(agent, path, command, dry_run, can_create))
+    return items
+
+
 def install(home: Path, agents: list[str], *, dry_run: bool = False,
-            environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+            environ: Mapping[str, str] | None = None, instructions: bool = False) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     source = skill_source()
     if not (source / "SKILL.md").is_file():
@@ -96,16 +237,26 @@ def install(home: Path, agents: list[str], *, dry_run: bool = False,
             os.symlink(source, link)
         except OSError:
             raise SkillsError("link_failed") from None
-    return {"command": "install", "source": str(source), "dry_run": dry_run, "agents": items}
+    report = {"command": "install", "source": str(source), "dry_run": dry_run, "agents": items}
+    if instructions:
+        report["instructions"] = _instructions(home, environ, agents, "install", dry_run,
+                                               {item["agent"]: item["link"] for item in items})
+        report["ok"] = all(item["action"] != "refused" for item in report["instructions"])
+    return report
 
 
-def check(home: Path, agents: list[str]) -> dict[str, Any]:
+def check(home: Path, agents: list[str], *, instructions: bool = False,
+          environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     items = _plan(home, agents, skill_source())
-    return {"command": "check", "source": str(skill_source()), "dry_run": False, "agents": items,
-            "ok": all(item["state"] == "linked" for item in items)}
+    report = {"command": "check", "source": str(skill_source()), "dry_run": False, "agents": items,
+              "ok": all(item["state"] == "linked" for item in items)}
+    if instructions:
+        report["instructions"] = _instructions(home, os.environ if environ is None else environ, agents, "check", False)
+    return report
 
 
-def remove(home: Path, agents: list[str], *, dry_run: bool = False) -> dict[str, Any]:
+def remove(home: Path, agents: list[str], *, dry_run: bool = False, instructions: bool = False,
+           environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     items = _plan(home, agents, skill_source())
     for item in items:
         ours = item["state"] in {"linked", "stale_link"}
@@ -115,7 +266,35 @@ def remove(home: Path, agents: list[str], *, dry_run: bool = False) -> dict[str,
                 Path(item["link"]).unlink()
             except OSError:
                 raise SkillsError("unlink_failed") from None
-    return {"command": "remove", "source": str(skill_source()), "dry_run": dry_run, "agents": items}
+    report = {"command": "remove", "source": str(skill_source()), "dry_run": dry_run, "agents": items}
+    if instructions:
+        report["instructions"] = _instructions(home, os.environ if environ is None else environ, agents, "remove", dry_run)
+        report["ok"] = all(item["action"] != "refused" for item in report["instructions"])
+    return report
+
+
+def _render_instructions(report: Mapping[str, Any]) -> list[str]:
+    prefix = "would " if report["dry_run"] else ""
+    lines = []
+    for item in report["instructions"]:
+        agent, state, action = item["agent"], item["state"], item.get("action")
+        if state == "unsupported":
+            word = "none (this agent has no instruction file, so no block)"
+        elif report["command"] == "check":
+            word = {"current": "block present", "outdated": "block present (older text)",
+                    "absent": "block absent", "edited": "block edited by hand"}.get(state, f"refused ({item.get('reason')})")
+        elif action == "refused":
+            word = f"refused ({item['reason']})"
+        elif state == "no_directory":
+            word = "skip (its directory does not exist)"
+        elif action == "none":
+            word = "ok" if state == "current" else "skip (nothing to remove)"
+        elif action == "edited":
+            word = "edited by hand, left alone (delete the block yourself, or restore its text, then run again)"
+        else:
+            word = prefix + {"write": "add the block to", "update": "update the block in", "remove": "remove the block from"}[action]
+        lines.append(f"{agent:<7} instructions {word}" + (f": {item['file']}" if item["file"] else ""))
+    return lines
 
 
 def render(report: Mapping[str, Any]) -> str:
@@ -136,4 +315,6 @@ def render(report: Mapping[str, Any]) -> str:
             word = prefix + {"link": "link", "relink": "relink", "remove": "remove"}[action]
         lines.append(f"{item['agent']:<7} {word}: {item['link']}")
     lines.append(f"Skill: {report['source']}")
+    if "instructions" in report:
+        lines += _render_instructions(report)
     return "\n".join(lines)

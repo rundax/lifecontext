@@ -222,6 +222,9 @@ def _build_parser() -> argparse.ArgumentParser:
         _shared_options(command)
         command.add_argument("--agent", choices=("claude", "codex", "gemini", "hermes", "all"),
                              help="default: the agents found in this HOME (remove: all)")
+        command.add_argument("--instructions", action="store_true",
+                             help="also manage the short 'check LifeContext first' block in "
+                                  "~/.claude/CLAUDE.md and $CODEX_HOME/AGENTS.md (default ~/.codex/AGENTS.md)")
         if name != "check":
             command.add_argument("--dry-run", action="store_true", help="show what would change")
 
@@ -1514,11 +1517,11 @@ def _skills(args: argparse.Namespace) -> tuple[dict[str, object], str, int]:
     agents = skills.select_agents(home, args.agent or ("all" if args.skills_command == "remove" else None))
     try:
         if args.skills_command == "install":
-            report = skills.install(home, agents, dry_run=args.dry_run)
+            report = skills.install(home, agents, dry_run=args.dry_run, instructions=args.instructions)
         elif args.skills_command == "check":
-            report = skills.check(home, agents)
+            report = skills.check(home, agents, instructions=args.instructions)
         else:
-            report = skills.remove(home, agents, dry_run=args.dry_run)
+            report = skills.remove(home, agents, dry_run=args.dry_run, instructions=args.instructions)
     except skills.SkillsError as exc:
         raise CLIError(exc.code) from None
     return report, skills.render(report), 1 if report.get("ok") is False else 0
