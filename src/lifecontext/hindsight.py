@@ -12,6 +12,7 @@ import inspect
 import ipaddress
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -470,8 +472,90 @@ def _validated_profile_config(
     return result
 
 
+# The longest Retry-After a compile request waits for; a longer one is not asked again.
+_RETRY_AFTER_CAP = 120.0
+
+
+def _retry_after(error: BaseException) -> float | None:
+    """Seconds the provider asked to wait: a Retry-After header, or Hindsight's quota reset time."""
+    from datetime import UTC, datetime
+    from email.utils import parsedate_to_datetime
+
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        retry_at = getattr(current, "retry_at", None)
+        if isinstance(retry_at, datetime) and retry_at.tzinfo is not None:
+            return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+        headers = getattr(getattr(current, "response", None), "headers", None)
+        value = headers.get("retry-after") if hasattr(headers, "get") else None
+        if isinstance(value, str) and value.strip():
+            try:
+                return max(0.0, float(value))
+            except ValueError:
+                pass
+            try:
+                return max(0.0, (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds())
+            except (TypeError, ValueError):
+                return None
+        current = current.__cause__ or current.__context__
+    return None
+
+
+# Failures to connect, which a connect timeout is too: asked again like a lost connection, not
+# like a timeout (httpx, the OpenAI and Anthropic SDKs, aiohttp for google-genai).
+_CONNECT_ERRORS = frozenset({"ConnectError", "ConnectTimeout", "APIConnectionError", "ClientConnectorError",
+                             "ServerDisconnectedError"})
+
+
+def compile_retry(error: BaseException) -> tuple[str, float | None] | None:
+    """Whether asking again may fix a failed compile call: ``("timeout", None)`` after a timeout,
+    ``("transient", wait)`` after a rate limit (429), request timeout (408), server error (5xx) or
+    failed or lost connection, with the provider's Retry-After in seconds when it gave one; None
+    when the same request fails again (auth, bad request, unusable answer) or the provider asked
+    for a wait above _RETRY_AFTER_CAP. The error's text is read here but never returned.
+
+    The error and then what it was raised from (``raise ... from``, as the SDKs wrap transport
+    errors) are read in order, and the first that is a connect error, a timeout, another transport
+    error or an HTTP status decides; an error only raised while another was handled is not read,
+    so a 401 or an unusable answer stays permanent whatever came before it."""
+    transport = tuple(kind for kind in _transport_errors() if kind is not OSError)
+
+    def connect_error(item: BaseException | None) -> bool:
+        return isinstance(item, ConnectionError) or type(item).__name__ in _CONNECT_ERRORS
+
+    seen = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = _probe_status(current)
+        if connect_error(current) or isinstance(current, transport):
+            # An SDK timeout raised from a connect timeout is a failed connection.
+            if not connect_error(current) and "Timeout" in type(current).__name__:
+                return "timeout", None
+            break
+        if isinstance(current, TimeoutError) or "Timeout" in type(current).__name__:
+            if connect_error(current.__cause__):
+                break
+            return "timeout", None
+        if status is not None or type(current).__name__ == "ProviderRateLimitResetError":
+            if status is not None and status not in (408, 429) and status < 500:
+                return None  # auth, bad request, model not found: the same request fails again
+            break
+        current = current.__cause__
+    else:
+        return None
+    wait = _retry_after(error)
+    return None if wait is not None and wait > _RETRY_AFTER_CAP else ("transient", wait)
+
+
 def document_compiler(settings: Mapping[str, Any]):
-    """Compile supplied evidence with the same validated LLM, without memory search."""
+    """Compile supplied evidence with the same validated LLM, without memory search.
+
+    The returned function makes one attempt; its failure carries ``retry`` (see
+    ``compile_retry``). It names the model (``model``, part of the wiki's window cache key)
+    and can import the provider layer in the background (``warm``)."""
     try:
         required = llm_key_required(_validated_profile_settings(settings))
         config = _validated_profile_config(settings, load_credentials(require_llm_key=required))
@@ -505,8 +589,11 @@ def document_compiler(settings: Mapping[str, Any]):
                     raise ValueError("invalid document model response")
                 fenced = re.fullmatch(r"\s*```(?:json)?[ \t]*\r?\n(.*?)\r?\n```\s*", text, re.DOTALL)
                 return {"text": fenced.group(1) if fenced else text}
-        except Exception:  # noqa: BLE001 -- never expose provider messages or credentials
-            raise HindsightStartupError("document_generation_failed") from None
+        except Exception as exc:  # noqa: BLE001 -- never expose provider messages or credentials
+            # The caller decides whether to ask again (the wiki checks the document first).
+            failure = HindsightStartupError("document_generation_failed")
+            failure.retry = compile_retry(exc)
+            raise failure from None
         finally:
             if provider is not None:
                 try:
@@ -514,6 +601,22 @@ def document_compiler(settings: Mapping[str, Any]):
                 except Exception:  # noqa: BLE001, S110 -- cleanup must not expose provider errors
                     pass
 
+    def warm() -> threading.Thread:
+        """Import the provider layer in a daemon thread: it takes minutes on a slow host, and the
+        first compile would otherwise pay for it. Never blocks or raises; a failed import is
+        repeated, and reported, by the first compile."""
+        def load() -> None:
+            try:
+                importlib.import_module("hindsight_api.engine.llm_wrapper")
+            except Exception as exc:  # noqa: BLE001 -- the first compile imports it again
+                logging.getLogger(__name__).warning("Model client preload failed: %s", type(exc).__name__)
+
+        thread = threading.Thread(target=load, name="lifecontext-model-preload", daemon=True)
+        thread.start()
+        return thread
+
+    compile_document.model = config["HINDSIGHT_API_LLM_MODEL"]
+    compile_document.warm = warm
     return compile_document
 
 

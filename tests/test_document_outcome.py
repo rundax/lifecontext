@@ -130,6 +130,92 @@ class DocumentOutcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(after.summary)
         self.assertEqual(len(projected), 2)
 
+    def window_service(self, ask):
+        """A document service whose wiki compiles with ``ask`` and reports its skipped windows."""
+        wiki = WikiService(self.catalog, self.custody, DerivedStore(self.paths), self.provider, self.paths, compiler=ask)
+
+        async def update(document):
+            await wiki.update_for_document(document["source_id"], document["source_version"])
+            return {"state": "completed"}
+
+        service = DocumentService(self.catalog, self.custody, DerivedStore(self.paths), self.provider,
+                                  wiki_hook=update, wiki_summary_hook=wiki.summary_missing,
+                                  wiki_summary_retry_hook=wiki.write_missing_summary,
+                                  wiki_window_hook=wiki.window_report,
+                                  projection_hook=lambda document: {"state": "completed"})
+        return service, wiki
+
+    async def test_skipped_windows_are_listed_and_a_retry_asks_only_for_them(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        compiler, down = FakeCompiler({}), [True]
+        compiler.model = "fake-model"
+
+        async def ask(query, **kwargs):
+            if down[0] and "Part 2 holds." in query and "evidence" in json.loads(query.split("UNTRUSTED_DATA=", 1)[1]):
+                raise ConnectionError("model unreachable")
+            return await compiler(query, **kwargs)
+
+        ask.model = compiler.model
+        service, wiki = self.window_service(ask)
+        # Four lines of 20 KB: one evidence window each.
+        text = "".join(f"Part {n} holds. " + "x" * 20_000 + "\n" for n in range(1, 5)).encode()
+        result = await service.import_document(text, "parts.txt", "text/plain", {}, "parts")
+        document = result["document"]
+        sid = document["source_id"]
+        self.assertEqual(document["stages"]["wiki"]["state"], "completed")
+        self.assertEqual(document["outcome"], "completed_with_errors")
+        self.assertEqual(document["problems"], [{
+            "stage": "wiki", "code": "wiki_windows_skipped", "reason": "wiki_windows_skipped",
+            "next_step": ("The page leaves out parts of the document the model failed on; run: "
+                          f"lifecontext documents retry {sid}")}])
+        self.assertEqual(_document(document).problems[0].code, "wiki_windows_skipped")
+        self.assertEqual(service.operation_outcome(self.catalog.get_operation(result["operation_id"])),
+                         "completed_with_errors")
+
+        def parts():
+            return sorted(claim.text for claim in wiki.store.read(*self.revision(sid)).claims)
+
+        self.assertEqual(parts(), ["Part 1 holds.", "Part 3 holds.", "Part 4 holds."])
+        windows = len(compiler.queries["window"])
+        down[0] = False
+        retried = await service.retry(sid)
+        document = retried["document"]
+        self.assertEqual((document["outcome"], document["problems"]), ("completed", []))
+        self.assertEqual(parts(), ["Part 1 holds.", "Part 2 holds.", "Part 3 holds.", "Part 4 holds."])
+        # Only the skipped window was asked again; the others came from the kept windows.
+        self.assertEqual(len(compiler.queries["window"]), windows + 1)
+
+    def revision(self, sid):
+        page = self.catalog.get_wiki_page(source_page_id(sid))
+        row = self.catalog.get_wiki_revision(page["page_id"], page["current_revision"])
+        return page["page_id"], page["current_revision"], row["artifact_sha256"]
+
+    async def test_dropped_claims_are_counted_in_documents_show(self):
+        from wiki_fake_compiler import FakeCompiler
+
+        compiler = FakeCompiler({})
+        original = compiler.window
+
+        def window(data):
+            answer = original(data)
+            invented = {**answer["claims"][0], "text": "An invented claim the document never makes."}
+            answer["claims"] = [*answer["claims"], invented]
+            return answer
+
+        compiler.window = window
+        service, _ = self.window_service(compiler)
+        result = await service.import_document(b"Rent is 900 euros. It is due monthly.", "rent.txt", "text/plain", {},
+                                               "rent")
+        document = result["document"]
+        self.assertEqual((document["outcome"], document["problems"]), ("completed", []))
+        self.assertEqual(document["wiki_dropped_claims"], 1)
+        self.assertEqual(_document(document).wiki_dropped_claims, 1)
+        self.assertNotIn("invented", json.dumps(_document(document).model_dump(mode="json")))
+        record = DerivedStore(self.paths).read_wiki_windows(document["source_id"], 1)
+        [entry] = record["windows"].values()
+        self.assertEqual([item["reason"] for item in entry["dropped"]], ["claim_not_in_quote"])
+
     async def test_a_page_in_review_conflict_is_not_flagged_and_its_retry_asks_no_summary(self):
         from wiki_fake_compiler import FakeCompiler
 

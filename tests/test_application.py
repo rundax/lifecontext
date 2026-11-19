@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
@@ -1246,6 +1246,20 @@ class JournalApplicationTests(unittest.TestCase):
         self.assertEqual(report["completed"], 1)
         self.assertNotIn(original.decode(), repr(report))
         self.assertNotIn(original.decode(), repr(self.app.operation_status(operation["operation_id"])))
+
+    def test_startup_starts_the_model_client_preload(self) -> None:
+        self.app.close()
+        compiler = Mock()
+        self.vault = ManagedVault(self.vault_root, self.journal)
+        self.app = JournalApplication(paths=self.paths, hindsight=self.adapter, vault=self.vault, compiler=compiler)
+        asyncio.run(self.app.recover_startup())
+        compiler.warm.assert_called_once_with()
+        # A preload that cannot start (no thread available) never fails startup.
+        compiler.warm.side_effect = RuntimeError("can't start new thread")
+        with self.assertLogs("lifecontext.application", "WARNING") as logged:
+            report = asyncio.run(self.app.recover_startup())
+        self.assertEqual(report["examined"], 0)
+        self.assertEqual(logged.output, ["WARNING:lifecontext.application:Model client preload not started: RuntimeError"])
 
     def test_startup_reconciles_running_delete_from_tombstones_without_second_delete(self) -> None:
         source_id = "src_delete_recovery"

@@ -161,6 +161,7 @@ class JournalApplication:
             wiki_hook=self._update_document_wiki,
             wiki_summary_hook=self.wiki.summary_missing,
             wiki_summary_retry_hook=self.wiki.write_missing_summary,
+            wiki_window_hook=self.wiki.window_report,
             projection_hook=lambda document: self.document_projections.project_document_with_wiki(document["source_id"], document["source_version"]),
             completion_hook=self._retire_superseded_document_versions,
             tesseract_path=shutil.which("tesseract"),
@@ -647,6 +648,13 @@ class JournalApplication:
 
     async def recover_startup(self, *, limit: int = 100) -> dict[str, int]:
         """Resume bounded local work and reconcile interrupted external effects."""
+        # The first compile, perhaps one this recovery resumes, then finds the provider layer loaded.
+        warm = getattr(self.compiler, "warm", None)
+        if callable(warm):
+            try:
+                warm()
+            except Exception as exc:  # noqa: BLE001 -- a preload that cannot start never stops the service
+                logging.getLogger(__name__).warning("Model client preload not started: %s", type(exc).__name__)
         try:
             operations = self.catalog.list_recoverable_operations(limit=limit)
         except CatalogError:
@@ -2631,6 +2639,10 @@ class JournalApplication:
             self.wiki.mark_dependent_stale(source_id, manifest.source_version)
             await self._retire_document_chunks(source_id, manifest.source_version)
             self.catalog.set_provider_state(source_id, manifest.source_version, recall_visibility="not_visible")
+        # Kept wiki windows go once the versions can no longer be recalled: a compile that ends
+        # earlier would write them again, one that ends later finds the version withdrawn.
+        # A delete removes them again with the extractions.
+        self.derived.remove_wiki_windows(source_id)
         # Without a model: shared pages drop the source's claims and the index is
         # rebuilt; renderings already hide forgotten text.
         try:

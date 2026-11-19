@@ -109,7 +109,7 @@ class DocumentSnapshotCatalogTests(unittest.TestCase):
             "unsafe_permissions", "vault_unavailable", "internal_error",
         }
         codes = ("wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
-                 "wiki_interrupted", "internal_error")
+                 "wiki_interrupted", "wiki_forget_pending", "internal_error")
         for number, code in enumerate(codes, 1):
             manifest = self.document(f"doc_{number}")
             self.source.transition_document_stage(manifest.source_id, 1, "wiki", expected_state="pending", expected_revision=1, state="running")
@@ -119,7 +119,8 @@ class DocumentSnapshotCatalogTests(unittest.TestCase):
         self.assertEqual(len(exported), len(codes))
         self.assertLessEqual(set(exported.values()), earlier)
         self.assertEqual(exported["doc_1"], "reflect_failed")
-        self.assertEqual(exported["doc_6"], "internal_error")
+        self.assertEqual(exported["doc_6"], "reflect_failed")
+        self.assertEqual(exported["doc_7"], "internal_error")
         # The stored stage keeps the precise code.
         self.assertEqual(self.source.get_document_stage("doc_1", 1, "wiki")["error_code"], "wiki_provider_failed")
 

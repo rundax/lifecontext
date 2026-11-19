@@ -98,12 +98,29 @@ class ClaimsPerWindowTests(unittest.TestCase):
         self.assertNotIn("A paraphrase the page never says.", [claim.text for claim in claims])
         self.assertEqual(fixture.catalog.get_document_stage("doc_1", 1, "wiki")["state"], "completed")
 
-    def test_a_quote_the_page_does_not_hold_byte_for_byte_is_dropped(self):
+    def test_a_quote_differing_only_in_spacing_is_stored_as_the_page_text(self):
+        fixture = self.fixture(pages=10, sentences=1, filler=900)
+        exact = []
+
+        def change(answer, data):
+            claim = answer["claims"][0]
+            exact.append(claim["citations"][0]["quote"])
+            citation = {**claim["citations"][0], "quote": claim["citations"][0]["quote"].replace(" ", "  ", 1)}
+            answer["claims"][0] = {**claim, "text": citation["quote"], "citations": [citation]}
+            return answer
+
+        self.altered(fixture, change)
+        fixture.update()
+        claims = fixture.current().claims
+        self.assertEqual(len(claims), 4)
+        self.assertEqual((claims[0].text, claims[0].citations[0].quote), (exact[0], exact[0]))
+
+    def test_a_quote_with_other_words_is_dropped(self):
         fixture = self.fixture(pages=10, sentences=1, filler=900)
 
         def change(answer, data):
             claim = answer["claims"][0]
-            citation = {**claim["citations"][0], "quote": claim["citations"][0]["quote"].replace(" ", "  ", 1)}
+            citation = {**claim["citations"][0], "quote": claim["citations"][0]["quote"].replace("holds", "fails")}
             answer["claims"][0] = {**claim, "text": citation["quote"], "citations": [citation]}
             return answer
 

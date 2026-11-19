@@ -171,12 +171,12 @@ _OPERATION_ERROR_CODES = {
     "unsafe_permissions", "vault_unavailable", "internal_error",
     # Why a document's wiki stage failed; stored in the stage's error code.
     "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
-    "wiki_interrupted",
+    "wiki_interrupted", "wiki_forget_pending",
 }
 # Codes an earlier release rejects in a snapshot; a bundle carries ``reflect_failed`` for them.
 _WIKI_STAGE_CODES = frozenset({
     "wiki_provider_failed", "wiki_update_rejected", "wiki_evidence_limit", "wiki_no_evidence",
-    "wiki_interrupted",
+    "wiki_interrupted", "wiki_forget_pending",
 })
 _OPERATION_RESULT_FIELDS = {
     "sources", "item_count", "size_bytes", "error_code", "recovery_intent"
@@ -4312,6 +4312,21 @@ class LifeContextCatalog:
                     raise CatalogError("source version not registered")
         except CatalogError:
             raise
+        except sqlite3.Error:
+            raise CatalogError("catalog operation failed") from None
+
+    def forget_running(self, source_id: str) -> bool:
+        """A confirmed forget of the source has started and has neither finished nor failed. Its
+        history is written with the confirmation, before any effect, while the versions stay
+        recallable until the provider's chunks are retired."""
+        _validate_identity(source_id, 1)
+        self._ensure_open()
+        try:
+            return self._connection.execute(
+                "SELECT 1 FROM curation_history AS h JOIN operations AS o ON o.operation_id=h.operation_id "
+                "WHERE h.source_id=? AND h.action='forget' AND o.state='running' LIMIT 1",
+                (source_id,),
+            ).fetchone() is not None
         except sqlite3.Error:
             raise CatalogError("catalog operation failed") from None
 

@@ -381,6 +381,10 @@ class PlainRendererSnapshotTests(unittest.TestCase):
              "next_step": f"Run: lifecontext documents retry {DOC_ID}"}]}
         self.assertTrue(self.plain(["documents", "show", DOC_ID], summary).endswith(
             f"Problems:\n- wiki: wiki_summary_missing\nNext: Run: lifecontext documents retry {DOC_ID}.\n"))
+        # Claims the quote check dropped are counted on one line; their text is never shown.
+        dropped = {**COMPLETE_DOCUMENT, "wiki_dropped_claims": 2}
+        self.assertIn("\nWiki claims dropped by the quote check: 2\n", self.plain(["documents", "show", DOC_ID], dropped))
+        self.assertNotIn("dropped", self.plain(["documents", "show", DOC_ID], {**dropped, "wiki_dropped_claims": 0}))
         # Still running: nothing failed yet, so look again rather than retry.
         running = {**COMPLETE_DOCUMENT, "outcome": "running", "stages": {
             **COMPLETE_DOCUMENT["stages"], "wiki": stage("running")}}

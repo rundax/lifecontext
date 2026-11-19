@@ -52,6 +52,38 @@
   not read. The `index` page links as many documents as fit (up to 128 links and
   48 KB), then says "And N more" and points to `lifecontext documents list`;
   it used to stop at 32.
+- **One bad model answer no longer discards the wiki page.** An evidence
+  window request that times out is asked again once; one that is rate limited
+  (429), times out at the server (408), hits a server error (5xx), cannot
+  connect or loses its connection is asked again up to three times, after 2, 4 and 8 seconds or the
+  provider's `Retry-After` (up to 2 minutes; a longer wait ends the retries).
+  One compile asks again at most six times, the document must still be there
+  before every attempt, and an auth error, bad request or unusable answer, the
+  summary and routing requests, and category suggestions are not asked again.
+  An evidence window that still fails at the provider is skipped and the page
+  publishes from the others: the wiki stage is `completed` and `problems` lists
+  `wiki_windows_skipped`; `documents retry SOURCE_ID` asks the model only for
+  the skipped windows. After two windows in a row fail at the provider, the rest
+  are skipped without asking. A window whose answer is rejected again after its
+  correction is not asked again until the page has no valid window, the model
+  or instructions change, or `documents retry --rerun-extraction` runs; when no
+  window validates, the stage fails with the same codes as before. A compile
+  stops as soon as a forget or delete of its document starts; a forget that is
+  still running leaves the stage failed with `wiki_forget_pending` (exported in
+  bundles as `reflect_failed`, which 1.2.0rc1 reads). Each checked window is kept
+  as soon as it is paid for,
+  so a retry or `wiki rebuild` asks again only for windows that are missing,
+  whose claims no longer check out, or after the model or the instructions
+  changed. A quote now matches its passage once both are normalised (Unicode
+  NFKC, whitespace, quotation marks, dashes, soft hyphens, words hyphenated
+  across lines) or, for a quote of 20 to 400 characters, when one passage
+  span is nearly the same text in the same order; the page stores the exact
+  text of the document either way, and a paraphrase is still rejected. The
+  kind and reason of each claim that fails its checks are kept beside the
+  extraction (never its text), removed on forget and delete, and counted in
+  `documents show` (`wiki_dropped_claims`). The service starts importing the
+  model client in the background when it starts, so the first compile starts
+  sooner; a compile that starts during the import waits for it.
 - **A stray file can no longer freeze the vault.** A `.DS_Store` or an image
   in `Journal/wiki/` used to make every vault write fail with
   `unsafe_permissions`. LifeContext now checks only the path it reads or
@@ -133,6 +165,15 @@
     operation's own timestamps, so 1.2.0rc1 still reads the rows.
   - Exported bundles write the older `reflect_failed` code for the new wiki
     failure codes, so an older release can read them.
+  - Kept wiki windows (with their checked claims, quoted from the document) and
+    the reasons of dropped claims live in `wiki-windows.json` next to a
+    version's extractions under `~/.lifeweave/derived/`. 1.2.0rc1 ignores the
+    file and still removes it when a document is deleted, but not when one is
+    forgotten; the extraction it sits beside stays after a forget anyway, but
+    delete the file by hand after forgetting a document under 1.2.0rc1 if its
+    quotes must go too. 1.2.0rc1 does not list
+    `wiki_windows_skipped` and does not re-run a page that skipped windows;
+    `wiki rebuild --source-id` compiles it again.
 
 - **Breaking: no default model.** `lifecontext init` and `install.sh` no
   longer default to a provider or model. With a terminal both show a provider

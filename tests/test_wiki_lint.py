@@ -317,6 +317,7 @@ class WikiReviewQueueTests(WikiFixture):
         app = JournalApplication.__new__(JournalApplication)
         app.catalog = self.catalog
         app.wiki = self.service
+        app.compiler = None
         return app
 
     def review(self):
