@@ -2430,6 +2430,7 @@ class WikiService:
             self._validate(patch)
             patch = await self._with_summary(patch, source_id, version, extraction_revision)
             routes = await self._route(patch, source_id, version, extraction_revision)
+            self._still_there(source_id, version)  # the optional summary and routing handlers can swallow the forget check
             results = self._publish(patch, routes, source_id, version, own_links)
         except Exception as exc:  # noqa: BLE001 -- provider failures must leave retryable stage
             reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__

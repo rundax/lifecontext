@@ -178,6 +178,34 @@ class SkippedWindowTests(WindowFixture):
         fixture.update()
         self.assertEqual(asked, [0, 1, 2])
 
+    def test_a_forget_that_starts_during_the_routing_request_fails_the_compile_unpublished(self):
+        fixture = self.pages(2)
+        catalog = fixture.catalog
+        prepared = catalog.begin_operation("prepare-forget", "a" * 64, "curation")
+        catalog.record_curation_history(prepared["operation_id"], "doc_1", 1, "prepare_forget")
+        forget = catalog.begin_operation("forget", "b" * 64, "curation")
+        forget = catalog.transition_operation(forget["operation_id"], "pending", "running", result=forget["result"])
+        compiler, others = fixture.service.compiler, []
+
+        async def ask(query, **kwargs):
+            answer = await compiler(query, **kwargs)
+            if "UNTRUSTED_DATA=" in query and "evidence" not in data_of(query):
+                others.append(query)
+                if len(others) == 2:
+                    # Confirmed while the routing request is in flight; the summary request came first.
+                    catalog.record_curation_history(forget["operation_id"], "doc_1", 1, "forget",
+                                                    prepared_operation_id=prepared["operation_id"])
+            return answer
+
+        ask.model = compiler.model
+        fixture.service.compiler = ask
+        with self.assertRaises(WikiError):
+            fixture.update()
+        self.assertEqual(len(others), 2)
+        stage = catalog.get_document_stage("doc_1", 1, "wiki")
+        self.assertEqual((stage["state"], stage["error_code"]), ("failed", "wiki_forget_pending"))
+        self.assertIsNone(catalog.get_wiki_page(PAGE))
+
     def test_a_retry_asks_only_for_the_skipped_window_and_fills_it(self):
         fixture, down = self.pages(4), [True]
 
