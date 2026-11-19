@@ -352,10 +352,49 @@ class InstructionsTests(unittest.TestCase):
         self.claude.unlink()
         self.claude.symlink_to(self.claude.parent / "other")
         (self.claude.parent / "other").symlink_to(self.claude)
-        self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "symlink_loop")
+        self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "symlink_chain")
         self.claude.unlink()
         os.mkfifo(self.claude)
         self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "not_a_regular_file")
+
+    def test_a_symlink_chain_and_a_target_in_an_untrusted_directory_are_refused(self) -> None:
+        target = self.home / "dotfiles" / "CLAUDE.md"
+        self.put(target, "mine\n")
+        self.claude.parent.mkdir()
+        (self.home / "hop").symlink_to(target)
+        self.claude.symlink_to(self.home / "hop")
+        self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "symlink_chain")
+        self.claude.unlink()
+        self.claude.symlink_to(os.path.relpath(target, self.claude.parent))
+        target.parent.chmod(0o777)
+        self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "directory_not_trusted")
+        target.parent.chmod(0o755)
+        self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["action"], "write")
+        self.assertEqual(target.read_text(), "mine\n\n" + instructions_block() + "\n")
+
+    def test_an_unreadable_location_is_refused_and_never_stops_the_other_agents(self) -> None:
+        self.put(self.codex, "# codex\n")
+        self.run_install(agents=("codex",))
+        # ~/.claude is a regular file here.
+        self.claude.parent.write_text("not a directory")
+        report = remove(self.home, ["claude", "codex"], instructions=True, environ=self.environ)
+        self.assertEqual([item.get("reason") or item["action"] for item in report["instructions"]], ["unreadable", "remove"])
+        self.assertEqual(self.codex.read_text(), "# codex\n")
+        self.assertEqual(self.claude.parent.read_text(), "not a directory")
+        # ~/.claude cannot be searched.
+        self.claude.parent.unlink()
+        self.claude.parent.mkdir()
+        self.claude.parent.chmod(0)
+        self.addCleanup(self.claude.parent.chmod, 0o700)
+        self.run_install(agents=("codex",))
+        # (install would stop earlier, linking the skill into the same directory.)
+        for call in (lambda: {"instructions": skills_module._instructions(
+                         self.home, self.environ, ["claude", "codex"], "install", False)},
+                     lambda: check(self.home, ["claude", "codex"], instructions=True, environ=self.environ),
+                     lambda: remove(self.home, ["claude", "codex"], instructions=True, environ=self.environ)):
+            report = call()
+            self.assertEqual(report["instructions"][0]["reason"], "unreadable")
+        self.assertEqual(self.codex.read_text(), "# codex\n")
 
     def test_a_file_changed_while_we_prepare_the_write_is_kept(self) -> None:
         self.put(self.claude, "mine\n")
@@ -371,9 +410,10 @@ class InstructionsTests(unittest.TestCase):
         self.assertEqual(self.claude.read_text(), "typed in an editor meanwhile\n")
         self.assertEqual(sorted(set(os.listdir(self.claude.parent)) - {"skills"}), ["CLAUDE.md"])
 
-    def test_a_relative_codex_home_becomes_absolute_and_setuid_bits_are_dropped(self) -> None:
+    def test_a_relative_codex_home_is_refused_and_setuid_bits_are_dropped(self) -> None:
         report = install(self.home, ["codex"], environ={"CODEX_HOME": "relative-codex"}, instructions=True)
-        self.assertTrue(os.path.isabs(report["instructions"][0]["file"]))
+        self.assertEqual(report["instructions"][0]["reason"], "codex_home_not_absolute")
+        self.assertFalse(report["ok"])
         self.put(self.claude, "x\n")
         self.claude.chmod(0o4644)
         self.run_install(agents=("claude",))

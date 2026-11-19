@@ -12,7 +12,6 @@ no longer matches was edited by the user and is never touched.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import os
 import re
@@ -112,17 +111,20 @@ def _instruction_file(home: Path, environ: Mapping[str, str], agent: str) -> Pat
     if agent == "claude":
         return home / ".claude" / "CLAUDE.md"
     if agent == "codex":
-        return Path(environ.get("CODEX_HOME") or home / ".codex").absolute() / "AGENTS.md"
+        return Path(environ.get("CODEX_HOME") or home / ".codex") / "AGENTS.md"
     return None
 
 
 def _read_instruction_file(path: Path) -> tuple[str | None, Path, int, tuple[int, int, int] | None]:
     """The file's text (``None`` when it does not exist), the file to write, its mode and a signature of what was read.
 
-    The directory must be ours and not world-writable. A symlink (a dotfile manager) is followed
-    to its target when the link is ours; the target must be a regular, writable file of this user.
+    The path must be absolute and its directory ours and not world-writable. A symlink (a dotfile manager)
+    is followed one hop when the link is ours; the target, in a directory with the same checks, must be a
+    regular, writable file of this user.
     Anything else, a large file or text that is not UTF-8 is refused.
     """
+    if not path.is_absolute():
+        raise ValueError("codex_home_not_absolute")
     try:
         directory = path.parent.stat()
     except FileNotFoundError:
@@ -134,16 +136,22 @@ def _read_instruction_file(path: Path) -> tuple[str | None, Path, int, tuple[int
     target = path
     try:
         link = os.lstat(path)
+        if stat.S_ISLNK(link.st_mode):
+            if link.st_uid != os.getuid():
+                raise ValueError("symlink_not_yours")
+            # One hop only: the target is a file, not another link, in a directory that is ours too.
+            target = Path(os.path.join(path.parent, os.readlink(path)))
+            if stat.S_ISLNK(os.lstat(target).st_mode):
+                raise ValueError("symlink_chain")
+            directory = target.parent.stat()
+            if directory.st_uid != os.getuid() or directory.st_mode & stat.S_IWOTH:
+                raise ValueError("directory_not_trusted")
     except FileNotFoundError:
-        return None, path, 0o600, None
-    if stat.S_ISLNK(link.st_mode):
-        if link.st_uid != os.getuid():
-            raise ValueError("symlink_not_yours")
-        try:
-            target = path.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            loop = isinstance(exc, RuntimeError) or getattr(exc, "errno", None) == errno.ELOOP
-            raise ValueError("symlink_loop" if loop else "dangling_symlink") from None
+        if target == path:
+            return None, path, 0o600, None
+        raise ValueError("dangling_symlink") from None
+    except OSError:
+        raise ValueError("unreadable") from None
     try:
         descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
