@@ -608,7 +608,7 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         one = await self.service.retry(first["operation_id"], idempotency_key="retry-key")
         self.assertEqual((len(calls), len(self.provider.calls)), (1, 2))
         application = JournalApplication.__new__(JournalApplication)
-        application.catalog, application.documents = self.catalog, self.service
+        application.catalog, application.documents, application.compiler = self.catalog, self.service, None
         report = await application.recover_startup()
         self.assertEqual((len(calls), len(self.provider.calls)), (1, 2))
         self.assertEqual(report["examined"], 0)
@@ -631,7 +631,7 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
             await self.service.retry(first["operation_id"], idempotency_key="retry-key")
         recoverable = [row["operation_id"] for row in self.catalog.list_recoverable_operations()]
         application = JournalApplication.__new__(JournalApplication)
-        application.catalog, application.documents = self.catalog, self.service
+        application.catalog, application.documents, application.compiler = self.catalog, self.service, None
         await application.recover_startup()
         self.assertEqual((recoverable, len(calls)), ([first["operation_id"]], 1))
 
