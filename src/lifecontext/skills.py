@@ -239,6 +239,9 @@ def _instructions_item(agent: str, path: Path | None, command: str, dry_run: boo
         elif item["action"] == "write":
             gap = "" if not text else "\n" if text.endswith("\n") else "\n\n"
             new = (text or "") + gap + instructions_block() + ("\n" if not text or text.endswith("\n") else "")
+        if new is not None and len(new.encode()) > MAX_INSTRUCTION_BYTES:
+            item.update(action="refused", reason="too_large")
+            new = None
     if new is not None and not dry_run:
         def unchanged() -> None:
             try:

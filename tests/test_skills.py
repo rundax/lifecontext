@@ -444,6 +444,16 @@ class InstructionsTests(unittest.TestCase):
                     self.assertFalse(report["ok"])
                 self.assertEqual(self.claude.read_bytes(), content)
 
+    def test_install_refuses_a_file_the_block_would_push_past_the_size_limit(self) -> None:
+        content = b"a" * skills_module.MAX_INSTRUCTION_BYTES
+        self.put(self.claude, content)
+        report = self.run_install(agents=("claude",))
+        self.assertEqual((report["instructions"][0]["action"], report["instructions"][0]["reason"]),
+                         ("refused", "too_large"))
+        self.assertEqual(self.claude.read_bytes(), content)
+        self.assertNotEqual(remove(self.home, ["claude"], instructions=True,
+                                   environ=self.environ)["instructions"][0].get("action"), "refused")
+
     def test_command_line_adds_and_removes_the_block(self) -> None:
         env = {"HOME": str(self.home), "PATH": os.defpath, "PYTHONPATH": str(V1_ROOT / "src")}
         (self.home / ".claude").mkdir()
