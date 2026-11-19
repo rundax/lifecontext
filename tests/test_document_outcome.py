@@ -500,6 +500,19 @@ class DocumentRetryBySourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(three["document"]["outcome"], "completed")
         self.assertEqual(len(calls), 3)
 
+    async def test_a_retry_idempotency_key_replays_the_recovery_of_a_failed_import(self):
+        calls = self.flaky_wiki(failures=2)
+        self.provider.fail_at = 1
+        first = await self.ingest()
+        self.assertEqual(first["state"], "retryable_failed")
+        self.assertEqual(calls, [])
+        one = await self.service.retry(first["operation_id"], idempotency_key="retry-key")
+        self.assertEqual(one["state"], "completed")
+        self.assertEqual(one["document"]["outcome"], "completed_with_errors")
+        two = await self.service.retry(first["operation_id"], idempotency_key="retry-key")
+        self.assertEqual(two["operation_id"], one["operation_id"])
+        self.assertEqual(len(calls), 1)
+
     async def test_a_rerun_extraction_with_a_key_allocates_one_revision(self):
         first = await self.ingest()
         sid = first["document"]["source_id"]

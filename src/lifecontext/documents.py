@@ -397,6 +397,12 @@ class DocumentService:
         if not rerun_extraction:
             if operation["state"] == "completed" and self._unfinished_stages(sid, version):
                 return await self._rerun_stages(old, extractions, idempotency_key, request_digest)
+            if idempotency_key is not None and operation["state"] not in {"completed", "permanent_failed", "cancelled"}:
+                # The key names this attempt, so a replay returns it instead of running the stages again.
+                retry = self.catalog.begin_operation(idempotency_key, request_digest, "document_retry")
+                if not retry["result"]:
+                    retry = self.catalog.set_operation_intent(retry["operation_id"], self._envelope(old))
+                return await self._run(retry)
             return await self.recover(operation)
         self._active(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
