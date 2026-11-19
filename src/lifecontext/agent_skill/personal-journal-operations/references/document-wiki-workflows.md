@@ -158,7 +158,10 @@ operation instead of starting another run; a reindex or `wiki rebuild
 request with the same key once it finishes. A rebuild of every document leaves
 such documents out and lists them in `skipped`. `wiki_summary_missing` means the
 page has claims but no model summary; a retry by source ID asks only for the
-summary. A pending or running stage that nothing is running
+summary. `wiki_windows_skipped` means the page was published without the parts of
+the document the model failed on; a retry by source ID asks only for those parts.
+`wiki_dropped_claims` in `documents show` only counts model claims whose quotes
+failed the check; nothing on the page comes from them. A pending or running stage that nothing is running
 shows as `completed_with_errors` with the stage state as its problem `code`: retry
 by source ID. No retry rebuilds the page of a version a newer one replaced.
 `wiki_evidence_limit` and `wiki_no_evidence` fail the same way every time, so do
