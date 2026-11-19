@@ -397,6 +397,10 @@ class DocumentService:
         old = operation["result"].get("recovery_intent")
         if not old:
             raise CatalogError("document intent unavailable")
+        if operation["state"] == "cancelled":
+            # Only a keyed retry cancels a document operation: retrying it retries the newer one.
+            operation = self.catalog.latest_document_operation(old["source_id"], old["source_version"])
+            old = operation["result"]["recovery_intent"]
         if self._running(operation, by_source=True):
             return self._response(operation)
         sid, version = old["source_id"], old["source_version"]
@@ -407,6 +411,12 @@ class DocumentService:
         if not rerun_extraction:
             if operation["state"] == "completed" and self._unfinished_stages(sid, version):
                 return await self._rerun_stages(old, extractions, idempotency_key, request_digest)
+            if idempotency_key is not None and operation["state"] not in {"completed", "permanent_failed", "cancelled"}:
+                # The key names this attempt, so a replay returns it instead of running the stages again.
+                # The retry takes the work over, so startup recovery does not run the original again.
+                retry = self.catalog.take_over_operation(idempotency_key, request_digest, "document_retry",
+                                                         self._envelope(old), operation["operation_id"])
+                return await self._run(retry)
             return await self.recover(operation)
         self._active(sid, version)
         revision = extractions[-1]["extraction_revision"] + 1 if extractions else 1
