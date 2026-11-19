@@ -767,19 +767,21 @@ class InstallSkillsAndPathTests(unittest.TestCase):
     """link_skills and link_command with `lifecontext` stubbed: what the summary and the PATH hint say."""
 
     def run_function(self, name: str, check_output: str = "", shell: str = "/bin/bash",
-                     os_name: str = "Linux") -> subprocess.CompletedProcess[str]:
+                     os_name: str = "Linux", flags: str = "") -> subprocess.CompletedProcess[str]:
         temp = tempfile.TemporaryDirectory(prefix="lifecontext-skills-test.")
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         venv_bin = root / "venv" / "bin"
         venv_bin.mkdir(parents=True)
         os.symlink(sys.executable, venv_bin / "python")
-        _stub(venv_bin / "lifecontext", f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;; esac\n""")
+        _stub(venv_bin / "lifecontext", f"""echo "$*" >> "{root / 'calls'}"\n"""
+              f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;; esac\n""")
         harness = root / "harness.sh"
         harness.write_text(
-            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\n'
+            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\nagent_instructions=0\ninteractive=no\n{flags}'
             f'os={os_name}\nbin_dir="$HOME/.local/bin"\nlink="$bin_dir/lifecontext"\n'
-            + _functions("say", "warn", name) + f'\n{name}\necho "skills_state=${{skills_state:-}}"\n')
+            + _functions("say", "warn", "tty_available", name)
+            + f'\n{name}\necho "skills_state=${{skills_state:-}}"\ncat "$HOME/calls" 2>/dev/null || true\n')
         return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
                               env={"PATH": os.defpath, "SHELL": shell}, stdin=subprocess.DEVNULL, timeout=60,
                               check=False)
@@ -797,6 +799,25 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         self.assertNotIn("no agent found", result.stdout)
         result = self.run_function("link_skills", json.dumps({"error": "link_failed"}))
         self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
+
+    def test_the_instruction_note_is_written_only_when_asked_for(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}]})
+        self.assertNotIn("--instructions", self.run_function("link_skills", report).stdout)
+        asked = self.run_function("link_skills", report, flags="agent_instructions=1\ninteractive=no\n")
+        self.assertIn("skills install --instructions\n", asked.stdout)
+        # Nothing to add the note to when no agent was found.
+        self.assertNotIn("--instructions", self.run_function(
+            "link_skills", json.dumps({"agents": []}), flags="agent_instructions=1\ninteractive=no\n").stdout)
+        # --no-skills skips the note too.
+        skipped = self.run_function("link_skills", report, flags="no_skills=1\nagent_instructions=1\ninteractive=no\n")
+        self.assertNotIn("--instructions", skipped.stdout)
+
+    def test_the_usage_text_and_the_option_parser_know_the_instruction_flag(self) -> None:
+        text = INSTALLER.read_text()
+        self.assertIn("--agent-instructions  also add", text)
+        self.assertIn("--agent-instructions) agent_instructions=1", text)
+        self.assertIn('ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check '
+                      'LifeContext first?"', text)
 
     def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
         for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/zsh", "Linux", "~/.zshrc"),

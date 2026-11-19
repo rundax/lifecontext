@@ -50,6 +50,10 @@ Options:
   --non-interactive     never prompt; set up from LIFECONTEXT_* variables only
   --no-service          do not install the systemd user service or launchd agent
   --no-skills           do not link the agent skill into detected agents
+  --agent-instructions  also add a short "check LifeContext first" note to
+                        ~/.claude/CLAUDE.md and Codex AGENTS.md (a terminal run
+                        asks instead; remove it with `lifecontext skills remove
+                        --instructions`)
   --no-backup           do not back up before upgrading an existing installation
   --skip-model-probe    do not send the one small request that checks the model
   --allow-root          allow running as root (not recommended)
@@ -997,6 +1001,15 @@ print(", ".join(linked) if linked else ("!" if agents else ""))
 	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
 	*) skills_state="linked for $linked" ;;
 	esac
+	# Opt-in: the note goes into the agents' own instruction files only on request.
+	if [ "$agent_instructions" -eq 0 ] && [ -n "$linked" ] && [ "$interactive" != no ] && tty_available; then
+		ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
+		agent_instructions=$reply
+	fi
+	if [ "$agent_instructions" -eq 1 ] && [ -n "$linked" ]; then
+		"$lc" skills install --instructions </dev/null ||
+			warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
+	fi
 }
 
 remove_units_directly() {
@@ -1084,6 +1097,7 @@ main() {
 	interactive=auto
 	no_service=0
 	no_skills=0
+	agent_instructions=0
 	no_backup=0
 	allow_root=0
 	skip_model_probe=0
@@ -1106,6 +1120,7 @@ main() {
 		--non-interactive) interactive=no && shift ;;
 		--no-service) no_service=1 && shift ;;
 		--no-skills) no_skills=1 && shift ;;
+		--agent-instructions) agent_instructions=1 && shift ;;
 		--no-backup) no_backup=1 && shift ;;
 		--skip-model-probe) skip_model_probe=1 && shift ;;
 		--allow-root) allow_root=1 && shift ;;
