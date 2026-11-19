@@ -866,25 +866,45 @@ class InstallSkillsAndPathTests(unittest.TestCase):
             return json.dumps({"instructions": [{"agent": "claude", "state": state}, {"agent": "gemini", "state": "unsupported"}]})
 
         question = "ASKED: Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
+        refresh = "skills install --instructions --agent claude\n"
         yes = self.run_function("link_skills", report, note=note("absent"), ask="yes").stdout
         self.assertEqual(yes.count(question), 1)
-        self.assertIn("skills install --instructions\n", yes)
+        self.assertIn(refresh, yes)
         no = self.run_function("link_skills", report, note=note("absent"), ask="no").stdout
         self.assertEqual(no.count(question), 1)
-        self.assertNotIn("--instructions\n", no.replace("check --instructions --json\n", ""))
+        self.assertNotIn("skills install --instructions", no)
         # A block that is there is refreshed without asking; an edited one and an unreadable report change nothing.
         for state, installs in (("current", True), ("outdated", True), ("edited", False), ("refused", False)):
             with self.subTest(state=state):
                 out = self.run_function("link_skills", report, note=note(state), ask="yes").stdout
                 self.assertNotIn(question, out)
-                self.assertEqual("skills install --instructions\n" in out, installs)
+                self.assertEqual(refresh in out, installs)
         out = self.run_function("link_skills", report, note="", ask="yes").stdout
         self.assertNotIn(question, out)
-        self.assertNotIn("skills install --instructions\n", out)
+        self.assertNotIn("skills install --instructions", out)
         # Never at a prompt-less run.
         out = self.run_function("link_skills", report, note=note("absent")).stdout
         self.assertNotIn(question, out)
-        self.assertNotIn("skills install --instructions\n", out)
+        self.assertNotIn("skills install --instructions", out)
+
+    def test_a_block_present_in_one_file_is_refreshed_and_the_absent_file_waits_for_the_question(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}, {"agent": "codex", "state": "linked"}]})
+        mixed = json.dumps({"instructions": [{"agent": "claude", "state": "outdated"}, {"agent": "codex", "state": "absent"}]})
+        question = "ASKED: Add a short note"
+        for answer in ("", "no"):
+            with self.subTest(answer=answer or "no terminal"):
+                out = self.run_function("link_skills", report, note=mixed, ask=answer).stdout
+                self.assertIn("skills install --instructions --agent claude\n", out)
+                self.assertNotIn("--agent codex", out)
+                self.assertEqual(out.count(question), 1 if answer else 0)
+        out = self.run_function("link_skills", report, note=mixed, ask="yes").stdout
+        self.assertEqual(out.count(question), 1)
+        self.assertIn("skills install --instructions --agent claude\n", out)
+        self.assertIn("skills install --instructions --agent codex\n", out)
+        # A file whose agent got no skill link is skipped, even with its block absent.
+        only_claude = json.dumps({"agents": [{"agent": "claude", "state": "linked"}]})
+        out = self.run_function("link_skills", only_claude, note=mixed, ask="yes").stdout
+        self.assertNotIn("--agent codex", out)
 
     def test_the_usage_text_and_the_option_parser_know_the_instruction_flag(self) -> None:
         text = INSTALLER.read_text()

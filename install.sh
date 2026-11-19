@@ -1004,25 +1004,45 @@ print(", ".join(linked) if linked else ("!" if agents else ""))
 	# Opt-in: the note goes into an instruction file only on request. It exists for Claude Code and Codex.
 	case "$linked" in
 	*"Claude Code"* | *Codex*)
+		if [ "$agent_instructions" -eq 1 ]; then
+			"$lc" skills install --instructions </dev/null ||
+				warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
+			return
+		fi
+		# "claude:present codex:absent": the state of the block in each file (edited and other states left out).
 		note=$("$lc" skills check --instructions --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
 import json, sys
 try:
     report = json.loads(sys.stdin.read())
 except ValueError:
     sys.exit(1)
-states = {item.get("state") for item in report.get("instructions") or [] if item.get("agent") in ("claude", "codex")}
-print("present" if states & {"current", "outdated"} else "absent" if "absent" in states else "other")
+for item in report.get("instructions") or []:
+    state = {"current": "present", "outdated": "present", "absent": "absent"}.get(item.get("state"))
+    if item.get("agent") in ("claude", "codex") and state:
+        print(item["agent"] + ":" + state)
 ') || note=""
-		# A block that is there (the person said yes before) is refreshed without asking; an edited one is left alone.
-		if [ "$note" = present ]; then
-			agent_instructions=1
-		elif [ "$agent_instructions" -eq 0 ] && [ "$note" = absent ] && [ "$interactive" != no ] && tty_available; then
+		absent=""
+		for pair in $note; do
+			agent=${pair%%:*}
+			case "$agent" in claude) name="Claude Code" ;; *) name=Codex ;; esac
+			case "$linked" in *"$name"*) ;; *) continue ;; esac
+			if [ "${pair#*:}" = present ]; then
+				# A block that is there (the person said yes before) is refreshed without asking.
+				"$lc" skills install --instructions --agent "$agent" </dev/null ||
+					warn "lifecontext skills install --instructions --agent $agent failed; see lifecontext skills check --instructions"
+			else
+				absent="$absent $agent"
+			fi
+		done
+		# Files without the block get it only after the question, default no.
+		if [ -n "$absent" ] && [ "$interactive" != no ] && tty_available; then
 			ask_no "Add a short note to ~/.claude/CLAUDE.md and Codex AGENTS.md so your agents check LifeContext first?"
-			agent_instructions=$reply
-		fi
-		if [ "$agent_instructions" -eq 1 ]; then
-			"$lc" skills install --instructions </dev/null ||
-				warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
+			if [ "$reply" = 1 ]; then
+				for agent in $absent; do
+					"$lc" skills install --instructions --agent "$agent" </dev/null ||
+						warn "lifecontext skills install --instructions --agent $agent failed; see lifecontext skills check --instructions"
+				done
+			fi
 		fi
 		;;
 	esac
