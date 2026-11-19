@@ -182,11 +182,27 @@ class InstallScriptTests(unittest.TestCase):
         result = self.run_installer("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.logged(), ["lifecontext --version", "lifecontext service uninstall",
-                                         "lifecontext skills remove"])
+                                         "lifecontext skills remove --instructions"])
         self.assertFalse(data_dir.exists())
         self.assertFalse(os.path.lexists(link))
         for path in kept:
             self.assertEqual(path.read_text(), "data", path)
+
+    def test_uninstall_warns_about_an_edited_or_refused_block_and_goes_on(self) -> None:
+        data_dir = self.home / ".local" / "share" / "lifecontext"
+        command = data_dir / "venv" / "bin" / "lifecontext"
+        command.parent.mkdir(parents=True)
+        _stub(command, 'case "$*" in "skills remove --instructions")\n'
+                       '  echo "claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md"\n'
+                       '  echo "codex   instructions refused (not_utf8): /h/.codex/AGENTS.md"\n'
+                       '  exit 1 ;; esac\n')
+        (data_dir / "installed.sha256").write_text("x")
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Warning: claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md",
+                      result.stderr)
+        self.assertIn("Warning: codex   instructions refused (not_utf8): /h/.codex/AGENTS.md", result.stderr)
+        self.assertFalse(data_dir.exists())
 
     @unittest.skipUnless(platform.system() == "Linux", "systemd unit layout")
     def test_uninstall_without_a_working_command_removes_units_and_our_skill_links(self) -> None:

@@ -1063,7 +1063,11 @@ uninstall() {
 	# Without a working command (a broken venv), remove the known files directly.
 	if [ -x "$lc" ] && "$lc" --version </dev/null >/dev/null 2>&1; then
 		"$lc" service uninstall </dev/null || warn "lifecontext service uninstall reported a problem (above)"
-		"$lc" skills remove </dev/null || warn "lifecontext skills remove reported a problem (above)"
+		removal=$("$lc" skills remove --instructions </dev/null) || warn "lifecontext skills remove reported a problem (below)"
+		printf '%s\n' "$removal"
+		# A block the person edited, or a file that cannot be changed, stays; the uninstall goes on.
+		printf '%s\n' "$removal" | grep ' instructions \(edited by hand\|refused\)' |
+			while IFS= read -r line; do warn "$line"; done || true
 	else
 		remove_units_directly
 		remove_skill_links_directly
