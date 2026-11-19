@@ -182,11 +182,60 @@ class InstallScriptTests(unittest.TestCase):
         result = self.run_installer("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.logged(), ["lifecontext --version", "lifecontext service uninstall",
-                                         "lifecontext skills remove"])
+                                         "lifecontext skills remove --instructions"])
         self.assertFalse(data_dir.exists())
         self.assertFalse(os.path.lexists(link))
         for path in kept:
             self.assertEqual(path.read_text(), "data", path)
+
+    def test_uninstall_with_an_older_command_still_removes_the_skill_links(self) -> None:
+        data_dir = self.home / ".local" / "share" / "lifecontext"
+        command = data_dir / "venv" / "bin" / "lifecontext"
+        command.parent.mkdir(parents=True)
+        # An older release: it rejects --instructions (exit 2), and its plain `skills remove` also fails here.
+        _stub(command, f'echo "lifecontext $*" >> "{self.calls}"\n'
+                       'case "$*" in "skills remove --instructions") echo "unrecognized arguments: --instructions" >&2; exit 2 ;;\n'
+                       '"skills remove") exit 1 ;; esac\n')
+        (data_dir / "installed.sha256").write_text("x")
+        ours = self.home / ".claude" / "skills" / "personal-journal-operations"
+        ours.parent.mkdir(parents=True)
+        ours.symlink_to("/old/venv/lib/python3.12/site-packages/lifecontext/agent_skill/personal-journal-operations")
+        foreign = self.home / ".codex" / "skills" / "personal-journal-operations"
+        foreign.parent.mkdir(parents=True)
+        foreign.symlink_to(self.home)
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.logged()[-2:], ["lifecontext skills remove --instructions", "lifecontext skills remove"])
+        self.assertIn("Older lifecontext without --instructions; removing skill links only.", result.stdout)
+        self.assertFalse(os.path.lexists(ours))
+        self.assertTrue(foreign.is_symlink())
+        self.assertFalse(data_dir.exists())
+
+    def test_uninstall_warns_about_an_edited_or_refused_block_and_goes_on(self) -> None:
+        data_dir = self.home / ".local" / "share" / "lifecontext"
+        command = data_dir / "venv" / "bin" / "lifecontext"
+        command.parent.mkdir(parents=True)
+        _stub(command, f'echo "lifecontext $*" >> "{self.calls}"\n'
+                       'case "$*" in "skills remove --instructions")\n'
+                       '  echo "claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md"\n'
+                       '  echo "codex   instructions refused (not_utf8): /h/.codex/AGENTS.md"\n'
+                       '  exit 1 ;; esac\n')
+        (data_dir / "installed.sha256").write_text("x")
+        # Whatever the command did, a link of ours that is still there goes before the venv does.
+        leftover = self.home / ".claude" / "skills" / "personal-journal-operations"
+        leftover.parent.mkdir(parents=True)
+        leftover.symlink_to("/old/venv/lib/python3.12/site-packages/lifecontext/agent_skill/personal-journal-operations")
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(leftover))
+        self.assertIn("Warning: claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md",
+                      result.stderr)
+        self.assertIn("Warning: codex   instructions refused (not_utf8): /h/.codex/AGENTS.md", result.stderr)
+        # Exit 1 means the links are gone already: no fallback to the plain command.
+        self.assertNotIn("lifecontext skills remove", self.logged())
+        self.assertNotIn("Older lifecontext", result.stdout)
+        self.assertIn("Warning: lifecontext skills remove reported a problem (see above)", result.stderr)
+        self.assertFalse(data_dir.exists())
 
     @unittest.skipUnless(platform.system() == "Linux", "systemd unit layout")
     def test_uninstall_without_a_working_command_removes_units_and_our_skill_links(self) -> None:
@@ -767,19 +816,26 @@ class InstallSkillsAndPathTests(unittest.TestCase):
     """link_skills and link_command with `lifecontext` stubbed: what the summary and the PATH hint say."""
 
     def run_function(self, name: str, check_output: str = "", shell: str = "/bin/bash",
-                     os_name: str = "Linux") -> subprocess.CompletedProcess[str]:
+                     os_name: str = "Linux", flags: str = "", note: str = "",
+                     ask: str = "") -> subprocess.CompletedProcess[str]:
         temp = tempfile.TemporaryDirectory(prefix="lifecontext-skills-test.")
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         venv_bin = root / "venv" / "bin"
         venv_bin.mkdir(parents=True)
         os.symlink(sys.executable, venv_bin / "python")
-        _stub(venv_bin / "lifecontext", f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;; esac\n""")
+        _stub(venv_bin / "lifecontext", f"""echo "$*" >> "{root / 'calls'}"\n"""
+              f"""case "$*" in "skills check --json") printf '%s' '{check_output}' ;;\n"""
+              f"""  "skills check --instructions --json") printf '%s' '{note}' ;; esac\n""")
+        # A terminal that answers: ask_no records the question and replies as the person would.
+        answer = ('tty_available() { return 0; }\nask_no() { echo "ASKED: $1" >> "$HOME/calls"; '
+                  f'reply={1 if ask == "yes" else 0}; }}\n') if ask else ""
         harness = root / "harness.sh"
         harness.write_text(
-            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\n'
+            f'set -eu\nHOME="{root}"\nvenv="{root / "venv"}"\nlc="$venv/bin/lifecontext"\nno_skills=0\nagent_instructions=0\ninteractive={"auto" if ask else "no"}\n{flags}'
             f'os={os_name}\nbin_dir="$HOME/.local/bin"\nlink="$bin_dir/lifecontext"\n'
-            + _functions("say", "warn", name) + f'\n{name}\necho "skills_state=${{skills_state:-}}"\n')
+            + _functions("say", "warn", "tty_available", "ask_no", name) + answer
+            + f'\n{name}\necho "skills_state=${{skills_state:-}}"\ncat "$HOME/calls" 2>/dev/null || true\n')
         return subprocess.run(["/bin/sh", str(harness)], text=True, capture_output=True,
                               env={"PATH": os.defpath, "SHELL": shell}, stdin=subprocess.DEVNULL, timeout=60,
                               check=False)
@@ -797,6 +853,77 @@ class InstallSkillsAndPathTests(unittest.TestCase):
         self.assertNotIn("no agent found", result.stdout)
         result = self.run_function("link_skills", json.dumps({"error": "link_failed"}))
         self.assertIn("skills_state=unknown; see lifecontext skills check", result.stdout)
+
+    def test_the_instruction_note_is_written_only_when_asked_for(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}]})
+        self.assertNotIn("skills install --instructions", self.run_function("link_skills", report).stdout)
+        asked = self.run_function("link_skills", report, flags="agent_instructions=1\ninteractive=no\n")
+        self.assertIn("skills install --instructions\n", asked.stdout)
+        # Nothing to add the note to when no agent was found, or only Gemini CLI or Hermes has the skill.
+        self.assertNotIn("skills install --instructions", self.run_function(
+            "link_skills", json.dumps({"agents": []}), flags="agent_instructions=1\ninteractive=no\n").stdout)
+        only_others = json.dumps({"agents": [{"agent": "gemini", "state": "linked"},
+                                             {"agent": "hermes", "state": "linked"}]})
+        self.assertNotIn("skills install --instructions", self.run_function("link_skills", only_others, flags="agent_instructions=1\n",
+                                                             ask="yes").stdout)
+        # --no-skills skips the note too.
+        skipped = self.run_function("link_skills", report, flags="no_skills=1\nagent_instructions=1\ninteractive=no\n")
+        self.assertNotIn("skills install --instructions", skipped.stdout)
+
+    def test_the_terminal_question_is_asked_once_only_when_the_block_is_absent(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}]})
+
+        def note(state: str) -> str:
+            return json.dumps({"instructions": [{"agent": "claude", "state": state}, {"agent": "gemini", "state": "unsupported"}]})
+
+        question = "ASKED: Add a short note to ~/.claude/CLAUDE.md so your agents check LifeContext first?"
+        refresh = "skills install --instructions --agent claude\n"
+        yes = self.run_function("link_skills", report, note=note("absent"), ask="yes").stdout
+        self.assertEqual(yes.count(question), 1)
+        self.assertIn(refresh, yes)
+        no = self.run_function("link_skills", report, note=note("absent"), ask="no").stdout
+        self.assertEqual(no.count(question), 1)
+        self.assertNotIn("skills install --instructions", no)
+        # A block that is there is refreshed without asking; an edited one and an unreadable report change nothing.
+        for state, installs in (("current", True), ("outdated", True), ("edited", False), ("refused", False)):
+            with self.subTest(state=state):
+                out = self.run_function("link_skills", report, note=note(state), ask="yes").stdout
+                self.assertNotIn(question, out)
+                self.assertEqual(refresh in out, installs)
+        out = self.run_function("link_skills", report, note="", ask="yes").stdout
+        self.assertNotIn(question, out)
+        self.assertNotIn("skills install --instructions", out)
+        # Never at a prompt-less run.
+        out = self.run_function("link_skills", report, note=note("absent")).stdout
+        self.assertNotIn(question, out)
+        self.assertNotIn("skills install --instructions", out)
+
+    def test_a_block_present_in_one_file_is_refreshed_and_the_absent_file_waits_for_the_question(self) -> None:
+        report = json.dumps({"agents": [{"agent": "claude", "state": "linked"}, {"agent": "codex", "state": "linked"}]})
+        mixed = json.dumps({"instructions": [{"agent": "claude", "state": "outdated"}, {"agent": "codex", "state": "absent"}]})
+        question = "ASKED: Add a short note"
+        for answer in ("", "no"):
+            with self.subTest(answer=answer or "no terminal"):
+                out = self.run_function("link_skills", report, note=mixed, ask=answer).stdout
+                self.assertIn("skills install --instructions --agent claude\n", out)
+                self.assertNotIn("--agent codex", out)
+                self.assertEqual(out.count(question), 1 if answer else 0)
+        out = self.run_function("link_skills", report, note=mixed, ask="yes").stdout
+        self.assertEqual(out.count(question), 1)
+        # The question names only the file that lacks the block.
+        self.assertIn("ASKED: Add a short note to Codex AGENTS.md so your agents check LifeContext first?", out)
+        self.assertIn("skills install --instructions --agent claude\n", out)
+        self.assertIn("skills install --instructions --agent codex\n", out)
+        # A file whose agent got no skill link is skipped, even with its block absent.
+        only_claude = json.dumps({"agents": [{"agent": "claude", "state": "linked"}]})
+        out = self.run_function("link_skills", only_claude, note=mixed, ask="yes").stdout
+        self.assertNotIn("--agent codex", out)
+
+    def test_the_usage_text_and_the_option_parser_know_the_instruction_flag(self) -> None:
+        text = INSTALLER.read_text()
+        self.assertIn("--agent-instructions  also add", text)
+        self.assertIn("--agent-instructions) agent_instructions=1", text)
+        self.assertIn('ask_no "Add a short note to $where so your agents check LifeContext first?"', text)
 
     def test_the_path_hint_names_the_file_the_shell_reads(self) -> None:
         for shell, os_name, expected in (("/bin/zsh", "Darwin", "~/.zprofile"), ("/bin/zsh", "Linux", "~/.zshrc"),

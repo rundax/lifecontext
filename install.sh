@@ -50,6 +50,10 @@ Options:
   --non-interactive     never prompt; set up from LIFECONTEXT_* variables only
   --no-service          do not install the systemd user service or launchd agent
   --no-skills           do not link the agent skill into detected agents
+  --agent-instructions  also add a short "check LifeContext first" note to
+                        ~/.claude/CLAUDE.md and Codex AGENTS.md (a terminal run
+                        asks instead; remove it with `lifecontext skills remove
+                        --instructions`)
   --no-backup           do not back up before upgrading an existing installation
   --skip-model-probe    do not send the one small request that checks the model
   --allow-root          allow running as root (not recommended)
@@ -997,6 +1001,56 @@ print(", ".join(linked) if linked else ("!" if agents else ""))
 	"") skills_state="no agent found (~/.claude, ~/.codex, ~/.gemini or ~/.agents, ~/.hermes); after installing one, run lifecontext skills install" ;;
 	*) skills_state="linked for $linked" ;;
 	esac
+	# Opt-in: the note goes into an instruction file only on request. It exists for Claude Code and Codex.
+	case "$linked" in
+	*"Claude Code"* | *Codex*)
+		if [ "$agent_instructions" -eq 1 ]; then
+			"$lc" skills install --instructions </dev/null ||
+				warn "lifecontext skills install --instructions failed; see lifecontext skills check --instructions"
+			return
+		fi
+		# "claude:present codex:absent": the state of the block in each file (edited and other states left out).
+		note=$("$lc" skills check --instructions --json </dev/null 2>/dev/null | "$venv/bin/python" -I -c '
+import json, sys
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+for item in report.get("instructions") or []:
+    state = {"current": "present", "outdated": "present", "absent": "absent"}.get(item.get("state"))
+    if item.get("agent") in ("claude", "codex") and state:
+        print(item["agent"] + ":" + state)
+') || note=""
+		absent=""
+		for pair in $note; do
+			agent=${pair%%:*}
+			case "$agent" in claude) name="Claude Code" ;; *) name=Codex ;; esac
+			case "$linked" in *"$name"*) ;; *) continue ;; esac
+			if [ "${pair#*:}" = present ]; then
+				# A block that is there (the person said yes before) is refreshed without asking.
+				"$lc" skills install --instructions --agent "$agent" </dev/null ||
+					warn "lifecontext skills install --instructions --agent $agent failed; see lifecontext skills check --instructions"
+			else
+				absent="$absent $agent"
+			fi
+		done
+		# Files without the block get it only after the question, default no.
+		if [ -n "$absent" ] && [ "$interactive" != no ] && tty_available; then
+			where=""
+			for agent in $absent; do
+				case "$agent" in claude) file="~/.claude/CLAUDE.md" ;; *) file="Codex AGENTS.md" ;; esac
+				where="${where:+$where and }$file"
+			done
+			ask_no "Add a short note to $where so your agents check LifeContext first?"
+			if [ "$reply" = 1 ]; then
+				for agent in $absent; do
+					"$lc" skills install --instructions --agent "$agent" </dev/null ||
+						warn "lifecontext skills install --instructions --agent $agent failed; see lifecontext skills check --instructions"
+				done
+			fi
+		fi
+		;;
+	esac
 }
 
 remove_units_directly() {
@@ -1050,7 +1104,22 @@ uninstall() {
 	# Without a working command (a broken venv), remove the known files directly.
 	if [ -x "$lc" ] && "$lc" --version </dev/null >/dev/null 2>&1; then
 		"$lc" service uninstall </dev/null || warn "lifecontext service uninstall reported a problem (above)"
-		"$lc" skills remove </dev/null || warn "lifecontext skills remove reported a problem (above)"
+		# Exit 1 is a refused or edited block (the links are gone). Anything higher is an older installed
+		# command that does not know --instructions: remove its links the plain way first.
+		removal_status=0
+		removal=$("$lc" skills remove --instructions </dev/null) || removal_status=$?
+		printf '%s\n' "$removal"
+		# A block the person edited, or a file that cannot be changed, stays; the uninstall goes on.
+		printf '%s\n' "$removal" | grep -E ' instructions (edited by hand|refused)' |
+			while IFS= read -r line; do warn "$line"; done || true
+		if [ "$removal_status" -gt 1 ]; then
+			say "Older lifecontext without --instructions; removing skill links only."
+			"$lc" skills remove </dev/null || true
+		elif [ "$removal_status" -eq 1 ]; then
+			warn "lifecontext skills remove reported a problem (see above)"
+		fi
+		# Idempotent, and removes only our links: whatever the command did, none is left before the venv goes.
+		remove_skill_links_directly || true
 	else
 		remove_units_directly
 		remove_skill_links_directly
@@ -1084,6 +1153,7 @@ main() {
 	interactive=auto
 	no_service=0
 	no_skills=0
+	agent_instructions=0
 	no_backup=0
 	allow_root=0
 	skip_model_probe=0
@@ -1106,6 +1176,7 @@ main() {
 		--non-interactive) interactive=no && shift ;;
 		--no-service) no_service=1 && shift ;;
 		--no-skills) no_skills=1 && shift ;;
+		--agent-instructions) agent_instructions=1 && shift ;;
 		--no-backup) no_backup=1 && shift ;;
 		--skip-model-probe) skip_model_probe=1 && shift ;;
 		--allow-root) allow_root=1 && shift ;;

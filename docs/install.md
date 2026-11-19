@@ -144,6 +144,7 @@ you configure it ([operations](operations.md)). It never prints your key.
 | `--non-interactive` | Never prompt; set up from the variables below only |
 | `--no-service` | Do not install the systemd user service or launchd agent |
 | `--no-skills` | Do not link the agent skill |
+| `--agent-instructions` | Also add the short "check LifeContext first" note to `~/.claude/CLAUDE.md` and Codex `AGENTS.md` ([what it says](agents.md#a-short-note-so-the-agent-checks-lifecontext-first)); a terminal run asks instead, default no. A block you added earlier and did not edit is refreshed on a rerun without asking, also with `--non-interactive` |
 | `--skip-model-probe` | Do not call the model at the end of the setup (also `LIFECONTEXT_SKIP_MODEL_PROBE=1`) |
 | `--no-backup` | Do not back up before upgrading an existing installation |
 | `--allow-root` | Allow running as root (not recommended) |
@@ -228,7 +229,10 @@ sh install.sh --uninstall
 ```
 
 It removes the service units (`lifecontext service uninstall`), the skill
-links that point at LifeContext (`lifecontext skills remove`), the link
+links that point at LifeContext and the unedited "check LifeContext first" block
+in the instruction files (`lifecontext skills remove --instructions`; a block you
+edited stays, with a warning; when the installed command is broken, only the
+links are removed and the instruction files are left as they are), the link
 `~/.local/bin/lifecontext` and `~/.local/share/lifecontext` (uv, Python, the
 virtual environment). It keeps `~/.lifeweave` (settings, the key in `.env`,
 custody archive, catalog), the vault, `~/LifeContext/backups`, `~/.hindsight`,
