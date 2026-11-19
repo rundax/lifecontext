@@ -651,7 +651,10 @@ class JournalApplication:
         # The first compile, perhaps one this recovery resumes, then finds the provider layer loaded.
         warm = getattr(self.compiler, "warm", None)
         if callable(warm):
-            warm()
+            try:
+                warm()
+            except Exception as exc:  # noqa: BLE001 -- a preload that cannot start never stops the service
+                logging.getLogger(__name__).warning("Model client preload not started: %s", type(exc).__name__)
         try:
             operations = self.catalog.list_recoverable_operations(limit=limit)
         except CatalogError:
