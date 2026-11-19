@@ -9,7 +9,13 @@ import test_wiki_claims_per_window
 from wiki_fake_compiler import FakeCompiler
 
 from lifecontext.derived import WIKI_WINDOWS
-from lifecontext.wiki import WikiError, WikiProviderError, _locate, match_budget, source_page_id
+from lifecontext.wiki import (
+    WikiError,
+    WikiProviderError,
+    _locate,
+    match_budget,
+    source_page_id,
+)
 
 PAGE = source_page_id("doc_1")
 
@@ -123,7 +129,7 @@ class SkippedWindowTests(WindowFixture):
             with self.subTest(window=withdrawn_at):
                 fixture = self.pages(5)
 
-                def fail(data):
+                def fail(data, fixture=fixture, withdrawn_at=withdrawn_at):
                     if data["evidence"]["segments"][0]["passage_index"] == withdrawn_at:
                         # Forgotten while the model reads this window.
                         fixture.catalog.source_withdrawn = lambda *args: True
