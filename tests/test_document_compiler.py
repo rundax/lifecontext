@@ -112,6 +112,11 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
         error.__cause__ = cause
         return error
 
+    @staticmethod
+    def handled(error, earlier):
+        error.__context__ = earlier
+        return error
+
     async def test_a_failure_says_whether_asking_again_may_help(self):
         cases = [
             (TimeoutError(), ("timeout", None)),
@@ -127,6 +132,11 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
              ("transient", None)),
             (self.caused(type("APITimeoutError", (Exception,), {})(), type("ReadTimeout", (Exception,), {})()),
              ("timeout", None)),
+            # Only what an error was raised from is read: one raised while another was handled
+            # (a 401 or an unusable answer after a reset or a timeout) is permanent.
+            (self.handled(StatusError(401), ConnectionResetError("reset")), None),
+            (self.handled(StatusError(401), TimeoutError()), None),
+            (self.handled(ValueError("invalid response"), ConnectionResetError("reset")), None),
             # A wait longer than the cap is not asked again.
             (StatusError(429, {"retry-after": "600"}), None),
             (StatusError(401), None),

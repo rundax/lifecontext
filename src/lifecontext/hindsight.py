@@ -514,23 +514,38 @@ def compile_retry(error: BaseException) -> tuple[str, float | None] | None:
     ``("transient", wait)`` after a rate limit (429), request timeout (408), server error (5xx) or
     failed or lost connection, with the provider's Retry-After in seconds when it gave one; None
     when the same request fails again (auth, bad request, unusable answer) or the provider asked
-    for a wait above _RETRY_AFTER_CAP. The error's text is read here but never returned."""
-    chain, seen = [], set()
+    for a wait above _RETRY_AFTER_CAP. The error's text is read here but never returned.
+
+    The error and then what it was raised from (``raise ... from``, as the SDKs wrap transport
+    errors) are read in order, and the first that is a connect error, a timeout, another transport
+    error or an HTTP status decides; an error only raised while another was handled is not read,
+    so a 401 or an unusable answer stays permanent whatever came before it."""
+    transport = tuple(kind for kind in _transport_errors() if kind is not OSError)
+
+    def connect_error(item: BaseException | None) -> bool:
+        return isinstance(item, ConnectionError) or type(item).__name__ in _CONNECT_ERRORS
+
+    seen = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    statuses = [status for status in map(_probe_status, chain) if status is not None]
-    # A connect error first: its SDK wrapper may be named a timeout (APITimeoutError from ConnectTimeout).
-    if not any(isinstance(item, ConnectionError) or type(item).__name__ in _CONNECT_ERRORS for item in chain):
-        if any(isinstance(item, TimeoutError) or "Timeout" in type(item).__name__ for item in chain):
+        status = _probe_status(current)
+        if connect_error(current) or isinstance(current, transport):
+            # An SDK timeout raised from a connect timeout is a failed connection.
+            if not connect_error(current) and "Timeout" in type(current).__name__:
+                return "timeout", None
+            break
+        if isinstance(current, TimeoutError) or "Timeout" in type(current).__name__:
+            if connect_error(current.__cause__):
+                break
             return "timeout", None
-        if statuses and statuses[0] not in (408, 429) and statuses[0] < 500:
-            return None  # auth, bad request, model not found: the same request fails again
-        if (not statuses and probe_cause(error) != "unreachable"
-                and not any(type(item).__name__ == "ProviderRateLimitResetError" for item in chain)):
-            return None
+        if status is not None or type(current).__name__ == "ProviderRateLimitResetError":
+            if status is not None and status not in (408, 429) and status < 500:
+                return None  # auth, bad request, model not found: the same request fails again
+            break
+        current = current.__cause__
+    else:
+        return None
     wait = _retry_after(error)
     return None if wait is not None and wait > _RETRY_AFTER_CAP else ("transient", wait)
 
