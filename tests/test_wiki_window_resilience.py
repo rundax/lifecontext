@@ -1,6 +1,7 @@
 """One bad model answer no longer discards the wiki page: skipped windows, kept windows, matched quotes."""
 import asyncio
 import json
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +11,8 @@ from wiki_fake_compiler import FakeCompiler
 
 from lifecontext.derived import WIKI_WINDOWS
 from lifecontext.wiki import (
+    Citation,
+    Claim,
     WikiError,
     WikiProviderError,
     _locate,
@@ -497,6 +500,26 @@ class QuoteMatchTests(WindowFixture):
         with patch("lifecontext.wiki.MATCH_BUDGET_CHARACTERS", 210):
             fixture.update()
         self.assertEqual(self.dropped(fixture), ["quote_not_found"] * 4)
+
+    def test_long_or_many_near_misses_cost_little_time(self):
+        passage = " ".join(f"Sentence {n} says the rent of {n} euros is due on the first." for n in range(600))[:24_000]
+        fixture = self.segments([passage])
+
+        def claim(quote):
+            return Claim(quote, (Citation("doc_1", 1, 2, 0, 1, fixture.digest, quote),))
+
+        # One quote of 1,500 characters and fifty of 400, each a near miss of the passage.
+        long_miss = passage[100:1600].replace("rent", "rnet")
+        near_misses = [passage[at:at + 400].replace("euros", "eruos") for at in range(0, 20_000, 400)]
+        budget = match_budget()
+        begun = time.perf_counter()
+        long_result = fixture.service._literal(claim(long_miss), budget)
+        for quote in near_misses:
+            fixture.service._literal(claim(quote), budget)
+        elapsed = time.perf_counter() - begun
+        # A quote above NEAR_MAX_QUOTE is never near-matched; the budget bounds the rest.
+        self.assertEqual(long_result.citations[0].quote, long_miss)
+        self.assertLess(elapsed, 2)
 
     def test_a_passage_is_normalised_once_per_answer_and_charged_once(self):
         passage = "The rent\u00a0is due."

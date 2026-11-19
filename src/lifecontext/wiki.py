@@ -712,7 +712,7 @@ def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
 # A model quote is found in its cited passages byte for byte, else on a normalised form
 # (NFKC, one space for any run of whitespace, one ' and one " for every quotation mark,
 # one - for every dash, no format characters such as soft hyphens, no hyphen breaking a
-# word across lines), else, for a quote of at least NEAR_MIN_CHARACTERS normalised
+# word across lines), else, for a quote of NEAR_MIN_CHARACTERS to NEAR_MAX_QUOTE normalised
 # characters, as the one passage span whose character trigrams are NEAR_RATIO alike
 # (Dice) with no other span within NEAR_MARGIN of it, and whose characters come in the
 # same order (difflib ratio NEAR_RATIO: trigrams alone accept the same words reordered,
@@ -722,11 +722,15 @@ def erase_patch(patch: WikiPatch, source_id: str) -> WikiPatch:
 NEAR_RATIO = 0.85
 NEAR_MARGIN = 0.05
 NEAR_MIN_CHARACTERS = 20
+NEAR_MAX_QUOTE = 400
 # Bounds on the CPU a model response can cost: passages longer than these are matched
 # byte for byte only (NORMALISE_MAX_CHARACTERS) or without the near rung, each near
-# search refines NEAR_CANDIDATES spans, and one response may normalise and search at most
-# MATCH_BUDGET_CHARACTERS characters (a passage normalised once per response, a quote or
-# claim each time, a near search twice its passage), about half a second on a slow host.
+# search refines NEAR_CANDIDATES spans, and one response may spend at most
+# MATCH_BUDGET_CHARACTERS units: a passage normalised costs its length once per response,
+# a quote or claim its length each time, and a near search _near_cost (its passage, its
+# refinement probes and the order check, which grow with the quote). Measured on a loaded
+# 4-vCPU host, a near search takes about 3 to 12 microseconds per unit, so a spent budget
+# is a few seconds at worst, and a response's 48 KB bound keeps a real one far below that.
 NORMALISE_MAX_CHARACTERS = 100_000
 NEAR_MAX_CHARACTERS = 60_000
 NEAR_CANDIDATES = 3
@@ -832,6 +836,12 @@ def _near_span(needle: str, text: str) -> tuple[int, int] | None:
     return start, end
 
 
+def _near_cost(passage: int, quote: int) -> int:
+    """The budget units of one near search: the sliding window over the passage, about 150
+    refinement probes of the quote's length, and difflib's order check, quadratic in the quote."""
+    return 2 * passage + 40 * quote + quote * quote // 2048
+
+
 def match_budget() -> dict:
     """What one model response may spend on matching quotes (MATCH_BUDGET_CHARACTERS), with the
     passages it normalised; dropped with the response, so no document text outlives it."""
@@ -855,9 +865,10 @@ def _locate(needle: str, text: str, budget: dict, near: bool = False) -> tuple[s
     at = form.find(wanted)
     if at >= 0:
         return text[starts[at]:ends[at + len(wanted) - 1]], False
-    if not near or 2 * len(form) > budget["left"]:
+    cost = _near_cost(len(form), len(wanted))
+    if not near or not NEAR_MIN_CHARACTERS <= len(wanted) <= NEAR_MAX_QUOTE or cost > budget["left"]:
         return None
-    budget["left"] -= 2 * len(form)
+    budget["left"] -= cost
     span = _near_span(wanted, form)
     return (text[starts[span[0]]:ends[span[1] - 1]], True) if span else None
 
