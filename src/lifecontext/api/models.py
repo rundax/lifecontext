@@ -265,6 +265,8 @@ class DocumentResponse(APIModel):
     extraction_reason: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
     wiki_page_id: SourceId | None = None
     vault_path: str | None = Field(default=None, min_length=1, max_length=1024)
+    # Added after 1.2.0rc1: how many claims of the last wiki compile failed their checks.
+    wiki_dropped_claims: int | None = Field(default=None, ge=0)
 
     @field_validator("filename")
     @classmethod

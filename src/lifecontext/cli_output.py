@@ -138,6 +138,9 @@ def document_lines(document: Mapping[str, Any]) -> list[str]:
     warnings = document.get("extraction_warnings")
     if isinstance(warnings, list) and warnings:
         lines.append(f"Extraction warnings: {len(warnings)} (listed with --json)")
+    dropped = document.get("wiki_dropped_claims")
+    if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+        lines.append(f"Wiki claims dropped by the quote check: {dropped}")
     page = document.get("wiki_page_id")
     if isinstance(page, str) and page:
         vault_path = document.get("vault_path")
@@ -460,6 +463,8 @@ _STAGE: dict[str, ErrorText] = {
     "wiki_update_rejected": ErrorText("The compiled wiki page failed its checks and was not saved.",
                                       _RETRY_DOCUMENT, True),
     "wiki_interrupted": ErrorText("An earlier wiki run for the document stopped part-way.", _RETRY_DOCUMENT, True),
+    "wiki_windows_skipped": ErrorText("The wiki page was published without the parts of the document the model "
+                                      "failed on.", _RETRY_DOCUMENT + "; it asks only for those parts", True),
     "wiki_evidence_limit": ErrorText("One passage of the document is too large for a single model request, so a "
                                      "retry fails the same way.", "import a version with shorter passages"),
     "wiki_no_evidence": ErrorText("The document has no readable text to compile a wiki page from, so a retry fails "

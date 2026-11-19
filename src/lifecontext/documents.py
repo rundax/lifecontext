@@ -61,6 +61,8 @@ _WIKI_STEPS = {
     "wiki_interrupted": "An earlier run stopped part-way; run: lifecontext documents retry {source_id}",
     # The stage completed; only the page's model summary is missing.
     "wiki_summary_missing": "The page has no model summary; run: lifecontext documents retry {source_id}",
+    # The stage completed from the windows that validated; a retry asks only for the others.
+    "wiki_windows_skipped": "The page leaves out parts of the document the model failed on; run: lifecontext documents retry {source_id}",
 }
 
 
@@ -68,7 +70,7 @@ def document_outcome(stages, operation_state=None, awaited=(), summary_missing=F
     """What an import came to, from its stage states; catalog states never change for it.
 
     A finished operation whose wiki page or vault note failed, or whose page has no
-    model summary (``summary_missing``), is ``completed_with_errors``.
+    model summary or skipped evidence windows (``summary_missing``), is ``completed_with_errors``.
     One whose configured wiki or vault stage is still pending or running is ``running``
     while this process runs the document (``in_flight``), not ``completed``; with nothing
     running it, such a stage waits for a retry, so it is ``completed_with_errors``.
@@ -89,17 +91,20 @@ def document_outcome(stages, operation_state=None, awaited=(), summary_missing=F
     return "completed"
 
 
-def document_problems(source_id, stages, extractions, summary_missing=False, stalled=()):
+def document_problems(source_id, stages, extractions, summary_missing=False, stalled=(), windows_skipped=False):
     """One entry per failed, blocked or conflicting stage, with what to run next.
 
     ``stalled`` names pending or running stages that nothing runs; a retry runs them.
+    A completed wiki stage that skipped evidence windows (``windows_skipped``) or whose
+    page lacks its summary is listed too; the retry of skipped windows also asks for a summary.
     """
     problems = []
     retry = f"Run: lifecontext documents retry {source_id}"
     for name in ("extraction", "indexing", "wiki", "projection"):
         stage = stages[name]
-        if name == "wiki" and summary_missing:
-            stage = {**stage, "state": "failed", "error_code": "wiki_summary_missing"}
+        if name == "wiki" and (windows_skipped or summary_missing):
+            code = "wiki_windows_skipped" if windows_skipped else "wiki_summary_missing"
+            stage = {**stage, "state": "failed", "error_code": code}
         if stage["state"] not in _PROBLEM_STATES and name not in stalled:
             continue
         code = stage["error_code"] or stage["state"]
@@ -142,6 +147,7 @@ class DocumentService:
         wiki_hook=None,
         wiki_summary_hook=None,
         wiki_summary_retry_hook=None,
+        wiki_window_hook=None,
         projection_hook=None,
         completion_hook=None,
         tesseract_path=None,
@@ -169,6 +175,8 @@ class DocumentService:
         self.wiki_summary_hook = wiki_summary_hook
         # (source_id, version) -> revisions written: asks only for that summary, on the same page.
         self.wiki_summary_retry_hook = wiki_summary_retry_hook
+        # (source_id, version) -> {"skipped": windows, "dropped": claims} of the last wiki compile.
+        self.wiki_window_hook = wiki_window_hook
         self.completion_hook = completion_hook
         self.tesseract_path = tesseract_path
         self.max_chunk_bytes = max_chunk_bytes
@@ -435,7 +443,7 @@ class DocumentService:
         names = ["indexing", *self._awaited(sid, version)]
         return [name for name in names
                 if self.catalog.get_document_stage(sid, version, name)["state"] != "completed"
-                or (name == "wiki" and self._summary_missing(sid, version))]
+                or (name == "wiki" and (self._summary_missing(sid, version) or self._windows_skipped(sid, version)))]
 
     async def _rerun_stages(self, old, extractions, idempotency_key, request_digest):
         """A finished import whose wiki or vault stage did not complete runs those stages again."""
@@ -709,8 +717,10 @@ class DocumentService:
                     continue
                 # The vault note and page follow every wiki run, even after an
                 # earlier projection completed without them.
+                # A page that skipped evidence windows compiles again; the windows it has are not asked again.
                 if (self.catalog.get_document_stage(sid, version, stage)["state"] == "completed"
-                        and not (stage == "projection" and wiki_ran)):
+                        and not (stage == "projection" and wiki_ran)
+                        and not (stage == "wiki" and self._windows_skipped(sid, version))):
                     if (stage == "wiki" and self.wiki_summary_retry_hook is not None
                             and self._summary_missing(sid, version)):
                         # Only the summary is missing: ask for it alone, not the whole page.
@@ -999,6 +1009,16 @@ class DocumentService:
                 and self.catalog.get_document_stage(source_id, source_version, "wiki")["state"] == "completed"
                 and bool(self.wiki_summary_hook(source_id)))
 
+    def _window_report(self, source_id, source_version):
+        report = self.wiki_window_hook(source_id, source_version) if self.wiki_window_hook is not None else None
+        return report or {"skipped": 0, "dropped": 0}
+
+    def _windows_skipped(self, source_id, source_version):
+        """A current version's wiki stage completed without some of its evidence windows."""
+        return (self.wiki_window_hook is not None and self._is_current(source_id, source_version)
+                and self.catalog.get_document_stage(source_id, source_version, "wiki")["state"] == "completed"
+                and self._window_report(source_id, source_version)["skipped"] > 0)
+
     def operation_outcome(self, operation):
         """What a document import or retry came to; ``None`` for any other operation."""
         return self.operation_outcomes([operation]).get(operation["operation_id"])
@@ -1025,10 +1045,11 @@ class DocumentService:
                 continue
             is_current = current.get(sid) == version
             summary = False
-            # As _summary_missing; the page is read once per source.
-            if is_current and self.wiki_summary_hook is not None and found["wiki"]["state"] == "completed":
+            # As _summary_missing and _windows_skipped; the page is read once per source.
+            if is_current and found["wiki"]["state"] == "completed":
                 if sid not in missing:
-                    missing[sid] = bool(self.wiki_summary_hook(sid))
+                    missing[sid] = ((self.wiki_summary_hook is not None and bool(self.wiki_summary_hook(sid)))
+                                    or self._window_report(sid, version)["skipped"] > 0)
                 summary = missing[sid]
             outcomes[operation_id] = document_outcome(found, state, hooked if is_current else (), summary,
                                                       self.in_flight(sid))
@@ -1036,10 +1057,10 @@ class DocumentService:
 
     def outcome(self, document, operation_state=None):
         """``document_outcome`` for a shown document, given the state of the operation reported."""
-        return document_outcome(document["stages"], operation_state,
-                                self._awaited(document["source_id"], document["source_version"]),
-                                self._summary_missing(document["source_id"], document["source_version"]),
-                                self.in_flight(document["source_id"]))
+        sid, version = document["source_id"], document["source_version"]
+        return document_outcome(document["stages"], operation_state, self._awaited(sid, version),
+                                self._summary_missing(sid, version) or self._windows_skipped(sid, version),
+                                self.in_flight(sid))
 
     def show(self, source_id, source_version=None, *, last=_NOT_LOOKED_UP):
         if source_version is None:
@@ -1083,7 +1104,10 @@ class DocumentService:
         # As _summary_missing, from the stages and current version already read.
         summary_missing = ("wiki" in awaited and stages["wiki"]["state"] == "completed"
                            and self.wiki_summary_hook is not None and bool(self.wiki_summary_hook(source_id)))
-        outcome = document_outcome(stages, last["state"] if last else None, awaited, summary_missing, in_flight)
+        windows = self._window_report(source_id, source_version)
+        windows_skipped = "wiki" in awaited and stages["wiki"]["state"] == "completed" and windows["skipped"] > 0
+        outcome = document_outcome(stages, last["state"] if last else None, awaited,
+                                   summary_missing or windows_skipped, in_flight)
         # A wiki or vault stage that nothing runs once the import finished waits for a retry.
         stalled = () if in_flight or outcome != "completed_with_errors" else [
             name for name in awaited if stages[name]["state"] in {"pending", "running"}]
@@ -1096,7 +1120,9 @@ class DocumentService:
             "chunks": self.catalog.list_provider_chunks(source_id, source_version),
             "last_operation_id": last["operation_id"] if last else None,
             "outcome": outcome,
-            "problems": document_problems(source_id, stages, extractions, summary_missing, stalled),
+            "problems": document_problems(source_id, stages, extractions, summary_missing, stalled, windows_skipped),
+            # Claims the model wrote that failed their checks in the last wiki compile; kept, only counted here.
+            "wiki_dropped_claims": windows["dropped"],
             # The page exists for the user once its note is in the vault.
             "wiki_page_id": page_id if page and page["current_revision"] and receipts else None,
             # Path of the page's newest projected note from the vault root; the receipt is

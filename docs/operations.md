@@ -476,7 +476,11 @@ failed its checks), `wiki_interrupted` (an earlier run stopped part-way),
 `wiki_evidence_limit` (one passage is too large for a model request) and
 `wiki_no_evidence` (the document has no text to summarise). The last two come back
 the same way on every retry, so their `next_step` suggests none. Any other failure
-inside LifeContext reports `internal_error`. A wiki stage that completed but whose
+inside LifeContext reports `internal_error`. A wiki stage that completed without
+some of its evidence windows (the model failed on them; see
+[Document OCR and standalone wiki refresh](#document-ocr-and-standalone-wiki-refresh)) is listed in `problems` as
+`wiki_windows_skipped`; `documents retry SOURCE_ID` compiles the page again and
+asks the model only for those windows. A wiki stage that completed but whose
 page has no model summary is listed in `problems` as `wiki_summary_missing`;
 `documents retry SOURCE_ID` asks the model for the summary alone and publishes
 the same claims with it, without reading the evidence again. A page keeps room
@@ -670,6 +674,7 @@ test fails when the two differ).
 - `wiki_provider_failed`: The model did not answer while the document's wiki page was compiled. Next: check the model with `lifecontext doctor --model-probe`, then run `lifecontext documents retry SOURCE_ID`.
 - `wiki_update_rejected`: The compiled wiki page failed its checks and was not saved. Next: run `lifecontext documents retry SOURCE_ID`.
 - `wiki_interrupted`: An earlier wiki run for the document stopped part-way. Next: run `lifecontext documents retry SOURCE_ID`.
+- `wiki_windows_skipped`: The wiki page was published without the parts of the document the model failed on. Next: run `lifecontext documents retry SOURCE_ID`; it asks only for those parts.
 - `wiki_evidence_limit`: One passage of the document is too large for a single model request, so a retry fails the same way. Next: import a version with shorter passages.
 - `wiki_no_evidence`: The document has no readable text to compile a wiki page from, so a retry fails the same way. Next: check what was read with `lifecontext documents show SOURCE_ID`.
 
@@ -1266,7 +1271,31 @@ its text (1 to 8, never more than its share of the 48) for the document's own
 page; windows never create other pages. Each claim is checked on its own: a window
 keeps its valid claims when others fail their quote check, the dropped ones are
 logged as counts and an error code (never the text), and only a window with no valid
-claim is rejected and asked again once. After the summary below, one
+claim is rejected and asked again once. A quote is found in its cited passages byte
+for byte, else once both are normalised (Unicode NFKC, any run of whitespace as one
+space, every quotation mark as `'` or `"`, every dash as `-`, no soft hyphens or
+other format characters, no hyphen breaking a word across lines), else, for a quote
+of at least 20 normalised characters, as the one span of those passages whose
+character trigrams are at least 85% alike (Dice) with its characters in the same
+order (85% by `difflib`) and no other span within 5 points of it; the near search
+covers passages of up to 60,000 characters and 32 quotes per answer. The page stores
+the exact text of that span as the quote and the matching part of it as the claim,
+so a published claim and quote are always literal text of the extraction, and a
+paraphrase or reordered sentence is still rejected. Dropped claims are kept, with
+their reason (`quote_not_found`, `claim_not_in_quote` or `invalid_citation`), in
+`wiki-windows.json` next to the version's extractions under
+`~/.lifeweave/derived/`; a forget or delete removes the file, and `documents show`
+gives only their number (`wiki_dropped_claims`). The same file keeps each checked
+window, keyed by the version's checksum and extraction revision, a hash of the
+window's evidence, the claims asked for, the model and the compile instructions: a
+retry or `wiki rebuild` checks the kept claims again without the model and asks only
+for windows that are missing or whose claims no longer check out (without a model
+name, as with Hindsight reflect, nothing is reused). A window that still fails after
+the call's retries is skipped and the page publishes from the others, with the wiki
+stage `completed` and `wiki_windows_skipped` in `problems` until a retry fills them;
+after two windows in a row fail at the provider, the rest are skipped without
+asking. Only when no window validates does the stage fail, with the first window's
+code. After the summary below, one
 routing request places the own page's checked claims on shared pages: the model
 sees the claims by number, a catalog of up to 300 existing `topic_`/`entity_`
 pages (12 KB, pages that already cite the document first, then by words shared
@@ -1367,8 +1396,12 @@ and an index whose managed text was edited by hand is left alone until resolved.
 with the pinned LLM provider using the same validated model, URL, reasoning
 effort, and private credential file. Compilation supplies bounded evidence
 and no tools; Hindsight recall/reflect remains available for retrieval. Each
-compile call has a 180-second deadline, no automatic transport retry, and
-closes its provider client. A response rejected by schema/citation validation
-may be regenerated once for that window after rechecking the source; a second
-rejection stops publication. OpenAI chat-compatible compilation requests
+compile call has a 180-second deadline per attempt and closes its provider client;
+a timeout, rate limit (429), server error (5xx) or lost connection is asked again
+up to three times, after 2, 4 and 8 seconds or the provider's `Retry-After` up to
+120 seconds (a longer `Retry-After` ends the retries), and any other failure is not
+retried. The service imports the provider client in a background thread when it
+starts, so the first compile does not spend its deadline on the import. A response
+rejected by schema/citation validation may be regenerated once for that window after
+rechecking the source; a second rejection skips that window. OpenAI chat-compatible compilation requests
 JSON-object mode, which the selected endpoint must support. Schema and literal-citation validation still gate publication.
