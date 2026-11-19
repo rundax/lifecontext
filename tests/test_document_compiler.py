@@ -2,11 +2,22 @@
 import asyncio
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from lifecontext.hindsight import HindsightStartupError, document_compiler
+
+
+class StatusError(Exception):
+    """A provider SDK's HTTP error: a status, the response headers and a message holding the key."""
+
+    def __init__(self, status, headers=None):
+        super().__init__("provider said private-test-key")
+        self.status_code = status
+        self.response = SimpleNamespace(headers=headers or {})
 
 
 class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
@@ -78,3 +89,85 @@ class DocumentCompilerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await asyncio.to_thread(server.shutdown)
             server.server_close()
+
+    async def compile_with(self, *answers):
+        """Run one compile whose provider calls raise or return ``answers`` in turn; the sleeps are recorded."""
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}), \
+                patch("hindsight_api.engine.llm_wrapper.LLMProvider") as factory, \
+                patch("lifecontext.hindsight.asyncio.sleep", new=AsyncMock()) as sleep:
+            model = factory.return_value
+            model.call = AsyncMock(side_effect=list(answers))
+            model.cleanup = AsyncMock()
+            compile_document = document_compiler({"llm": {"provider": "openai", "model": "chosen"}})
+            try:
+                return await compile_document("evidence"), model, sleep
+            except HindsightStartupError as error:
+                self.assertNotIn("private-test-key", str(error))
+                return error, model, sleep
+
+    async def test_transient_failures_are_asked_again_with_backoff(self):
+        for failure in (StatusError(503), TimeoutError(), ConnectionResetError("reset")):
+            with self.subTest(failure=type(failure).__name__):
+                result, model, sleep = await self.compile_with(failure, StatusError(500), '{"claims":[]}')
+                self.assertEqual(result, {"text": '{"claims":[]}'})
+                self.assertEqual(model.call.await_count, 3)
+                self.assertEqual([call.args[0] for call in sleep.await_args_list], [2.0, 4.0])
+                # Each attempt closes its own client.
+                self.assertEqual(model.cleanup.await_count, 3)
+
+    async def test_retry_after_is_honoured_up_to_its_cap(self):
+        result, model, sleep = await self.compile_with(StatusError(429, {"retry-after": "7"}), '{"claims":[]}')
+        self.assertEqual(result, {"text": '{"claims":[]}'})
+        self.assertEqual([call.args[0] for call in sleep.await_args_list], [7.0])
+        # A wait longer than the cap is not slept through: the call fails now.
+        result, model, sleep = await self.compile_with(StatusError(429, {"retry-after": "600"}), '{"claims":[]}')
+        self.assertIsInstance(result, HindsightStartupError)
+        self.assertEqual(model.call.await_count, 1)
+        sleep.assert_not_awaited()
+
+    async def test_permanent_failures_are_not_asked_again(self):
+        for failure in (StatusError(401), StatusError(400), ValueError("invalid response")):
+            with self.subTest(failure=failure):
+                result, model, sleep = await self.compile_with(failure, '{"claims":[]}')
+                self.assertIsInstance(result, HindsightStartupError)
+                self.assertEqual(result.code, "document_generation_failed")
+                self.assertEqual(model.call.await_count, 1)
+                sleep.assert_not_awaited()
+
+    async def test_three_retries_at_most(self):
+        result, model, sleep = await self.compile_with(*[StatusError(502)] * 5)
+        self.assertIsInstance(result, HindsightStartupError)
+        self.assertEqual(model.call.await_count, 4)
+        self.assertEqual(len(sleep.await_args_list), 3)
+
+    async def test_the_compiler_names_its_model(self):
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}):
+            self.assertEqual(document_compiler({"llm": {"provider": "openai", "model": "chosen"}}).model, "chosen")
+
+
+class WarmImportTests(unittest.TestCase):
+    def compiler(self):
+        with patch("lifecontext.hindsight.load_credentials", return_value={"LIFEWEAVE_LLM_API_KEY": "private-test-key"}):
+            return document_compiler({"llm": {"provider": "openai", "model": "chosen"}})
+
+    def test_the_warm_import_never_blocks_or_fails_the_caller(self):
+        release, started = threading.Event(), threading.Event()
+
+        def slow_import(name):
+            started.set()
+            release.wait(30)
+            raise ImportError("missing")
+
+        compiler = self.compiler()
+        with patch("lifecontext.hindsight.importlib.import_module", side_effect=slow_import) as imported:
+            begun = time.monotonic()
+            thread = compiler.warm()
+            self.assertLess(time.monotonic() - begun, 5)
+            self.assertTrue(started.wait(5))
+            self.assertTrue(thread.daemon and thread.is_alive())
+            with self.assertLogs("lifecontext.hindsight", "WARNING") as logged:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        imported.assert_called_once_with("hindsight_api.engine.llm_wrapper")
+        self.assertEqual(logged.output, ["WARNING:lifecontext.hindsight:Model client preload failed: ImportError"])
