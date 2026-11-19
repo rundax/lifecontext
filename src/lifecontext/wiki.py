@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import difflib
-import functools
 import hashlib
 import json
 import logging
@@ -725,17 +724,18 @@ NEAR_MARGIN = 0.05
 NEAR_MIN_CHARACTERS = 20
 # Bounds on the CPU a model response can cost: passages longer than these are matched
 # byte for byte only (NORMALISE_MAX_CHARACTERS) or without the near rung, each near
-# search refines NEAR_CANDIDATES spans, and one response gets NEAR_ATTEMPTS searches.
+# search refines NEAR_CANDIDATES spans, and one response may normalise and search at most
+# MATCH_BUDGET_CHARACTERS characters (a passage normalised once per response, a quote or
+# claim each time, a near search twice its passage), about half a second on a slow host.
 NORMALISE_MAX_CHARACTERS = 100_000
 NEAR_MAX_CHARACTERS = 60_000
 NEAR_CANDIDATES = 3
-NEAR_ATTEMPTS = 32
+MATCH_BUDGET_CHARACTERS = 400_000
 _QUOTE_MARKS = {**dict.fromkeys(map(ord, "\u2018\u2019\u201a\u201b\u2032`\u00b4"), "'"),
                 **dict.fromkeys(map(ord, "\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb"), '"')}
 _LINE_HYPHEN = re.compile(r"(?<=\w)[-\u00ad\u2010\u2011]\s*\n\s*(?=\w)")
 
 
-@functools.lru_cache(maxsize=16)
 def _normalised(text: str) -> tuple[str, array, array]:
     """``text`` in its matching form, and for each of its characters the span of ``text`` it came from."""
     characters, starts, ends = [], array("q"), array("q")
@@ -832,21 +832,32 @@ def _near_span(needle: str, text: str) -> tuple[int, int] | None:
     return start, end
 
 
-def _locate(needle: str, text: str, budget: list[int] | None) -> tuple[str, bool] | None:
-    """The exact part of ``text`` that ``needle`` quotes once both are normalised, else, while
-    ``budget`` (searches left) lasts, the near span; with whether it was near. None when not found."""
-    if len(text) > NORMALISE_MAX_CHARACTERS:
+def match_budget() -> dict:
+    """What one model response may spend on matching quotes (MATCH_BUDGET_CHARACTERS), with the
+    passages it normalised; dropped with the response, so no document text outlives it."""
+    return {"left": MATCH_BUDGET_CHARACTERS, "forms": {}}
+
+
+def _locate(needle: str, text: str, budget: dict, near: bool = False) -> tuple[str, bool] | None:
+    """The exact part of ``text`` that ``needle`` quotes once both are normalised, else (``near``)
+    the near span; with whether it was near. None when not found or ``budget`` is spent."""
+    forms = budget["forms"]
+    cost = len(needle) + (0 if text in forms else len(text))
+    if len(text) > NORMALISE_MAX_CHARACTERS or cost > budget["left"]:
         return None
-    form, starts, ends = _normalised(text)
+    budget["left"] -= cost
+    if text not in forms:
+        forms[text] = _normalised(text)
+    form, starts, ends = forms[text]
     wanted = _normalised(needle)[0].strip(" ")
     if not wanted:
         return None
     at = form.find(wanted)
     if at >= 0:
         return text[starts[at]:ends[at + len(wanted) - 1]], False
-    if not budget or budget[0] <= 0:
+    if not near or 2 * len(form) > budget["left"]:
         return None
-    budget[0] -= 1
+    budget["left"] -= 2 * len(form)
     span = _near_span(wanted, form)
     return (text[starts[span[0]]:ends[span[1] - 1]], True) if span else None
 
@@ -1032,7 +1043,7 @@ class WikiService:
                 raise WikiError("wiki claim requires literal quote support")
         return list(dependencies.values())
 
-    def _literal(self, claim: Claim, budget: list[int]) -> Claim:
+    def _literal(self, claim: Claim, budget: dict) -> Claim:
         """The claim with each quote replaced by the passage span it matches (see NEAR_RATIO) and
         its text by the part of a stored quote it matches; the near rung for the text only within a
         near quote. What does not match is left as it was, for _validate to reject."""
@@ -1040,7 +1051,7 @@ class WikiService:
         for citation in claim.citations:
             payload = self._evidence(citation.source_id, citation.source_version, citation.extraction_revision)
             text = "".join(s["text"] for s in payload["segments"][citation.passage_start:citation.passage_end])
-            found = None if citation.quote in text else _locate(citation.quote, text, budget)
+            found = None if citation.quote in text else _locate(citation.quote, text, budget, near=True)
             try:
                 citations.append(replace(citation, quote=_text(found[0], 2048)) if found else citation)
                 near.append(bool(found and found[1]))
@@ -1050,7 +1061,7 @@ class WikiService:
         text = claim.text
         if not any(text in citation.quote for citation in citations):
             for citation, approximate in zip(citations, near, strict=True):
-                found = _locate(text, citation.quote, budget if approximate else None)
+                found = _locate(text, citation.quote, budget, near=approximate)
                 if found:
                     text = found[0]
                     break
@@ -1693,7 +1704,7 @@ class WikiService:
             # one bad quote drops that claim, not the whole window. Only a response with
             # nothing valid is rejected (and corrected once).
             # A quote that matches only once normalised, or nearly, is stored as the exact passage span.
-            claims, contradictions, dependencies, failure, budget = [], [], [], None, [NEAR_ATTEMPTS]
+            claims, contradictions, dependencies, failure, budget = [], [], [], None, match_budget()
             for claim in patch.claims:
                 try:
                     literal = self._literal(claim, budget)

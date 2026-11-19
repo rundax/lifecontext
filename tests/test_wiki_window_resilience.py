@@ -8,7 +8,7 @@ import test_wiki_claims_per_window
 from wiki_fake_compiler import FakeCompiler
 
 from lifecontext.derived import WIKI_WINDOWS
-from lifecontext.wiki import WikiError, WikiProviderError, source_page_id
+from lifecontext.wiki import WikiError, WikiProviderError, _locate, match_budget, source_page_id
 
 PAGE = source_page_id("doc_1")
 
@@ -363,6 +363,36 @@ class QuoteMatchTests(WindowFixture):
         fixture.update()
         self.assertEqual(self.claims(fixture), [])
         self.assertEqual(self.dropped(fixture), ["quote_not_found"])
+
+    def test_matching_stops_once_the_answer_spent_its_budget(self):
+        texts = [f"Page {n} says \u201chello {n}\u201d to all." for n in range(6)]
+        fixture = self.segments(texts)
+
+        def window(data):
+            citation = data["example_patch"]["claims"][0]["citations"][0]
+            self.anchor = texts[0]
+            claims = [{"text": text.replace("\u201c", '"').replace("\u201d", '"'),
+                       "citations": [{**citation, "passage_start": n, "passage_end": n + 1,
+                                      "quote": text.replace("\u201c", '"').replace("\u201d", '"')}]}
+                      for n, text in enumerate(texts)]
+            anchor = {"text": texts[0], "citations": [{**citation, "passage_start": 0, "passage_end": 1, "quote": texts[0]}]}
+            return {**data["example_patch"], "claims": [*claims, anchor]}
+
+        fixture.service.compiler.window = window
+        # Room for two claims: each charges its passage and quote, then its text and the stored quote,
+        # about 100 characters in all.
+        with patch("lifecontext.wiki.MATCH_BUDGET_CHARACTERS", 210):
+            fixture.update()
+        self.assertEqual(self.dropped(fixture), ["quote_not_found"] * 4)
+
+    def test_a_passage_is_normalised_once_per_answer_and_charged_once(self):
+        passage = "The rent\u00a0is due."
+        budget = match_budget()
+        self.assertEqual(_locate("The rent is due.", passage, budget), (passage, False))
+        left = budget["left"]
+        self.assertEqual(_locate("rent is", passage, budget), ("rent\u00a0is", False))
+        self.assertEqual(budget["left"], left - len("rent is"))
+        self.assertIsNone(_locate("The rent is due.", "Another passage.", {"left": 10, "forms": {}}))
 
     def test_dropped_claims_are_kept_with_their_reason_and_counted_without_their_text(self):
         fixture = self.segments([SENTENCE])
