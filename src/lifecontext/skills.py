@@ -124,7 +124,7 @@ def _read_instruction_file(path: Path) -> tuple[str | None, Path, int, tuple[int
     Anything else, a large file or text that is not UTF-8 is refused.
     """
     if not path.is_absolute():
-        raise ValueError("codex_home_not_absolute")
+        raise ValueError("path_not_absolute")
     try:
         directory = path.parent.stat()
     except FileNotFoundError:
@@ -152,6 +152,8 @@ def _read_instruction_file(path: Path) -> tuple[str | None, Path, int, tuple[int
         raise ValueError("dangling_symlink") from None
     except OSError:
         raise ValueError("unreadable") from None
+    # shortcut: directory symlinks inside the target's path are still followed, only its last directory is
+    # checked; walk the parents with lstat if that ever matters.
     try:
         descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -166,11 +168,17 @@ def _read_instruction_file(path: Path) -> tuple[str | None, Path, int, tuple[int
             raise ValueError("owned_by_another_user")
         if not os.access(target, os.W_OK):
             raise ValueError("not_writable")
+    except OSError:
+        os.close(descriptor)
+        raise ValueError("unreadable") from None
     except BaseException:
         os.close(descriptor)
         raise
-    with os.fdopen(descriptor, "rb") as stream:
-        data = stream.read(MAX_INSTRUCTION_BYTES + 1)
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            data = stream.read(MAX_INSTRUCTION_BYTES + 1)
+    except OSError:
+        raise ValueError("unreadable") from None
     if len(data) > MAX_INSTRUCTION_BYTES:
         raise ValueError("too_large")
     try:

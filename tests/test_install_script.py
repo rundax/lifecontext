@@ -221,14 +221,20 @@ class InstallScriptTests(unittest.TestCase):
                        '  echo "codex   instructions refused (not_utf8): /h/.codex/AGENTS.md"\n'
                        '  exit 1 ;; esac\n')
         (data_dir / "installed.sha256").write_text("x")
+        # Whatever the command did, a link of ours that is still there goes before the venv does.
+        leftover = self.home / ".claude" / "skills" / "personal-journal-operations"
+        leftover.parent.mkdir(parents=True)
+        leftover.symlink_to("/old/venv/lib/python3.12/site-packages/lifecontext/agent_skill/personal-journal-operations")
         result = self.run_installer("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(leftover))
         self.assertIn("Warning: claude  instructions edited by hand, left alone (hint): /h/.claude/CLAUDE.md",
                       result.stderr)
         self.assertIn("Warning: codex   instructions refused (not_utf8): /h/.codex/AGENTS.md", result.stderr)
         # Exit 1 means the links are gone already: no fallback to the plain command.
         self.assertNotIn("lifecontext skills remove", self.logged())
         self.assertNotIn("Older lifecontext", result.stdout)
+        self.assertIn("Warning: lifecontext skills remove reported a problem (see above)", result.stderr)
         self.assertFalse(data_dir.exists())
 
     @unittest.skipUnless(platform.system() == "Linux", "systemd unit layout")

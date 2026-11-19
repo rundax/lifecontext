@@ -1105,18 +1105,21 @@ uninstall() {
 	if [ -x "$lc" ] && "$lc" --version </dev/null >/dev/null 2>&1; then
 		"$lc" service uninstall </dev/null || warn "lifecontext service uninstall reported a problem (above)"
 		# Exit 1 is a refused or edited block (the links are gone). Anything higher is an older installed
-		# command that does not know --instructions: remove its links the plain way, and by hand when that
-		# fails too, before the venv goes.
+		# command that does not know --instructions: remove its links the plain way first.
 		removal_status=0
 		removal=$("$lc" skills remove --instructions </dev/null) || removal_status=$?
-		if [ "$removal_status" -gt 1 ]; then
-			say "Older lifecontext without --instructions; removing skill links only."
-			"$lc" skills remove </dev/null || remove_skill_links_directly || true
-		fi
 		printf '%s\n' "$removal"
 		# A block the person edited, or a file that cannot be changed, stays; the uninstall goes on.
 		printf '%s\n' "$removal" | grep -E ' instructions (edited by hand|refused)' |
 			while IFS= read -r line; do warn "$line"; done || true
+		if [ "$removal_status" -gt 1 ]; then
+			say "Older lifecontext without --instructions; removing skill links only."
+			"$lc" skills remove </dev/null || true
+		elif [ "$removal_status" -eq 1 ]; then
+			warn "lifecontext skills remove reported a problem (see above)"
+		fi
+		# Idempotent, and removes only our links: whatever the command did, none is left before the venv goes.
+		remove_skill_links_directly || true
 	else
 		remove_units_directly
 		remove_skill_links_directly

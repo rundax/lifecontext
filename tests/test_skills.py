@@ -396,6 +396,14 @@ class InstructionsTests(unittest.TestCase):
             self.assertEqual(report["instructions"][0]["reason"], "unreadable")
         self.assertEqual(self.codex.read_text(), "# codex\n")
 
+    def test_a_failing_stat_or_read_is_refused_as_unreadable(self) -> None:
+        self.put(self.claude, "x\n")
+        with mock.patch("lifecontext.skills.os.fstat", side_effect=OSError("boom")):
+            self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "unreadable")
+        with mock.patch("lifecontext.skills.os.fdopen", side_effect=OSError("boom")):
+            self.assertEqual(self.run_install(agents=("claude",))["instructions"][0]["reason"], "unreadable")
+        self.assertEqual(self.claude.read_text(), "x\n")
+
     def test_a_file_changed_while_we_prepare_the_write_is_kept(self) -> None:
         self.put(self.claude, "mine\n")
         real = skills_module.atomic_write
@@ -412,7 +420,7 @@ class InstructionsTests(unittest.TestCase):
 
     def test_a_relative_codex_home_is_refused_and_setuid_bits_are_dropped(self) -> None:
         report = install(self.home, ["codex"], environ={"CODEX_HOME": "relative-codex"}, instructions=True)
-        self.assertEqual(report["instructions"][0]["reason"], "codex_home_not_absolute")
+        self.assertEqual(report["instructions"][0]["reason"], "path_not_absolute")
         self.assertFalse(report["ok"])
         self.put(self.claude, "x\n")
         self.claude.chmod(0o4644)
