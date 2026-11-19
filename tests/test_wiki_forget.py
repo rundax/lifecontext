@@ -117,6 +117,22 @@ class ForgetWithdrawsWikiTextTests(unittest.TestCase):
             self.assertNotIn(withdrawn, json.dumps(finding))
             self.assertNotEqual(finding["page_id"], "topic_copywriting", finding)
 
+    def test_a_forget_or_delete_removes_the_kept_wiki_windows_and_dropped_claims(self):
+        self.compiler.model = "fake-model"
+        derived = self.app.paths.lifeweave_home / "derived"
+        forgotten = self.import_text("Secret notes.txt", "Coffee is a stimulant. Copywriting is persuasive writing.", "x")
+        deleted = self.import_text("Other notes.txt", "Coffee is a sedative.", "y")
+        kept = self.import_text("Kept notes.txt", "Copywriting is a craft.", "z")
+        for source_id in (forgotten, deleted, kept):
+            self.assertTrue((derived / source_id / "v1" / "wiki-windows.json").is_file(), source_id)
+        self.curate("forget", forgotten)
+        # A forget keeps the extraction and removes the windows; a delete removes both.
+        self.assertFalse((derived / forgotten / "v1" / "wiki-windows.json").exists())
+        self.assertTrue((derived / forgotten / "v1" / "r1.json").is_file())
+        self.curate("delete", deleted)
+        self.assertFalse((derived / deleted).exists())
+        self.assertTrue((derived / kept / "v1" / "wiki-windows.json").is_file())
+
     def test_a_forgotten_document_takes_no_new_version(self):
         withdrawn = self.import_text("Secret notes.txt", "Coffee is a stimulant.", "x")
         self.curate("forget", withdrawn)

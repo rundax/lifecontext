@@ -23,6 +23,10 @@ from lifecontext.custody import (
 from lifecontext.paths import LifeContextPaths
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+# The wiki's per-window record of a version (checked claims, skipped windows, dropped
+# claims), next to its extractions so a delete removes it with them; a forget removes
+# it with remove_wiki_windows. Its shape belongs to WikiService.
+WIKI_WINDOWS = "wiki-windows.json"
 
 
 class DerivedError(ValueError):
@@ -331,6 +335,61 @@ class DerivedStore:
             os.rmdir(source_id, dir_fd=derived)
             os.fsync(derived)
 
+    def read_wiki_windows(self, source_id: str, source_version: int) -> dict[str, Any] | None:
+        """The wiki's window record of one version, or None when there is none or it is not JSON."""
+        _identity(source_id, source_version, 1)
+        if not os.path.lexists(self.artifact_path(source_id, source_version, 1).parent / WIKI_WINDOWS):
+            return None
+        with self._directories(("derived", source_id, f"v{source_version}"), create=False) as descriptors:
+            raw = _read_private_file(descriptors[-1], WIKI_WINDOWS, MAX_ARTIFACT_BYTES)
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def write_wiki_windows(self, source_id: str, source_version: int, record: Mapping[str, Any]) -> None:
+        """Replace the window record of a version whose extraction directory exists."""
+        _identity(source_id, source_version, 1)
+        raw = _canonical(record)
+        with self._directories(("derived", source_id, f"v{source_version}"), create=False) as descriptors:
+            directory = descriptors[-1]
+            temporary = f".staging-{secrets.token_hex(16)}"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+            try:
+                try:
+                    offset = 0
+                    while offset < len(raw):
+                        offset += os.write(descriptor, raw[offset:])
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.replace(temporary, WIKI_WINDOWS, src_dir_fd=directory, dst_dir_fd=directory)
+            except BaseException:
+                os.unlink(temporary, dir_fd=directory)
+                raise
+            os.fsync(directory)
+
+    def remove_wiki_windows(self, source_id: str) -> None:
+        """Remove the window record of every version of a source; its extractions stay."""
+        _identity(source_id, 1, 1)
+        if not os.path.lexists(self.paths.lifeweave_home / "derived" / source_id):
+            return
+        with self._directories(("derived", source_id), create=False) as descriptors:
+            source_fd = descriptors[-1]
+            for version_name in os.listdir(source_fd):
+                if re.fullmatch(r"v[1-9][0-9]{0,9}", version_name) is None:
+                    raise DerivedError("unexpected derived entry")
+                version_fd = _open_child_dir(source_fd, version_name, create=False)
+                try:
+                    os.unlink(WIKI_WINDOWS, dir_fd=version_fd)
+                    os.fsync(version_fd)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    os.close(version_fd)
+
     def list_inventory(self, *, limit: int = 4096) -> list[tuple[str, int, int]]:
         """Return verified extraction identities; unexpected entries fail closed."""
         if type(limit) is not int or not 1 <= limit <= 4096:
@@ -364,7 +423,7 @@ class DerivedStore:
                                 source_fd, version_name, create=False
                             )
                             try:
-                                revisions = sorted(os.listdir(version_fd))
+                                revisions = sorted(name for name in os.listdir(version_fd) if name != WIKI_WINDOWS)
                                 if len(inventory) + len(revisions) > limit:
                                     raise DerivedError(
                                         "derived inventory limit exceeded"

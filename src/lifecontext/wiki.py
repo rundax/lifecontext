@@ -52,6 +52,14 @@ MAX_ROUTES = 6
 MAX_ROUTE_CLAIMS = 8
 MAX_TARGET_PAGES = 16
 MAX_QUERY_BYTES = 60_000
+# A window that still fails after the provider's own retries is skipped and the page
+# publishes from the others; after this many windows in a row failed at the provider,
+# the remaining windows are skipped without asking, so a provider that is down costs
+# minutes, not one timeout per window.
+MAX_PROVIDER_FAILED_WINDOWS = 2
+# Why a claim or contradiction of a model answer was dropped, by the check that failed.
+_DROP_REASONS = {"wiki quote not found": "quote_not_found",
+                 "wiki claim requires literal quote support": "claim_not_in_quote"}
 ROUTING_CATALOG_ENTRIES = 300
 ROUTING_CATALOG_BYTES = 12_000
 ROUTING_CLAIM_BYTES = 24_000
@@ -1626,8 +1634,17 @@ class WikiService:
                 self._evidence(source_id, version, extraction_revision)
                 query = "Correct the rejected JSON response: " + str(exc) + ". " + correction + query
 
-    async def _compile_window(self, query, target, source_id, version, extraction_revision, window_index=0) -> WikiPatch:
-        """One evidence window's claims for the document's own page; shared pages come from routing."""
+    async def _compile_window(self, query, target, source_id, version, extraction_revision, window_index=0,
+                              dropped: list | None = None) -> WikiPatch:
+        """One evidence window's claims for the document's own page; shared pages come from routing.
+
+        Each claim or contradiction that fails its checks is appended to ``dropped`` as the model
+        wrote it, with a reason code (``_DROP_REASONS``, else ``invalid_citation``)."""
+        dropped = [] if dropped is None else dropped
+
+        def drop(kind: str, item: Any, exc: WikiError) -> None:
+            dropped.append({"kind": kind, "reason": _DROP_REASONS.get(str(exc), "invalid_citation"), kind: asdict(item)})
+
         def validate(text):
             patches = parse_patches(text)
             if len(patches) != 1:
@@ -1652,6 +1669,7 @@ class WikiService:
                     claims.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
+                    drop("claim", claim, exc)
             for contradiction in patch.contradictions:
                 try:
                     literal = replace(contradiction, left=self._literal(contradiction.left, budget),
@@ -1660,6 +1678,7 @@ class WikiService:
                     contradictions.append(literal)
                 except WikiError as exc:
                     failure = failure or exc
+                    drop("contradiction", contradiction, exc)
             dropped = len(patch.claims) - len(claims) + len(patch.contradictions) - len(contradictions)
             if dropped:
                 # Codes and counts only: the quotes are the user's document text.
@@ -1674,6 +1693,52 @@ class WikiService:
 
         return await self._request(query, validate, source_id, version, extraction_revision,
                                    correction="Follow the example structure exactly. Copy a short quote verbatim, preserving whitespace. ")
+
+    @staticmethod
+    def _window_key(evidence: dict, window: dict, asked: int, model: str | None) -> str:
+        """What a window's checked claims depend on: the version's bytes and extraction, the window's
+        own evidence (its index shifts with the target title's length), the claims asked for, the
+        model and the instructions."""
+        return hashlib.sha256(_canonical({
+            "original_sha256": evidence["original_checksum"], "extraction_revision": evidence["extraction_revision"],
+            "window": hashlib.sha256(_canonical(window).encode()).hexdigest(), "max_claims": asked, "model": model,
+            "instructions": hashlib.sha256(COMPILE_INSTRUCTIONS.encode()).hexdigest()}).encode()).hexdigest()
+
+    def _window_record(self, source_id: str, version: int, extraction: Mapping[str, Any]) -> dict:
+        """The version's window entries by key, when they come from ``extraction`` (an evidence payload
+        or an extraction row); otherwise none."""
+        try:
+            record = self.derived.read_wiki_windows(source_id, version)
+        except ValueError:  # an unreadable record is replaced by the next compile
+            return {}
+        checksum = extraction.get("original_checksum") or extraction.get("original_sha256")
+        if (not isinstance(record, dict) or record.get("original_sha256") != checksum
+                or record.get("extraction_revision") != extraction["extraction_revision"]
+                or not isinstance(record.get("windows"), dict)):
+            return {}
+        return record["windows"]
+
+    def _reuse_window(self, entry: Any, target: dict) -> WikiPatch | None:
+        """A cached window's claims on the target's current revision, checked again without the model;
+        None when there are none or any of them no longer validates."""
+        if not isinstance(entry, dict) or not isinstance(entry.get("patch"), dict):
+            return None
+        try:
+            patch = WikiPatch.parse(json.dumps(entry["patch"], ensure_ascii=False))
+            patch = replace(patch, page_id=target["page_id"], title=target["title"],
+                            expected_revision=target["current_revision"])
+            self._validate(patch)
+        except WikiError:
+            return None
+        return patch
+
+    def window_report(self, source_id: str, version: int) -> dict:
+        """How many evidence windows the version's last compile skipped and how many claims it dropped,
+        for its current extraction; counts only, never their text."""
+        rows = self.catalog.list_extractions(source_id, version)
+        windows = self._window_record(source_id, version, rows[-1]).values() if rows else ()
+        return {"skipped": sum(isinstance(entry, dict) and entry.get("patch") is None for entry in windows),
+                "dropped": sum(len(entry.get("dropped") or ()) for entry in windows if isinstance(entry, dict))}
 
     async def _summarize(self, patch: WikiPatch, source_id: str, version: int, extraction_revision: int) -> WikiPatch:
         """Ask once for a short summary of the page's validated claims; the page is returned with it.
@@ -2156,7 +2221,9 @@ class WikiService:
         One routing request then places its claims on existing or new topic/entity
         pages; the model only names claims by number and writes no quotes. A failed
         summary or routing, or a shared page that still conflicts after one reload,
-        never fails the document.
+        never fails the document. Neither does a window that still fails: it is skipped
+        (``window_report``) and the page publishes from the others; only when no window
+        validates does the stage fail, with the first window's reason.
         """
         _id(source_id)
         _integer(version)
@@ -2194,19 +2261,43 @@ class WikiService:
                         "passage_end": segment["passage_index"] + 1, "original_sha256": evidence["original_checksum"],
                         "quote": quote}]}
 
+            # Checked windows are kept by _window_key; with a named model a rebuild or retry asks
+            # only for windows not kept or whose claims no longer validate.
+            model = getattr(self.compiler, "model", None)
+            cached = self._window_record(source_id, version, evidence) if model is not None else {}
+            record, failures, provider_failures = {}, [], 0
             for window in windows:
                 window_count += 1
                 asked = min(window_claims(window), quota)
-                first, last = window["segments"][0], window["segments"][-1]
-                examples = [first, last] if asked > 1 and last["passage_index"] != first["passage_index"] else [first]
-                example = {"page_id": own_id, "title": target["title"], "expected_revision": target["current_revision"],
-                           "claims": [example_claim(segment) for segment in examples], "contradictions": [], "links": []}
-                query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "max_claims": asked, "example_patch": example,
-                                                           "evidence": window}, ensure_ascii=False, separators=(",", ":"))
-                # Every returned claim is checked against its quote; the window keeps the
-                # first `asked` distinct ones, so a repeated claim does not use up a slot.
-                patch = await self._compile_window(query, target, source_id, version, extraction_revision,
-                                                   window_count)
+                key = self._window_key(evidence, window, asked, model)
+                patch = self._reuse_window(cached.get(key), target)
+                if patch is not None:
+                    record[key] = cached[key]
+                elif provider_failures >= MAX_PROVIDER_FAILED_WINDOWS:
+                    record[key] = {"patch": None, "dropped": []}
+                    continue
+                else:
+                    first, last = window["segments"][0], window["segments"][-1]
+                    examples = [first, last] if asked > 1 and last["passage_index"] != first["passage_index"] else [first]
+                    example = {"page_id": own_id, "title": target["title"], "expected_revision": target["current_revision"],
+                               "claims": [example_claim(segment) for segment in examples], "contradictions": [], "links": []}
+                    query = COMPILE_INSTRUCTIONS + json.dumps({"target": target, "max_claims": asked, "example_patch": example,
+                                                               "evidence": window}, ensure_ascii=False, separators=(",", ":"))
+                    # Every returned claim is checked against its quote; the window keeps the
+                    # first `asked` distinct ones, so a repeated claim does not use up a slot.
+                    dropped: list = []
+                    try:
+                        patch = await self._compile_window(query, target, source_id, version, extraction_revision,
+                                                           window_count, dropped)
+                    except Exception as exc:  # noqa: BLE001 -- one failed window is skipped, not the page
+                        reason = str(exc) if isinstance(exc, (WikiError, WikiProviderError)) else type(exc).__name__
+                        logging.getLogger(__name__).warning("Wiki window %s of %s skipped: %s", window_count, source_id, reason)
+                        failures.append(exc)
+                        provider_failures = provider_failures + 1 if isinstance(exc, WikiProviderError) else 0
+                        record[key] = {"patch": None, "dropped": dropped}
+                        continue
+                    provider_failures = 0
+                    record[key] = {"patch": patch_record(patch), "dropped": dropped}
                 substantive = tuple(dict.fromkeys(claim for claim in patch.claims
                                                   if not _front_matter(claim.text)))[:asked]
                 if substantive:
@@ -2226,9 +2317,17 @@ class WikiService:
                     logging.getLogger(__name__).warning("Wiki page %s full after evidence window %s", own_id, window_count)
                     break
                 merged = combined
+            # JSON once more: the records hold tuples, which the store's canonical form refuses.
+            self.derived.write_wiki_windows(source_id, version, json.loads(json.dumps({
+                "schema_version": 1, "original_sha256": evidence["original_checksum"],
+                "extraction_revision": extraction_revision, "windows": record}, ensure_ascii=False)))
+            if self.source_withdrawn(source_id, version):
+                # Forgotten or deleted while the model was asked: what was just written goes too.
+                self.derived.remove_wiki_windows(source_id)
             merged = merged or fallback
             if merged is None:
-                raise WikiError("wiki has no evidence windows")
+                # Not one window validated: the first failure decides the stage's error code.
+                raise failures[0] if failures else WikiError("wiki has no evidence windows")
             patch = self._fit(self._retain_contradictions(self._retain_claims(merged, previous), previous), source_id,
                               MAX_SOURCE_CLAIMS, OWN_PAGE_RESERVE_BYTES)
             self._validate(patch)
